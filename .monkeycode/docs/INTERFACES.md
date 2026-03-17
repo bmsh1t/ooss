@@ -423,6 +423,110 @@ func (p *VMPool) Put(vm *goja.Runtime)
 | POST | `/osm/api/llm/chat/completions` | Chat Completions |
 | POST | `/osm/api/llm/embeddings` | Embeddings |
 
+### LLM 类型定义
+
+#### LLMMessage
+
+LLM 消息定义，位于 `internal/core/llm_types.go`:
+
+```go
+type LLMMessage struct {
+    Role       LLMMessageRole  // system, user, assistant, tool
+    Content    interface{}     // string 或 []LLMContentPart (多模态)
+    Name       string          // 命名消息
+    ToolCallID string          // 工具调用 ID
+    ToolCalls  []LLMToolCall  // 工具调用列表
+}
+```
+
+#### LLMTool
+
+LLM 工具定义:
+
+```go
+type LLMTool struct {
+    Type     string          // "function"
+    Function LLMToolFunction // 函数定义
+}
+
+type LLMToolFunction struct {
+    Name        string                 // 函数名
+    Description string                 // 描述
+    Parameters  map[string]interface{} // JSON Schema
+}
+```
+
+#### LLMStepConfig
+
+LLM 步骤配置 (可覆盖全局配置):
+
+```go
+type LLMStepConfig struct {
+    Provider       string                 // Provider 名称
+    Model          string                 // 模型名称
+    MaxTokens      *int                   // 最大令牌数
+    Temperature    *float64               // 温度
+    TopK           *int                   // Top-K
+    TopP           *float64               // Top-P
+    N              *int                   // 候选数量
+    Timeout        string                 // 超时时间
+    MaxRetries     *int                   // 最大重试
+    Stream         *bool                  // 流式输出
+    ResponseFormat *LLMResponseFormat     // 响应格式 (JSON Schema)
+    CustomHeaders  map[string]string      // 自定义 Headers
+}
+```
+
+#### AgentToolDef
+
+Agent 工具定义:
+
+```go
+type AgentToolDef struct {
+    // 预设工具
+    Preset string // 引用内置工具名称
+    
+    // 自定义工具
+    Name        string                 // 工具名
+    Description string                 // 描述
+    Parameters  map[string]interface{} // JSON Schema
+    Handler     string                 // JS 表达式处理函数
+}
+```
+
+#### AgentMemoryConfig
+
+Agent 记忆配置:
+
+```go
+type AgentMemoryConfig struct {
+    MaxMessages        int    // 滑动窗口大小 (0=无限制)
+    SummarizeOnTruncate bool   // 超出窗口时使用 LLM 摘要
+    PersistPath        string // 保存对话到文件
+    ResumePath         string // 从文件恢复对话
+}
+```
+
+#### SubAgentDef
+
+子 Agent 定义:
+
+```go
+type SubAgentDef struct {
+    Name          string             // 名称
+    Description   string             // 描述
+    SystemPrompt  string             // 系统提示
+    AgentTools    []AgentToolDef     // 可用工具
+    MaxIterations int                // 最大迭代
+    Models        []string           // 模型偏好
+    LLMConfig     *LLMStepConfig     // LLM 配置
+    OutputSchema  string             // 输出 Schema
+    Memory        *AgentMemoryConfig // 记忆配置
+    StopCondition string             // 停止条件 (JS 表达式)
+    SubAgents     []SubAgentDef      // 嵌套子 Agent
+}
+```
+
 ### Agent ACP 接口
 
 | 方法 | 路径 | 说明 |

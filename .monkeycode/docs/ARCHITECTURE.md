@@ -187,21 +187,110 @@ type StepExecutorPlugin interface {
 - 支持模板渲染
 
 ##### LLMExecutor
-- LLM API 调用
-- 支持 OpenAI 兼容接口
-- 支持 Tools 调用
-- 支持 Streaming
+- LLM API 调用 (OpenAI 兼容接口)
+- 支持 Tools 调用 (Function Calling)
+- 支持 Streaming 输出
+- 支持多模态 (图像输入)
+- 支持 Embeddings
+- 支持结构化输出 (JSON Schema)
+- 模型回退机制 (多个模型按顺序尝试)
 
 ##### AgentExecutor
-- Agent 智能体执行循环
-- 支持多种模型
-- 内置工具 (bash, read_file, save_content 等)
-- 支持 Sub-Agent 嵌套
-- 支持 Memory 持久化
+Agent 智能体是 Osmedeus 的核心 AI 功能，提供 Agentic LLM 执行循环：
+
+**核心特性：**
+- **Tool Calling 循环**: 调用 LLM → 执行工具 → 反馈结果 → 循环直到完成
+- **多目标支持**: 通过 `queries` 字段顺序执行多个目标
+- **规划阶段**: 支持 `plan_prompt` 在主循环前进行任务规划
+- **模型偏好**: 通过 `models` 字段指定首选模型列表，支持回退到默认模型
+- **结构化输出**: 支持 `output_schema` 在最终迭代强制 JSON 输出
+- **停止条件**: 支持 `stop_condition` JS 表达式提前终止
+
+**Memory 管理：**
+- **滑动窗口**: `max_messages` 控制保留消息数量
+- **自动摘要**: `summarize_on_truncate` 启用 LLM 摘要压缩
+- **持久化**: `persist_path` 保存对话历史到 JSON
+- **恢复**: `resume_path` 从历史记录恢复对话
+
+**子 Agent 嵌套：**
+- 支持通过 `sub_agents` 定义子 Agent
+- 通过 `spawn_agent` 工具调用子 Agent
+- 最大嵌套深度: 3 层 (可配置)
+- 令牌计数自动合并
+
+**工具 Tracing：**
+- `on_tool_start`: 工具调用前执行的 JS 表达式
+- `on_tool_end`: 工具调用后执行的 JS 表达式
+
+**导出变量：**
+- `agent_content`: 最终内容
+- `agent_history`: 完整对话历史 (JSON)
+- `agent_iterations`: 迭代次数
+- `agent_total_tokens` / `prompt_tokens` / `completion_tokens`: 令牌使用统计
+- `agent_tool_results`: 工具调用结果 (JSON)
+- `agent_plan`: 规划阶段输出
+- `agent_goal_results`: 多目标结果 (JSON)
 
 ##### ACPExecutor
-- 外部 Agent 执行 (通过 ACP 协议)
-- 支持 Claude Code, Codex, OpenCode, Gemini 等
+外部 Agent 执行，通过 Agent Communication Protocol (ACP) 与外部 AI Agent 通信：
+
+**内置 Agent：**
+- `claude-code`: Claude Code (npx @zed-industries/claude-code-acp)
+- `codex`: Codex (npx @zed-industries/codex-acp)
+- `opencode`: OpenCode (opencode acp)
+- `gemini`: Gemini CLI (gemini --experimental-acp)
+
+**配置选项：**
+- `cwd`: 工作目录
+- `allowed_paths`: 允许访问的路径
+- `acp_config.env`: 环境变量
+- `acp_config.write_enabled`: 允许文件写入
+
+**导出变量：**
+- `acp_output`: Agent 输出
+- `acp_stderr`: 错误输出
+- `acp_agent`: 使用的 Agent 名称
+
+##### Agent 工具预设 (Preset Tools)
+
+AgentExecutor 提供丰富的内置工具预设，位于 `internal/core/agent_tool_presets.go`:
+
+| 工具 | 说明 |
+|------|------|
+| `bash` | 执行 Shell 命令 |
+| `read_file` | 读取文件内容 |
+| `read_lines` | 读取文件为行数组 |
+| `file_exists` | 检查文件是否存在 |
+| `file_length` | 统计文件行数 |
+| `append_file` | 追加内容到文件 |
+| `save_content` | 写入内容到文件 |
+| `glob` | 文件名模式匹配 |
+| `grep_string` | 字符串搜索 |
+| `grep_regex` | 正则表达式搜索 |
+| `http_get` | HTTP GET 请求 |
+| `http_request` | HTTP 自定义请求 |
+| `jq` | JSON 查询 |
+| `exec_python` | 执行 Python 代码 |
+| `exec_python_file` | 执行 Python 文件 |
+| `exec_ts` | 执行 TypeScript 代码 (via bun) |
+| `exec_ts_file` | 执行 TypeScript 文件 |
+| `run_module` | 运行 osmedeus 模块 |
+| `run_flow` | 运行 osmedeus 流程 |
+| `spawn_agent` | (动态生成) 嵌套子 Agent |
+
+**自定义工具：**
+支持通过 `agent_tools` 定义自定义工具：
+```yaml
+agent_tools:
+  - name: my_tool
+    description: "自定义工具描述"
+    parameters:
+      type: object
+      properties:
+        arg1:
+          type: string
+    handler: "log_info(args.arg1)"
+```
 
 ### 4. 运行器层 (internal/runner)
 
