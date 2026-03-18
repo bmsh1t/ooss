@@ -301,7 +301,7 @@ func RunAgentACP(ctx context.Context, prompt, agentName string, cfg *RunAgentACP
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs: acp.FileSystemCapability{
 				ReadTextFile:  true,
-				WriteTextFile: cfg.WriteEnabled,
+				WriteTextFile: true, // Always enable to satisfy agents that require this field
 			},
 			Terminal: false,
 		},

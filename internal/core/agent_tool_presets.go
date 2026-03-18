@@ -310,6 +310,262 @@ var PresetToolRegistry = map[string]PresetToolDef{
 			"required": []string{"flow", "target"},
 		},
 	},
+	"run_nmap": {
+		Description: "Run nmap port scan on target",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target IP, hostname, or CIDR range to scan",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional nmap flags (e.g., '-sV -p1-1000')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_nuclei": {
+		Description: "Run nuclei vulnerability scan on target",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target URL or target file",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional nuclei flags (e.g., '-severity critical,high -nc')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_ffuf": {
+		Description: "Run ffuf fuzzing on target URL",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target URL with FUZZ keyword (e.g., 'https://example.com/FUZZ')",
+				},
+				"wordlist": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to wordlist file",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional ffuf flags (e.g., '-mc 200 -t 50')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target", "wordlist"},
+		},
+	},
+	"run_httpx": {
+		Description: "Run httpx HTTP probe on targets",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target file or stdin input",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional httpx flags (e.g., '-threads 50 -follow-redirects')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_subfinder": {
+		Description: "Run subfinder for subdomain enumeration",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target domain to enumerate subdomains",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional subfinder flags (e.g., '-recursive -sources censys,shodan')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_massdns": {
+		Description: "Run massdns for DNS resolution",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Input file with domain names",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional massdns flags (e.g., '-t A -o json')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_sqlmap": {
+		Description: "Run sqlmap for SQL injection testing",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target URL or request file",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional sqlmap flags (e.g., '--batch --level=5 --risk=3')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output directory for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"run_commix": {
+		Description: "Run commix for command injection testing",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target URL",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional commix flags (e.g., '--batch --level=3')",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output directory for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
+	"db_query": {
+		Description: "Query osmedeus database for assets, runs, or vulnerabilities",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"workspace": map[string]interface{}{
+					"type":        "string",
+					"description": "Workspace name or UUID",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Query type: vuls, urls, hosts, ports, runs",
+				},
+				"filters": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional filters as JSON (e.g., '{\"source\":\"nuclei\"}')",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of results to return",
+				},
+			},
+			"required": []string{"workspace", "query"},
+		},
+	},
+	"parse_nuclei_report": {
+		Description: "Parse nuclei JSON report and extract findings",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to nuclei JSON report file",
+				},
+				"severity": map[string]interface{}{
+					"type":        "string",
+					"description": "Filter by severity (critical, high, medium, low, info)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of findings to return",
+				},
+			},
+			"required": []string{"path"},
+		},
+	},
+	"extract_endpoints": {
+		Description: "Extract API endpoints from raw data (JS files, text, etc.)",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"source": map[string]interface{}{
+					"type":        "string",
+					"description": "Source file or directory to analyze",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file for extracted endpoints (optional)",
+				},
+			},
+			"required": []string{"source"},
+		},
+	},
+	"check_takeover": {
+		Description: "Check for subdomain takeover vulnerabilities",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"target": map[string]interface{}{
+					"type":        "string",
+					"description": "Target file with subdomains or single subdomain",
+				},
+				"flags": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional takeover check flags",
+				},
+				"output": map[string]interface{}{
+					"type":        "string",
+					"description": "Output file path for results (optional)",
+				},
+			},
+			"required": []string{"target"},
+		},
+	},
 }
 
 // GetPresetTool returns the LLMTool schema for a preset tool name.

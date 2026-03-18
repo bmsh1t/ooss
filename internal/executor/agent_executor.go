@@ -981,6 +981,30 @@ func buildPresetCallExpr(funcName string, args map[string]interface{}) string {
 		return fmt.Sprintf("run_module(%s, %s, %s)", jsQuote(getStringArg(args, "module")), jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "params")))
 	case "run_flow":
 		return fmt.Sprintf("run_flow(%s, %s, %s)", jsQuote(getStringArg(args, "flow")), jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "params")))
+	case "run_nmap":
+		return fmt.Sprintf("run_nmap(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_nuclei":
+		return fmt.Sprintf("run_nuclei(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_ffuf":
+		return fmt.Sprintf("run_ffuf(%s, %s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "wordlist")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_httpx":
+		return fmt.Sprintf("run_httpx(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_subfinder":
+		return fmt.Sprintf("run_subfinder(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_massdns":
+		return fmt.Sprintf("run_massdns(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_sqlmap":
+		return fmt.Sprintf("run_sqlmap(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "run_commix":
+		return fmt.Sprintf("run_commix(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
+	case "db_query":
+		return fmt.Sprintf("db_query(%s, %s, %s, %d)", jsQuote(getStringArg(args, "workspace")), jsQuote(getStringArg(args, "query")), jsQuote(getStringArg(args, "filters")), getIntArg(args, "limit"))
+	case "parse_nuclei_report":
+		return fmt.Sprintf("parse_nuclei_report(%s, %s, %d)", jsQuote(getStringArg(args, "path")), jsQuote(getStringArg(args, "severity")), getIntArg(args, "limit"))
+	case "extract_endpoints":
+		return fmt.Sprintf("extract_endpoints(%s, %s)", jsQuote(getStringArg(args, "source")), jsQuote(getStringArg(args, "output")))
+	case "check_takeover":
+		return fmt.Sprintf("check_takeover(%s, %s, %s)", jsQuote(getStringArg(args, "target")), jsQuote(getStringArg(args, "flags")), jsQuote(getStringArg(args, "output")))
 	default:
 		var argStrs []string
 		for _, v := range args {
@@ -999,6 +1023,25 @@ func getStringArg(args map[string]interface{}, key string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return ""
+}
+
+// getIntArg safely extracts an integer argument from the args map
+func getIntArg(args map[string]interface{}, key string) int {
+	if v, ok := args[key]; ok {
+		switch n := v.(type) {
+		case int:
+			return n
+		case int64:
+			return int(n)
+		case float64:
+			return int(n)
+		case string:
+			var i int
+			fmt.Sscanf(n, "%d", &i)
+			return i
+		}
+	}
+	return 0
 }
 
 // jsQuote returns a JavaScript string literal, escaping special characters

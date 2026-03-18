@@ -825,6 +825,78 @@ func TestBuildPresetCallExpr(t *testing.T) {
 			args:     map[string]interface{}{"flow": "general", "target": "example.com", "params": ""},
 			expected: `run_flow("general", "example.com", "")`,
 		},
+		{
+			name:     "run_nmap",
+			funcName: "run_nmap",
+			args:     map[string]interface{}{"target": "192.168.1.1", "flags": "-sV", "output": "/tmp/nmap.xml"},
+			expected: `run_nmap("192.168.1.1", "-sV", "/tmp/nmap.xml")`,
+		},
+		{
+			name:     "run_nuclei",
+			funcName: "run_nuclei",
+			args:     map[string]interface{}{"target": "https://example.com", "flags": "-severity critical", "output": "/tmp/nuclei.json"},
+			expected: `run_nuclei("https://example.com", "-severity critical", "/tmp/nuclei.json")`,
+		},
+		{
+			name:     "run_ffuf",
+			funcName: "run_ffuf",
+			args:     map[string]interface{}{"target": "https://example.com/FUZZ", "wordlist": "/tmp/words.txt", "flags": "-t 50", "output": "/tmp/ffuf.json"},
+			expected: `run_ffuf("https://example.com/FUZZ", "/tmp/words.txt", "-t 50", "/tmp/ffuf.json")`,
+		},
+		{
+			name:     "run_httpx",
+			funcName: "run_httpx",
+			args:     map[string]interface{}{"target": "/tmp/domains.txt", "flags": "-threads 50", "output": "/tmp/httpx.json"},
+			expected: `run_httpx("/tmp/domains.txt", "-threads 50", "/tmp/httpx.json")`,
+		},
+		{
+			name:     "run_subfinder",
+			funcName: "run_subfinder",
+			args:     map[string]interface{}{"target": "example.com", "flags": "-recursive", "output": "/tmp/subs.txt"},
+			expected: `run_subfinder("example.com", "-recursive", "/tmp/subs.txt")`,
+		},
+		{
+			name:     "run_massdns",
+			funcName: "run_massdns",
+			args:     map[string]interface{}{"target": "/tmp/domains.txt", "flags": "-t A", "output": "/tmp/dns.json"},
+			expected: `run_massdns("/tmp/domains.txt", "-t A", "/tmp/dns.json")`,
+		},
+		{
+			name:     "run_sqlmap",
+			funcName: "run_sqlmap",
+			args:     map[string]interface{}{"target": "https://example.com/page?id=1", "flags": "--batch", "output": "/tmp/sqlmap"},
+			expected: `run_sqlmap("https://example.com/page?id=1", "--batch", "/tmp/sqlmap")`,
+		},
+		{
+			name:     "run_commix",
+			funcName: "run_commix",
+			args:     map[string]interface{}{"target": "https://example.com/page", "flags": "--batch", "output": "/tmp/commix"},
+			expected: `run_commix("https://example.com/page", "--batch", "/tmp/commix")`,
+		},
+		{
+			name:     "db_query",
+			funcName: "db_query",
+			args:     map[string]interface{}{"workspace": "ws-001", "query": "vuls", "filters": "{}", "limit": 100},
+			expected: `db_query("ws-001", "vuls", "{}", 100)`,
+		},
+		{
+			name:     "parse_nuclei_report",
+			funcName: "parse_nuclei_report",
+			args:     map[string]interface{}{"path": "/tmp/nuclei.json", "severity": "critical", "limit": 50},
+			expected: `parse_nuclei_report("/tmp/nuclei.json", "critical", 50)`,
+		},
+		{
+			name:     "extract_endpoints",
+			funcName: "extract_endpoints",
+			args:     map[string]interface{}{"source": "/tmp/js/", "output": "/tmp/endpoints.txt"},
+			expected: `extract_endpoints("/tmp/js/", "/tmp/endpoints.txt")`,
+		},
+		{
+			name:     "check_takeover",
+			funcName: "check_takeover",
+			args:     map[string]interface{}{"target": "/tmp/subs.txt", "flags": "", "output": "/tmp/takeover.json"},
+			expected: `check_takeover("/tmp/subs.txt", "", "/tmp/takeover.json")`,
+		},
 	}
 
 	for _, tt := range tests {

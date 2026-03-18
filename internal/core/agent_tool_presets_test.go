@@ -47,6 +47,9 @@ func TestGetPresetTool_SpecificPresets(t *testing.T) {
 		"append_file", "save_content", "glob", "grep_string", "grep_regex",
 		"http_get", "http_request", "jq",
 		"exec_python", "exec_python_file", "run_module", "run_flow",
+		"run_nmap", "run_nuclei", "run_ffuf", "run_httpx", "run_subfinder",
+		"run_massdns", "run_sqlmap", "run_commix", "db_query",
+		"parse_nuclei_report", "extract_endpoints", "check_takeover",
 	}
 
 	for _, name := range presets {
