@@ -1,0 +1,379 @@
+# =============================================================================
+# Module Workflow: HTTP Probing & Port Scanning
+# =============================================================================
+# Combined module for comprehensive HTTP discovery:
+# - recon-http-fp: HTTP fingerprinting with httpx
+# - probe-port: Port scanning with rustscan/nmap
+# - cdn-bypass: Origin IP discovery
+# =============================================================================
+
+kind: module
+name: http-probe
+description: Comprehensive HTTP probing, port scanning, and CDN bypass
+tags: http, probe, portscan, fingerprint, cdn, bypass
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # =========================
+  # Feature toggles
+  # =========================
+  - name: enablePortScan
+    type: bool
+    default: true
+  - name: enableCdnBypass
+    type: bool
+    default: true
+  - name: enableSYNScan
+    type: bool
+    default: true
+    description: "Enable SYN scan (may trigger alerts)"
+  - name: enableAnalyticsTracking
+    type: bool
+    default: true
+    description: "Discover subdomains via analytics code relationships"
+  - name: enableUrlScrapingSubs
+    type: bool
+    default: true
+    description: "Scrape URLs for additional subdomains"
+
+  # =========================
+  # Input files
+  # =========================
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: finalSubdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: ipFile
+    default: "{{Output}}/ipspace/ip-{{TargetSpace}}.txt"
+
+  # =========================
+  # HTTP fingerprinting
+  # =========================
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: httpInterestingFile
+    default: "{{Output}}/fingerprint/http-interesting-{{TargetSpace}}.txt"
+  - name: httpFingerprintJsonFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpInterestingJsonFile
+    default: "{{Output}}/fingerprint/http-interesting-{{TargetSpace}}.jsonl"
+  - name: httpInterestingFilteredJsonFile
+    default: "{{Output}}/fingerprint/http-interesting-filtered-{{TargetSpace}}.jsonl"
+  - name: httpInterestingMarkdownFile
+    default: "{{Output}}/fingerprint/http-interesting-filtered-{{TargetSpace}}.md"
+  - name: httpThreads
+    default: "{{ threads * 8 }}"
+  - name: httpTimeout
+    default: "15"
+  - name: httpLimit
+    default: "50000"
+
+  # =========================
+  # Port scanning
+  # =========================
+  - name: openPortsFile
+    default: "{{Output}}/portscan/open-ports-{{TargetSpace}}.txt"
+  - name: httpPortFingerprintJsonlFile
+    default: "{{Output}}/portscan/http-port-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpPortFingerprintFilteredJsonlFile
+    default: "{{Output}}/portscan/http-port-fingerprint-filtered-{{TargetSpace}}.jsonl"
+  - name: httpPortFingerprintMarkdownFile
+    default: "{{Output}}/portscan/http-port-fingerprint-filtered-{{TargetSpace}}.md"
+  - name: commonHttpPorts
+    default: "80,443,8080,8443,8000,8008,81,82,8081,8888,3000,3001,3002,5000,5001,5002,9000,9001,9080,9443"
+  - name: commonHttpsPorts
+    default: "80,443,8080,8443,8000,8008,81,82,8081,8888,3000,3001,3002,5000,5001,5002,9000,9001,9080,9443"
+  - name: rateRustScan
+    default: "{{ threads * 400 }}"
+  - name: rustscanPorts
+    default: "1-65535"
+  - name: rustscanTimeout
+    default: "3000"
+
+  # =========================
+  # CDN Bypass
+  # =========================
+  - name: originOutputDir
+    default: "{{Output}}/probing/origin"
+  - name: originIpsFile
+    default: "{{Output}}/probing/origin/origin-ips-{{TargetSpace}}.txt"
+  - name: slowHostsFile
+    default: "{{Output}}/probing/slow-hosts-{{TargetSpace}}.txt"
+    description: "Hosts returning 403/429 (rate-limited)"
+
+  # =========================
+  # Analytics & Subdomain Discovery
+  # =========================
+  - name: analyticsFile
+    default: "{{Output}}/subdomain/analytics-{{TargetSpace}}.txt"
+  - name: scrapingFile
+    default: "{{Output}}/subdomain/scraping-{{TargetSpace}}.txt"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+
+  # =========================
+  # General config
+  # =========================
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - httpx
+    - hakoriginfinder
+    - analyticsrelationships
+    - unfurl
+    - urlfinder
+    - waymore
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: http-urls
+    path: "{{httpFile}}"
+    type: text
+    description: HTTP URLs discovered
+
+  - name: http-interesting
+    path: "{{httpInterestingMarkdownFile}}"
+    type: markdown
+    description: HTTP Fingerprinting Results
+
+  - name: open-ports
+    path: "{{openPortsFile}}"
+    type: text
+    description: List of open ports
+
+  - name: origin-ips
+    path: "{{originIpsFile}}"
+    type: text
+    description: Discovered origin IPs
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup: Create output folders
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/fingerprint")'
+      - 'create_folder("{{Output}}/probing")'
+      - 'create_folder("{{Output}}/portscan")'
+      - 'create_folder("{{Output}}/synscan")'
+      - 'create_folder("{{originOutputDir}}")'
+
+  # ===========================================================================
+  # Phase 1: HTTP Fingerprinting
+  # ===========================================================================
+  - name: prepare-http-input
+    type: bash
+    log: "Preparing input for HTTP probing"
+    command: 'if [ -f "{{resolvedFile}}" ] && [ -s "{{resolvedFile}}" ]; then INPUT_FILE="{{resolvedFile}}"; elif [ -f "{{finalSubdomainFile}}" ] && [ -s "{{finalSubdomainFile}}" ]; then INPUT_FILE="{{finalSubdomainFile}}"; else exit 1; fi && INPUT_COUNT=$(wc -l < "$INPUT_FILE" 2>/dev/null || echo 0) && if [ "$INPUT_COUNT" -gt {{httpLimit}} ]; then head -n {{httpLimit}} "$INPUT_FILE" > {{Output}}/probing/http-input-{{TargetSpace}}.txt; else cp "$INPUT_FILE" {{Output}}/probing/http-input-{{TargetSpace}}.txt; fi'
+
+  - name: http-fingerprint
+    type: bash
+    log: "HTTP probing and fingerprinting with httpx"
+    pre_condition: 'file_exists("{{Output}}/probing/http-input-{{TargetSpace}}.txt")'
+    command: 'cat {{Output}}/probing/http-input-{{TargetSpace}}.txt | httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain 2>/dev/null | tee {{httpFingerprintJsonFile}} | jq -r ".url" 2>/dev/null > {{httpFile}} || true'
+
+  - name: identify-slow-hosts
+    type: bash
+    log: "Identifying slow hosts (403/429 responses)"
+    pre_condition: 'file_exists("{{httpFingerprintJsonFile}}")'
+    command: |
+      : > {{slowHostsFile}}
+      if [ -s "{{httpFingerprintJsonFile}}" ]; then
+        # 提取返回 403 或 429 的主机 (与 reconftw 一致)
+        jq -r 'try select(.status_code==403 or .status_code==429) | .url' {{httpFingerprintJsonFile}} 2>/dev/null  | awk -F/ '{print $3}' | sed 's/:.*$//' | sed '/^$/d' | sort -u > {{slowHostsFile}} || true
+        if [ -s "{{slowHostsFile}}" ]; then
+          count=$(wc -l < {{slowHostsFile}})
+          echo "[slow-hosts] Found $count hosts with 403/429 responses"
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  - name: cleanup-http-temp
+    type: function
+    log: "Cleaning up temp files"
+    functions:
+      - 'exec_cmd("rm -f {{Output}}/probing/http-input-{{TargetSpace}}.txt 2>/dev/null || true")'
+
+  - name: create-unique-jsonl
+    type: function
+    log: "Creating unique HTTP file based on host, status code, and body hash"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    functions:
+      - jsonl_unique("{{httpFingerprintJsonFile}}", "{{httpInterestingJsonFile}}", "host,status,hash.body_sha256")
+      - exec_cmd("cat {{httpInterestingJsonFile}} | jq -r '.url' > {{httpInterestingFile}} 2>/dev/null || true")
+
+  - name: fallback-interesting-http
+    type: function
+    log: "Creating HTTP interesting if unique failed"
+    pre_condition: '!file_exists("{{httpInterestingFile}}") || file_length("{{httpInterestingFile}}") < 1'
+    functions:
+      - exec_cmd("cp {{httpFile}} {{httpInterestingFile}} 2>/dev/null || true")
+      - exec_cmd("cp {{httpFingerprintJsonFile}} {{httpInterestingJsonFile}} 2>/dev/null || true")
+
+  - name: beautify-http-results
+    type: function
+    log: "Beautifying HTTP results"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    functions:
+      - jsonl_filter("{{httpInterestingJsonFile}}", "{{httpInterestingFilteredJsonFile}}", "url,title,status_code,content_length,lines,webserver,tech,cdn")
+      - 'convert_jsonl_to_markdown("{{httpInterestingFilteredJsonFile}}", "{{httpInterestingMarkdownFile}}")'
+      - 'db_total_urls("{{httpFingerprintJsonFile}}")'
+      - 'db_total_assets("{{httpFingerprintJsonFile}}")'
+      - 'db_import_asset_from_file("{{TargetSpace}}", "{{httpFingerprintJsonFile}}")'
+
+  # ===========================================================================
+  # Phase 2: Port Scanning (optional)
+  # ===========================================================================
+  - name: port-scan-with-rustscan
+    type: bash
+    log: "Running port scan with rustscan"
+    pre_condition: "{{enablePortScan}} && {{enableSYNScan}} && file_exists(\"{{ipFile}}\")"
+    command: |
+      rustscan --timeout {{rustscanTimeout}} -b {{rateRustScan}} --scripts None --range {{rustscanPorts}} -a {{ipFile}} 2>/dev/null | grep "Open" | awk '{print $2}' >> {{openPortsFile}} || true
+    on_error:
+      - action: continue
+
+  - name: http-probe-ports
+    type: bash
+    log: "Probing for HTTP services on open ports"
+    pre_condition: "{{enablePortScan}} && file_exists(\"{{ipFile}}\")"
+    command: 'cat {{ipFile}} | httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain -ports "http:{{commonHttpPorts}},https:{{commonHttpsPorts}}" 2>/dev/null >> {{httpPortFingerprintJsonlFile}} || true'
+    on_error:
+      - action: continue
+
+  - name: process-port-results
+    type: function
+    log: "Processing port scan results"
+    pre_condition: "{{enablePortScan}} && file_exists(\"{{httpPortFingerprintJsonlFile}}\")"
+    functions:
+      - exec_cmd("cat {{httpPortFingerprintJsonlFile}} | jq -r '[.host_ip,.port] | join(\":\")' >> {{openPortsFile}} 2>/dev/null || true")
+      - sort_unix("{{openPortsFile}}")
+      - jsonl_filter("{{httpPortFingerprintJsonlFile}}", "{{httpPortFingerprintFilteredJsonlFile}}", "url,title,status_code,content_length,lines,webserver,tech,cdn")
+      - convert_jsonl_to_markdown("{{httpPortFingerprintFilteredJsonlFile}}", "{{httpPortFingerprintMarkdownFile}}")
+      - 'db_total_assets("{{openPortsFile}}")'
+
+  # ===========================================================================
+  # Phase 3: CDN Bypass (optional)
+  # ===========================================================================
+  - name: cdn-bypass-scan
+    type: bash
+    log: "Running CDN bypass / origin discovery"
+    pre_condition: "{{enableCdnBypass}} && file_exists(\"{{httpFile}}\") && file_length(\"{{httpFile}}\") > 0"
+    command: |
+      mkdir -p {{originOutputDir}} 2>/dev/null || true
+      cut -d "/" -f3 {{httpFile}} 2>/dev/null | cut -d ":" -f1 | sort -u > {{originOutputDir}}/hosts-input.txt
+
+      if [ -s "{{originOutputDir}}/hosts-input.txt" ]; then
+        hakoriginfinder < {{originOutputDir}}/hosts-input.txt > {{originIpsFile}}.raw 2>/dev/null || true
+
+        grep -aoE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" {{originIpsFile}}.raw 2>/dev/null | sort -u > {{originIpsFile}} || true
+        rm -f {{originIpsFile}}.raw 2>/dev/null || true
+
+        grep -aEiv "^(127|10|169\.254|172\.1[6-9]|172\.2[0-9]|172\.3[0-1]|192\.168)\." {{originIpsFile}} > {{originIpsFile}}.public 2>/dev/null || true
+        mv {{originIpsFile}}.public {{originIpsFile}} 2>/dev/null || true
+
+        if [ -s "{{originIpsFile}}" ]; then
+          cat {{originIpsFile}} >> {{ipFile}} 2>/dev/null || true
+          sort -u {{ipFile}} -o {{ipFile}} 2>/dev/null || true
+          count=$(wc -l < {{originIpsFile}} | tr -d ' ')
+          echo "[cdn-bypass] Found $count origin IPs"
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  - name: cdn-bypass-summary
+    type: function
+    log: "CDN bypass summary"
+    pre_condition: "{{enableCdnBypass}} && file_exists(\"{{originIpsFile}}\")"
+    functions:
+      - 'db_total_assets("{{originIpsFile}}")'
+
+  # ===========================================================================
+  # Phase 4: Analytics Code Tracking for Subdomain Discovery
+  # ===========================================================================
+  - name: analytics-tracking
+    type: bash
+    pre_condition: '{{enableAnalyticsTracking}} && file_exists("{{httpFile}}")'
+    log: "Discovering subdomains via analytics code relationships"
+    command: |
+      : > {{analyticsFile}}
+
+      analyticsrelationships -ch < {{httpFile}} > {{Output}}/subdomain/analytics_tmp.txt 2>/dev/null || true
+
+      if [ -s "{{Output}}/subdomain/analytics_tmp.txt" ]; then
+        grep -E "{{Target}}$" {{Output}}/subdomain/analytics_tmp.txt | grep -E '^([a-zA-Z0-9.-]+\.)+[a-zA-Z]{2,}$' > {{analyticsFile}} 2>/dev/null || true
+
+        if [ -s "{{analyticsFile}}" ]; then
+          cat {{analyticsFile}} >> {{subdomainFile}} 2>/dev/null || true
+          sort -u {{subdomainFile}} -o {{subdomainFile}} 2>/dev/null || true
+        fi
+      fi
+
+      rm -f {{Output}}/subdomain/analytics_tmp.txt 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: URL Scraping for Additional Subdomains
+  # ===========================================================================
+  - name: url-scraping-subs
+    type: bash
+    pre_condition: '{{enableUrlScrapingSubs}}'
+    log: "Scraping URLs for additional subdomains"
+    command: |
+      : > {{scrapingFile}}
+
+      urlfinder -d {{Target}} -all -o {{Output}}/subdomain/urlfinder_tmp.txt 2>/dev/null || true
+      if [ -s "{{Output}}/subdomain/urlfinder_tmp.txt" ]; then
+        grep -a "{{Target}}" {{Output}}/subdomain/urlfinder_tmp.txt | grep -aEo 'https?://[^ ]+' | unfurl -u domains 2>/dev/null >> {{scrapingFile}} || true
+      fi
+
+      mkdir -p {{Output}}/archive 2>/dev/null || true
+      timeout 30m waymore -i "{{Target}}" -mode U -oU {{Output}}/archive/waymore-{{TargetSpace}}.txt 2>/dev/null || true
+      if [ -s "{{Output}}/archive/waymore-{{TargetSpace}}.txt" ]; then
+        grep -a "{{Target}}" {{Output}}/archive/waymore-{{TargetSpace}}.txt | grep -aEo 'https?://[^ ]+' | unfurl -u domains 2>/dev/null >> {{scrapingFile}} || true
+      fi
+
+      if [ -s "{{scrapingFile}}" ]; then
+        grep -E "{{Target}}$" {{scrapingFile}} | grep -E '^([a-zA-Z0-9.-]+\.)+[a-zA-Z]{2,}$' | sort -u > {{scrapingFile}}.tmp || true
+        mv {{scrapingFile}}.tmp {{scrapingFile}} 2>/dev/null || true
+
+        if [ -s "{{scrapingFile}}" ]; then
+          cat {{scrapingFile}} >> {{subdomainFile}} 2>/dev/null || true
+          sort -u {{subdomainFile}} -o {{subdomainFile}} 2>/dev/null || true
+        fi
+      fi
+      
+      rm -f {{Output}}/subdomain/urlfinder_tmp.txt 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: Summary
+  # ===========================================================================
+  - name: http-probe-summary
+    type: function
+    log: "Generating HTTP probe summary"
+    functions:
+      - 'db_total_assets("{{httpFile}}")'

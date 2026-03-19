@@ -1,0 +1,875 @@
+# =============================================================================
+# Module Workflow: Web Crawling & Archive Discovery
+# =============================================================================
+# Combined module for comprehensive web crawling:
+# - recon-spider: Active crawling with Katana/Spitolas
+# - util-archive: Passive archive URL discovery (urlfinder/waymore)
+# - recon-screenshot: Visual screenshot capture
+# =============================================================================
+
+kind: module
+name: web-crawl
+description: Comprehensive web crawling - archive discovery, spidering, and screenshots
+tags: spider, crawl, archive, screenshot, links
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # =========================
+  # Feature toggles
+  # =========================
+  - name: enableSpider
+    type: bool
+    default: true
+  - name: enableArchive
+    type: bool
+    default: true
+  - name: enableScreenshot
+    type: bool
+    default: false
+  - name: enableWaymore
+    type: bool
+    default: true
+  - name: skipSpidering
+    type: bool
+    default: false
+
+  # =========================
+  # Feature toggles (新增)
+  # =========================
+  - name: enableWellKnownPivots
+    type: bool
+    default: true
+  - name: enableWordlistGen
+    type: bool
+    default: true
+  - name: enableBrokenLinks
+    type: bool
+    default: true
+  - name: enableUrlProcessing
+    type: bool
+    default: true
+    description: "Enable URL processing (qsreplace, urless, static filter)"
+  - name: urlLengthLimit
+    default: 2048
+    description: "Maximum URL length (filter long URLs)"
+  - name: enableSlowTargetSeparation
+    type: bool
+    default: true
+    description: "Separate slow targets (403/429) with reduced concurrency"
+  - name: enableDomainFilter
+    type: bool
+    default: true
+    description: "Filter URLs to keep only target domain related"
+  - name: enableHeadless
+    type: bool
+    default: false
+    description: "Enable headless browser for dynamic content"
+  - name: headlessThreshold
+    default: 100
+    description: "Target count threshold to enable headless mode"
+
+  # =========================
+  # Input files
+  # =========================
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: httpInterestingFile
+    default: "{{Output}}/fingerprint/http-interesting-{{TargetSpace}}.txt"
+  - name: slowHostsFile
+    default: "{{Output}}/probing/slow-hosts-{{TargetSpace}}.txt"
+    description: "Hosts with 403/429 responses (from http-probe)"
+
+  # =========================
+  # Spider config (Katana/Spitolas)
+  # =========================
+  - name: linkFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+  - name: spiderTimeout
+    default: "2h"
+  - name: spiderThreads
+    default: "{{ threads }}"
+  - name: spiderParallel
+    default: "{{ threads / 2 }}"
+  - name: spiderDepth
+    default: "3"
+  - name: spiderSlowThreads
+    default: "{{ threads / 3 }}"
+    description: "Threads for slow targets (403/429)"
+  - name: crawlingTime
+    default: "30"
+  - name: spiderLimit
+    default: "10000"
+  - name: spitolasTimeout
+    default: "5m"
+  - name: spitolasCrawlingTime
+    default: "5m"
+  - name: spitolasDepth
+    default: "5"
+  - name: spitolasDBFile
+    default: "{{Output}}/links/spitolas-{{TargetSpace}}.db"
+  - name: spitolasJsonlOutput
+    default: "{{Output}}/links/spitolas-{{TargetSpace}}.jsonl"
+
+  # =========================
+  # Archive config (urlfinder/waymore)
+  # =========================
+  - name: archiveJsonFile
+    default: "{{Output}}/archive/archive-{{TargetSpace}}.jsonl"
+  - name: waymoreOutputFile
+    default: "{{Output}}/archive/waymore-{{TargetSpace}}.txt"
+  - name: archiveUrlFile
+    default: "{{Output}}/archive/archive-urls-{{TargetSpace}}.txt"
+  - name: archiveInterestingUrlFile
+    default: "{{Output}}/archive/archive-interesting-urls-{{TargetSpace}}.txt"
+  - name: httpArchiveJsonFile
+    default: "{{Output}}/archive/archive-http-{{TargetSpace}}.jsonl"
+  - name: httpArchiveCleanJsonFile
+    default: "{{Output}}/archive/archive-http-clean-{{TargetSpace}}.jsonl"
+  - name: httpArchiveCleanMarkdownFile
+    default: "{{Output}}/archive/archive-http-{{TargetSpace}}.md"
+  - name: archiveSources
+    default: "alienvault,commoncrawl"
+  - name: urlfinderConfig
+    default: "{{ExternalConfigs}}/urlfinder-provider-config.yaml"
+  - name: urlfinderTimeout
+    default: "2h"
+  - name: toolsDir
+    default: "/root/Tools"
+  - name: waymoreTimeout
+    default: "60m"
+  - name: waymoreLimit
+    default: 5000
+  - name: waymoreMode
+    default: "U"
+  - name: archiveOutputLimit
+    default: "{{ threads * 1000 }}"
+  - name: archiveHttpThreads
+    default: "{{ threads * 5 }}"
+
+  # =========================
+  # Screenshot config
+  # =========================
+  - name: screenshotThreads
+    default: "{{ threads / 2 }}"
+  - name: screenTimeout
+    default: "15"
+  - name: screenshotHttpJsonlFile
+    default: "{{Output}}/screenshots/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: screenshotHTMLFile
+    default: "{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot-{{TargetSpace}}.html"
+
+  # =========================
+  # Well-known pivots config
+  # =========================
+  - name: wellKnownMaxTargets
+    default: 200
+  - name: wellKnownOutputFile
+    default: "{{Output}}/links/well-known-hosts-{{TargetSpace}}.txt"
+
+  # =========================
+  # Wordlist gen config
+  # =========================
+  - name: dictKeysFile
+    default: "{{Output}}/wordlist/dict-keys-{{TargetSpace}}.txt"
+  - name: dictValuesFile
+    default: "{{Output}}/wordlist/dict-values-{{TargetSpace}}.txt"
+  - name: dictWordsFile
+    default: "{{Output}}/wordlist/dict-words-{{TargetSpace}}.txt"
+
+  # =========================
+  # Password dict config
+  # =========================
+  - name: enablePasswordDict
+    type: bool
+    default: true
+    description: "Enable password dictionary generation"
+  - name: passwordDictEngine
+    default: "cewler"
+    description: "Password dict engine: cewler or pydictor"
+  - name: passwordDictFile
+    default: "{{Output}}/wordlist/password-dict-{{TargetSpace}}.txt"
+  - name: passwordDictMaxTargets
+    default: 50
+    description: "Max web targets for cewler"
+  - name: passwordDictCewlerDepth
+    default: 1
+    description: "Cewler crawl depth"
+  - name: passwordMinLength
+    type: integer
+    default: 5
+  - name: passwordMaxLength
+    type: integer
+    default: 14
+  - name: enableRobotsWordlist
+    type: bool
+    default: true
+    description: "Enable robots.txt wordlist generation (roboxtractor)"
+  - name: robotsWordlistFile
+    default: "{{Output}}/wordlist/robots-wordlist-{{TargetSpace}}.txt"
+
+  # =========================
+  # JS URL Extraction
+  # =========================
+  - name: jsUrlThreads
+    default: 10
+  - name: jsCrawlDepth
+    default: 2
+
+  # =========================
+  # Broken links config
+  # =========================
+  - name: brokenLinksFile
+    default: "{{Output}}/links/broken-links-{{TargetSpace}}.txt"
+  - name: brokenLinksLimit
+    default: 500
+
+  # =========================
+  # URL processing config
+  # =========================
+  - name: urlExtractFile
+    default: "{{Output}}/links/url-extract-{{TargetSpace}}.txt"
+    description: "Final processed URLs with parameters"
+  - name: urlNoDupesFile
+    default: "{{Output}}/links/url-extract-nodupes-{{TargetSpace}}.txt"
+    description: "Deduplicated URLs using p1radup"
+
+  # =========================
+  # General config
+  # =========================
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+
+  # LLM 参数注入点分析配置
+  - name: enableLlmInjectionAnalysis
+    type: bool
+    default: true
+    description: "Enable LLM-powered injection point analysis"
+  - name: llmInjectionReport
+    default: "{{Output}}/links/llm-injection-analysis-{{TargetSpace}}.md"
+    description: "LLM injection point analysis report"
+  - name: injectionPointsFile
+    default: "{{Output}}/links/injection-points-{{TargetSpace}}.txt"
+    description: "High-probability injection points extracted by LLM"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - katana
+    - httpx
+    - urlfinder
+    - jq
+    - qsreplace
+    - urless
+    - p1radup
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: links
+    path: "{{linkFile}}"
+    type: text
+    description: Discovered links from spidering
+
+  - name: url-extract
+    path: "{{urlExtractFile}}"
+    type: text
+    description: Processed URLs with parameters
+
+  - name: url-extract-nodupes
+    path: "{{urlNoDupesFile}}"
+    type: text
+    description: Final deduplicated URLs
+
+  - name: archive-urls
+    path: "{{archiveUrlFile}}"
+    type: text
+    description: List of discovered archive URLs
+
+  - name: interesting-archive-urls
+    path: "{{archiveInterestingUrlFile}}"
+    type: text
+    description: Interesting URLs from archive discovery
+
+  - name: http-archive-overview
+    path: "{{httpArchiveCleanMarkdownFile}}"
+    type: markdown
+    description: Markdown HTTP archive overview
+
+  - name: screenshot-gallery
+    path: "{{screenshotHTMLFile}}"
+    type: html
+    description: Screenshot gallery HTML
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup: Create output folders
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating web crawl output folders"
+    functions:
+      - 'create_folder("{{Output}}/links")'
+      - 'create_folder("{{Output}}/archive")'
+      - 'create_folder("{{Output}}/screenshots/{{TargetSpace}}-screenshots")'
+      - 'create_folder("{{Output}}/secrets")'
+
+  # ===========================================================================
+  # Phase 1: Archive URL Discovery (Passive)
+  # ===========================================================================
+  - name: urlfinder-discovery
+    type: bash
+    log: "Discovering archive URLs using urlfinder"
+    pre_condition: "{{enableArchive}}"
+    command: 'timeout -k 1m {{urlfinderTimeout}} urlfinder -silent -no-color -config {{urlfinderConfig}} -sources {{archiveSources}} -jsonl -d {{Target}} | shuf -n {{archiveOutputLimit}} >> {{archiveJsonFile}}'
+
+  - name: process-urlfinder-results
+    type: function
+    log: "Processing urlfinder results"
+    pre_condition: "{{enableArchive}} && file_exists(\"{{archiveJsonFile}}\") && file_length(\"{{archiveJsonFile}}\") > 0"
+    functions:
+      - 'exec_cmd("cat {{archiveJsonFile}} | jq -r \".url\" >> {{archiveUrlFile}}")'
+
+  - name: waymore-discovery
+    type: bash
+    pre_condition: "{{enableArchive}} && {{enableWaymore}}"
+    log: "Discovering historical URLs using waymore"
+    command: |
+      # Skip if waymore already ran in http-probe phase
+      if [ -s "{{waymoreOutputFile}}" ]; then
+        echo "[waymore] Reusing existing results from http-probe phase"
+        exit 0
+      fi
+      
+      timeout -k 1m {{waymoreTimeout}} waymore -i {{Target}} -mode {{waymoreMode}} -oU {{waymoreOutputFile}} -l {{waymoreLimit}} -mc 200,201,301,302,401,403,500 -ow 2>/dev/null || true
+
+  - name: process-waymore-results
+    type: function
+    log: "Processing waymore results"
+    pre_condition: "{{enableArchive}} && file_exists(\"{{waymoreOutputFile}}\") && file_length(\"{{waymoreOutputFile}}\") > 0"
+    functions:
+      - 'exec_cmd("cat {{waymoreOutputFile}} | grep -aE \"https?://\" >> {{archiveUrlFile}}")'
+      - 'sort_unix("{{archiveUrlFile}}")'
+
+  - name: deduplicate-archive-urls
+    type: function
+    log: "Deduplicating and filtering archive URLs"
+    pre_condition: "{{enableArchive}} && file_exists(\"{{archiveUrlFile}}\") && file_length(\"{{archiveUrlFile}}\") > 0"
+    functions:
+      - sort_unix("{{archiveUrlFile}}")
+      - 'interesting_urls("{{archiveUrlFile}}", "{{archiveInterestingUrlFile}}")'
+      - sort_unix("{{archiveInterestingUrlFile}}")
+      - 'db_total_archive("{{archiveInterestingUrlFile}}")'
+
+  - name: probe-archive-urls
+    type: bash
+    log: "Probing archive URLs with httpx"
+    pre_condition: "{{enableArchive}} && file_exists(\"{{archiveInterestingUrlFile}}\") && file_length(\"{{archiveInterestingUrlFile}}\") > 0"
+    command: 'cat {{archiveInterestingUrlFile}} | httpx -H "{{defaultUA}}" -timeout 10 -t {{archiveHttpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpArchiveJsonFile}}'
+
+  - name: beautify-archive-results
+    type: function
+    log: "Beautifying archive results"
+    pre_condition: "{{enableArchive}} && file_exists(\"{{httpArchiveJsonFile}}\") && file_length(\"{{httpArchiveJsonFile}}\") > 0"
+    functions:
+      - jsonl_filter("{{httpArchiveJsonFile}}", "{{httpArchiveCleanJsonFile}}", "url,status,length,words,redirectlocation,webserver,tech,cdn")
+      - sort_unix("{{httpArchiveCleanJsonFile}}")
+      - 'convert_jsonl_to_markdown("{{httpArchiveCleanJsonFile}}", "{{httpArchiveCleanMarkdownFile}}")'
+
+  # ===========================================================================
+  # Phase 2: Web Spidering (Active)
+  # ===========================================================================
+  - name: check-skip-spidering
+    type: function
+    log: "Checking if spidering should be skipped"
+    pre_condition: "{{skipSpidering}}"
+    functions:
+      - 'log_error("Filter", "Skipping spidering")'
+
+  - name: check-input-limit
+    type: function
+    log: "Checking input file size"
+    pre_condition: "{{enableSpider}} && file_length(\"{{httpFile}}\") > {{spiderLimit}}"
+    functions:
+      - 'log_error("Filter", "Got input file greater than {{spiderLimit}} line")'
+
+  # ===========================================================================
+  # Phase 3: Prepare crawl targets (separate slow vs normal)
+  # ===========================================================================
+  - name: prepare-crawl-targets
+    type: bash
+    log: "Preparing crawl targets and separating slow hosts"
+    pre_condition: "{{enableSpider}} && !{{skipSpidering}} && file_exists(\"{{httpInterestingFile}}\")"
+    command: |
+      : > {{Output}}/links/katana_targets_normal.txt
+      : > {{Output}}/links/katana_targets_slow.txt
+
+      # 复制所有目标作为默认
+      cp {{httpInterestingFile}} {{Output}}/links/katana_targets_normal.txt
+
+      # 如果启用 slow targets 分离且有 slow hosts 文件
+      if [ "{{enableSlowTargetSeparation}}" = "true" ] && [ -f "{{slowHostsFile}}" ] && [ -s "{{slowHostsFile}}" ]; then
+        # 从正常目标中分离 slow hosts
+        while IFS= read -r host; do
+          [ -z "$host" ] && continue
+          grep -F "${host}" {{httpInterestingFile}} 2>/dev/null >> {{Output}}/links/katana_targets_slow.txt || true
+        done < {{slowHostsFile}}
+
+        # 从正常目标中移除 slow hosts
+        if [ -s "{{Output}}/links/katana_targets_slow.txt" ]; then
+          sort -u {{httpInterestingFile}} > {{Output}}/links/.sorted_normal.txt
+          sort -u {{Output}}/links/katana_targets_slow.txt > {{Output}}/links/.sorted_slow.txt
+          comm -23 {{Output}}/links/.sorted_normal.txt {{Output}}/links/.sorted_slow.txt > {{Output}}/links/katana_targets_normal.txt || true
+          rm -f {{Output}}/links/.sorted_normal.txt {{Output}}/links/.sorted_slow.txt
+          slow_count=$(wc -l < {{Output}}/links/katana_targets_slow.txt 2>/dev/null || echo 0)
+          echo "[crawl-targets] Separated $slow_count slow targets"
+        fi
+      fi
+
+      # 确保正常目标文件有内容
+      if [ ! -s "{{Output}}/links/katana_targets_normal.txt" ]; then
+        cp {{httpInterestingFile}} {{Output}}/links/katana_targets_normal.txt 2>/dev/null || true
+      fi
+
+      # 统计目标数量
+      normal_count=$(wc -l < {{Output}}/links/katana_targets_normal.txt 2>/dev/null || echo 0)
+      echo "[crawl-targets] Normal targets: $normal_count"
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: Katana crawling with dynamic headless flags
+  # ===========================================================================
+  - name: determine-headless-flags
+    type: bash
+    log: "Determining headless flags based on target count"
+    pre_condition: "{{enableSpider}} && !{{skipSpidering}}"
+    command: |
+      target_count=$(wc -l < {{Output}}/links/katana_targets_normal.txt 2>/dev/null || echo 0)
+      slow_count=$(wc -l < {{Output}}/links/katana_targets_slow.txt 2>/dev/null || echo 0)
+
+      # 动态 headless flags (与 reconftw 一致)
+      HEADLESS_FLAGS=""
+      if [ "{{enableHeadless}}" = "true" ] && [ "$target_count" -lt {{headlessThreshold}} ]; then
+        HEADLESS_FLAGS="-headless"
+      fi
+      echo "HEADLESS_FLAGS=$HEADLESS_FLAGS" > {{Output}}/links/.headless_flags
+
+      # 计算 slow targets 的并发数 (至少为2)
+      SLOW_THREADS={{spiderSlowThreads}}
+      [ "$SLOW_THREADS" -lt 2 ] && SLOW_THREADS=2
+      echo "SLOW_THREADS=$SLOW_THREADS" > {{Output}}/links/.slow_threads
+
+      echo "[headless] Flags: $HEADLESS_FLAGS, slow_threads: $SLOW_THREADS"
+    on_error:
+      - action: continue
+
+  - name: web-crawling-katana-normal
+    type: bash
+    log: "Crawling normal targets with Katana"
+    pre_condition: "{{enableSpider}} && !{{skipSpidering}} && file_exists(\"{{Output}}/links/katana_targets_normal.txt\") && file_length(\"{{Output}}/links/katana_targets_normal.txt\") > 0"
+    command: |
+      # 加载 headless flags
+      source {{Output}}/links/.headless_flags 2>/dev/null || HEADLESS_FLAGS=""
+
+      # 爬取正常目标
+      timeout -k 1m {{spiderTimeout}} katana -silent -list {{Output}}/links/katana_targets_normal.txt  -c {{spiderThreads}} -jc -ct {{crawlingTime}} -d {{spiderDepth}} -fs rdn $HEADLESS_FLAGS 2>/dev/null | sort -u >> {{linkFile}} || true
+    on_error:
+      - action: continue
+
+  - name: web-crawling-katana-slow
+    type: bash
+    log: "Crawling slow targets with Katana (reduced concurrency)"
+    pre_condition: "{{enableSpider}} && !{{skipSpidering}} && {{enableSlowTargetSeparation}} && file_exists(\"{{Output}}/links/katana_targets_slow.txt\") && file_length(\"{{Output}}/links/katana_targets_slow.txt\") > 0"
+    command: |
+      # 加载配置
+      source {{Output}}/links/.headless_flags 2>/dev/null || HEADLESS_FLAGS=""
+      source {{Output}}/links/.slow_threads 2>/dev/null || SLOW_THREADS=2
+
+      # 爬取慢速目标 (降低并发)
+      timeout -k 1m {{spiderTimeout}} katana -silent -list {{Output}}/links/katana_targets_slow.txt  -c $SLOW_THREADS -jc -ct {{crawlingTime}} -d {{spiderDepth}} -fs rdn $HEADLESS_FLAGS 2>/dev/null | sort -u >> {{linkFile}} || true
+
+      slow_crawled=$(wc -l < {{Output}}/links/katana_targets_slow.txt 2>/dev/null || echo 0)
+      echo "[katana-slow] Crawled $slow_crawled slow targets with reduced concurrency"
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: Domain filtering for crawled URLs
+  # ===========================================================================
+  - name: filter-urls-by-domain
+    type: bash
+    log: "Filtering URLs to keep only target domain related"
+    pre_condition: "{{enableDomainFilter}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
+    command: |
+      if [ -s "{{linkFile}}" ]; then
+        # 过滤只保留目标域名相关 URL (与 reconftw 一致)
+        grep -a "{{Target}}" {{linkFile}} 2>/dev/null > {{linkFile}}.filtered || true
+        if [ -s "{{linkFile}}.filtered" ]; then
+          mv {{linkFile}}.filtered {{linkFile}}
+          filtered_count=$(wc -l < {{linkFile}})
+          echo "[domain-filter] Kept $filtered_count URLs related to {{Target}}"
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  - name: web-crawling-spitolas
+    type: foreach
+    log: "Crawling web pages with Spitolas Headless Browser"
+    pre_condition: "{{enableSpider}} && !{{skipSpidering}} && file_exists(\"{{httpInterestingFile}}\")"
+    input: "{{httpInterestingFile}}"
+    variable: line
+    threads: "{{spiderParallel}}"
+    step:
+      name: spitolas-single-target
+      type: bash
+      command: 'timeout -k 1m {{spitolasTimeout}} spitolas crawl --silent -u "[[line]]" --max-depth {{spitolasDepth}} --max-duration {{spitolasCrawlingTime}} --db {{spitolasDBFile}} 2>/dev/null || true'
+      on_error:
+        - action: continue
+
+  - name: generate-crawling-data
+    type: function
+    log: "Generating crawling data from Spitolas output"
+    pre_condition: "{{enableSpider}} && file_exists(\"{{spitolasDBFile}}\")"
+    functions:
+      - exec_cmd("spitolas export --silent --db {{spitolasDBFile}} -f jsonl >> {{spitolasJsonlOutput}} 2>/dev/null || true")
+      - exec_cmd("cat {{spitolasJsonlOutput}} | jq -r '.url' 2>/dev/null | sort -u >> {{linkFile}} || true")
+      - exec_cmd("rm -rf {{spitolasDBFile}}")
+      - sort_unix("{{linkFile}}")
+    on_error:
+      - action: continue
+
+  - name: unique-crawled-links
+    type: function
+    log: "Sorting and uniquifying crawled links"
+    pre_condition: "{{enableSpider}} && file_exists(\"{{linkFile}}\")"
+    functions:
+      - db_total_links("{{linkFile}}")
+      - db_import_custom_asset("{{TargetSpace}}", "{{spitolasJsonlOutput}}", "spider", "spitolas")
+
+  # ===========================================================================
+  # Phase 6: Screenshot Capture
+  # ===========================================================================
+  - name: capture-screenshots
+    type: bash
+    log: "Capturing screenshots with httpx"
+    pre_condition: "{{enableScreenshot}} && file_exists(\"{{httpInterestingFile}}\")"
+    command: 'cat {{httpInterestingFile}} | httpx -t {{screenshotThreads}} -no-color -silent -screenshot -screenshot-timeout {{screenTimeout}} -json -system-chrome -store-response-dir {{Output}}/screenshots/{{TargetSpace}}-screenshots/ >> {{screenshotHttpJsonlFile}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  - name: process-screenshots
+    type: function
+    log: "Processing screenshot results"
+    pre_condition: "{{enableScreenshot}} && file_exists(\"{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot.html\")"
+    functions:
+      - 'move_file("{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot.html", "{{screenshotHTMLFile}}")'
+
+  # ===========================================================================
+  # Phase 7: Well-known pivots discovery
+  # ===========================================================================
+  - name: well-known-security
+    type: bash
+    log: "Checking .well-known/security.txt"
+    pre_condition: "{{enableWellKnownPivots}}"
+    command: 'cat {{linkFile}} | grep -E "^https?://" | head -{{wellKnownMaxTargets}} | while read url; do curl -s -m 5 "${url%/*}/.well-known/security.txt" 2>/dev/null | head -5 && echo "Found: ${url%/*}/.well-known/security.txt"; done > {{wellKnownOutputFile}} || true'
+
+  # ===========================================================================
+  # Phase 8: Wordlist generation
+  # ===========================================================================
+  - name: create-wordlist-folder
+    type: function
+    log: "Creating wordlist folder"
+    pre_condition: "{{enableWordlistGen}} || {{enablePasswordDict}}"
+    functions:
+      - 'create_folder("{{Output}}/wordlist")'
+
+  - name: extract-url-keys
+    type: bash
+    log: "Extracting URL keys for wordlist"
+    pre_condition: "{{enableWordlistGen}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
+    command: 'cat {{linkFile}} | unfurl -u keys 2>/dev/null | sort -u >> {{dictKeysFile}} || true'
+
+  - name: extract-url-values
+    type: bash
+    log: "Extracting URL values for wordlist"
+    pre_condition: "{{enableWordlistGen}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
+    command: 'cat {{linkFile}} | unfurl -u values 2>/dev/null | sort -u >> {{dictValuesFile}} || true'
+
+  - name: extract-url-words
+    type: bash
+    log: "Extracting URL paths for wordlist"
+    pre_condition: "{{enableWordlistGen}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
+    command: 'cat {{linkFile}} | unfurl -u paths 2>/dev/null | grep -aEve "^(%|\.|,|http|https|www)" | sort -u >> {{dictWordsFile}} || true'
+
+  # ===========================================================================
+  # Phase 9: Password dictionary generation
+  # ===========================================================================
+  - name: generate-password-dict-cewler
+    type: bash
+    log: "Generating password dictionary with cewler"
+    pre_condition: '{{enablePasswordDict}} && "{{passwordDictEngine}}" == "cewler" && file_exists("{{httpFile}}")'
+    command: |
+      head -n {{passwordDictMaxTargets}} {{httpFile}} > {{Output}}/wordlist/pwd-targets.txt || true
+      : > {{Output}}/wordlist/pwd-raw.txt
+      while IFS= read -r target; do
+        [ -z "$target" ] && continue
+        timeout -k 5s {{passwordDictCewlerTimeout}} cewler -d {{passwordDictCewlerDepth}} -m {{passwordMinLength}} -l -o {{Output}}/wordlist/pwd-part.txt "$target" 2>/dev/null || true
+        if [ -s "{{Output}}/wordlist/pwd-part.txt" ]; then
+          cat {{Output}}/wordlist/pwd-part.txt >> {{Output}}/wordlist/pwd-raw.txt
+          : > {{Output}}/wordlist/pwd-part.txt
+        fi
+      done < {{Output}}/wordlist/pwd-targets.txt
+      if [ -s "{{Output}}/wordlist/pwd-raw.txt" ]; then
+        awk -v min={{passwordMinLength}} -v max={{passwordMaxLength}} '{ w=$0; gsub(/[^a-z0-9._-]/, "", w); if (length(w) >= min && length(w) <= max) print w; }' {{Output}}/wordlist/pwd-raw.txt | sort -u > {{passwordDictFile}}
+      fi
+    on_error:
+      - action: continue
+
+  - name: generate-password-dict-pydictor
+    type: bash
+    log: "Generating password dictionary with pydictor (fallback)"
+    pre_condition: '{{enablePasswordDict}} && ("{{passwordDictEngine}}" == "pydictor" || !file_exists("{{passwordDictFile}}") || file_length("{{passwordDictFile}}") == 0)'
+    command: |
+      # Extract first part of domain as seed word
+      word=$(echo "{{Target}}" | cut -d'.' -f1)
+      
+      # Ensure output directory exists
+      mkdir -p {{Output}}/wordlist 2>/dev/null || true
+      : > {{passwordDictFile}}
+      
+      if [ -f "{{toolsDir}}/pydictor/pydictor.py" ]; then
+        python3 {{toolsDir}}/pydictor/pydictor.py -extend "$word" --leet 0 1 2 11 21 --len {{passwordMinLength}} {{passwordMaxLength}} -o {{passwordDictFile}} 2>/dev/null || true
+        
+        if [ -s "{{passwordDictFile}}" ]; then
+          count=$(wc -l < {{passwordDictFile}} 2>/dev/null || echo 0)
+          echo "[pydictor] Generated $count password candidates"
+        fi
+      else
+        echo "[pydictor] pydictor.py not found, skipping"
+      fi
+    on_error:
+      - action: continue
+
+  - name: cleanup-password-dict-temp
+    type: function
+    log: "Cleaning up password dict temp files"
+    functions:
+      - 'exec_cmd("rm -f {{Output}}/wordlist/pwd-targets.txt {{Output}}/wordlist/pwd-raw.txt {{Output}}/wordlist/pwd-part.txt 2>/dev/null || true")'
+
+  # ===========================================================================
+  # Phase 9a: Robots.txt Wordlist Generation (roboxtractor)
+  # ===========================================================================
+  - name: roboxtractor-scan
+    type: bash
+    log: "Generating wordlist from robots.txt"
+    pre_condition: '{{enableRobotsWordlist}} && file_exists("{{httpFile}}")'
+    command: |
+      : > {{robotsWordlistFile}}
+
+      roboxtractor -m 1 -wb < {{httpFile}} 2>/dev/null | anew -q {{robotsWordlistFile}} || true
+
+      if [ -s "{{robotsWordlistFile}}" ]; then
+        count=$(wc -l < {{robotsWordlistFile}} 2>/dev/null || echo 0)
+        echo "[RobotsWordlist] Generated $count entries from robots.txt"
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 10: URL Processing (qsreplace, urless, static filter, p1radup)
+  # ===========================================================================
+  - name: filter-url-length
+    type: bash
+    log: "Filtering URLs by length limit"
+    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{linkFile}}\")"
+    command: |
+      : > {{Output}}/links/url-filtered.txt
+      if [ -s "{{linkFile}}" ]; then
+        # 过滤超长 URL (2048 字符限制，与 reconftw 一致)
+        awk -v max={{urlLengthLimit}} 'length($0) <= max' {{linkFile}} > {{Output}}/links/url-filtered.txt
+      fi
+    on_error:
+      - action: continue
+
+  - name: filter-static-resources
+    type: bash
+    log: "Filtering static resources from URLs"
+    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{Output}}/links/url-filtered.txt\")"
+    command: |
+      : > {{Output}}/links/url-nostatic.txt
+      if [ -s "{{Output}}/links/url-filtered.txt" ]; then
+        # 过滤静态资源 (图片、字体、CSS 等)
+        grep -aEiv "\.(eot|jpg|jpeg|gif|css|tif|tiff|png|ttf|otf|woff|woff2|ico|pdf|svg|txt)$"  {{Output}}/links/url-filtered.txt > {{Output}}/links/url-nostatic.txt || true
+      fi
+    on_error:
+      - action: continue
+
+  - name: extract-parameter-urls
+    type: bash
+    log: "Extracting URLs with parameters using qsreplace"
+    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{Output}}/links/url-nostatic.txt\")"
+    command: |
+      : > {{Output}}/links/url-with-params.txt
+      if [ -s "{{Output}}/links/url-nostatic.txt" ]; then
+        # 提取带参数的 URL (包含 = 或 ?)
+        grep -aEo 'https?://[^ ]+' {{Output}}/links/url-nostatic.txt 2>/dev/null  | grep "=" | qsreplace -a 2>/dev/null | sort -u > {{Output}}/links/url-with-params.txt || true
+      fi
+    on_error:
+      - action: continue
+
+  - name: deduplicate-urls-urless
+    type: bash
+    log: "Deduplicating URLs with urless"
+    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{Output}}/links/url-with-params.txt\")"
+    command: |
+      : > {{Output}}/links/url-deduped.txt
+      if [ -s "{{Output}}/links/url-with-params.txt" ]; then
+        urless < {{Output}}/links/url-with-params.txt > {{Output}}/links/url-deduped.txt 2>/dev/null || cp {{Output}}/links/url-with-params.txt {{Output}}/links/url-deduped.txt
+      fi
+    on_error:
+      - action: continue
+
+  - name: final-url-dedup-p1radup
+    type: bash
+    log: "Final URL deduplication with p1radup"
+    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{Output}}/links/url-deduped.txt\")"
+    command: |
+      : > {{urlExtractFile}}
+      : > {{urlNoDupesFile}}
+      if [ -s "{{Output}}/links/url-deduped.txt" ]; then
+        cp {{Output}}/links/url-deduped.txt {{urlExtractFile}}
+        p1radup -i {{urlExtractFile}} -o {{urlNoDupesFile}} -s 2>/dev/null || sort -u {{urlExtractFile}} > {{urlNoDupesFile}}
+        count=$(wc -l < {{urlNoDupesFile}} 2>/dev/null || echo 0)
+        echo "[URL-Processing] Final deduped URLs: $count"
+      fi
+    on_error:
+      - action: continue
+
+  - name: cleanup-url-processing-temp
+    type: function
+    log: "Cleaning up URL processing temp files"
+    functions:
+      - 'exec_cmd("rm -f {{Output}}/links/url-filtered.txt {{Output}}/links/url-nostatic.txt {{Output}}/links/url-with-params.txt {{Output}}/links/url-deduped.txt {{Output}}/links/katana_targets_normal.txt {{Output}}/links/katana_targets_slow.txt {{Output}}/links/.headless_flags {{Output}}/links/.slow_threads 2>/dev/null || true")'
+
+  # ===========================================================================
+  # Phase 11: Broken links detection
+  # ===========================================================================
+  - name: find-broken-links
+    type: bash
+    log: "Finding broken links (4xx responses)"
+    pre_condition: "{{enableBrokenLinks}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
+    command: 'cat {{linkFile}} | head -{{brokenLinksLimit}} | httpx -sc -silent -no-color 2>/dev/null | grep -E " [4][0-9][0-9] " > {{brokenLinksFile}} || true'
+
+  # ===========================================================================
+  # Phase 12: Summary
+  # ===========================================================================
+  - name: web-crawl-summary
+    type: function
+    log: "Generating web crawl summary"
+    functions:
+      - 'db_total_assets("{{linkFile}}")'
+
+  # ===========================================================================
+  # Phase 13: LLM Injection Point Analysis (P1)
+  # ===========================================================================
+  - name: llm-injection-analysis
+    type: llm
+    pre_condition: '{{enableLlmInjectionAnalysis}} && file_exists("{{urlNoDupesFile}}") && file_length("{{urlNoDupesFile}}") > 0'
+    log: "Analyzing injection points with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior web application penetration tester specializing in injection attacks.
+          Analyze URLs with parameters to identify:
+          
+          1. **SQL Injection Candidates**: Parameters likely vulnerable to SQLi
+             - id, user_id, item_id, product_id, cat, category
+             - search, query, keyword, q parameters
+             - ORDER BY, LIMIT parameters
+             - Numeric parameters in general
+          
+          2. **XSS Candidates**: Parameters reflecting user input
+             - callback, jsonp, next, redirect, url, return
+             - search, query, message, comment, name
+             - Error messages, debug parameters
+          
+          3. **LFI/RFI Candidates**: File/include parameters
+             - file, path, page, include, load, template
+             - image, document, attachment, download
+             - lang, language, theme, style
+          
+          4. **SSRF Candidates**: URL fetch parameters
+             - url, link, src, source, domain, host
+             - proxy, redirect, forward, dest, target
+             - webhook, callback, api_endpoint
+          
+          5. **Command Injection**: System command parameters
+             - cmd, exec, command, run, shell
+             - ping, traceroute, nslookup, dig
+          
+          6. **Open Redirect**: Navigation parameters
+             - next, redirect, url, return, goto, link
+             - continue, dest, destination, redir
+          
+          For each category, provide:
+          - Specific URLs with vulnerable parameter names
+          - Recommended test payloads
+          - WAF bypass techniques
+          - Confidence level (High/Medium/Low)
+          
+          Format in Markdown with actionable testing instructions.
+      - role: user
+        content: |
+          Analyze these URLs with parameters for {{Target}}:
+          
+          {{readFile("{{urlNoDupesFile}}") if file_exists("{{urlNoDupesFile}}") else "No URLs"}}
+          
+          Additional context from GF patterns:
+          {{readFile("{{Output}}/gf/sqli-{{TargetSpace}}.txt") if file_exists("{{Output}}/gf/sqli-{{TargetSpace}}.txt") else "No SQLi patterns"}}
+          {{readFile("{{Output}}/gf/xss-{{TargetSpace}}.txt") if file_exists("{{Output}}/gf/xss-{{TargetSpace}}.txt") else "No XSS patterns"}}
+          {{readFile("{{Output}}/gf/lfi-{{TargetSpace}}.txt") if file_exists("{{Output}}/gf/lfi-{{TargetSpace}}.txt") else "No LFI patterns"}}
+          {{readFile("{{Output}}/gf/ssrf-{{TargetSpace}}.txt") if file_exists("{{Output}}/gf/ssrf-{{TargetSpace}}.txt") else "No SSRF patterns"}}
+          
+          Provide injection point analysis with specific test payloads.
+    exports:
+      injection_analysis: "{{llm_injection_analysis_content}}"
+
+  - name: save-llm-injection-report
+    type: bash
+    pre_condition: "{{enableLlmInjectionAnalysis}}"
+    log: "Saving LLM injection analysis report"
+    command: |
+      mkdir -p {{Output}}/links 2>/dev/null || true
+      echo "# Injection Point Analysis - {{Target}}" > {{llmInjectionReport}}
+      echo "" >> {{llmInjectionReport}}
+      echo "**Generated:** $(date)" >> {{llmInjectionReport}}
+      echo "" >> {{llmInjectionReport}}
+      echo "{{injection_analysis}}" >> {{llmInjectionReport}}
+      
+      # 提取高概率注入点到单独文件供后续测试
+      grep -oE 'https?://[^ ]+' {{llmInjectionReport}} 2>/dev/null  | head -100 > {{injectionPointsFile}} || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Cleanup: Remove temporary files
+  # ===========================================================================
+  - name: cleanup-temp-files
+    type: function
+    log: "Cleaning up temporary files"
+    functions:
+      - 'exec_cmd("rm -rf {{archiveJsonFile}} 2>/dev/null || true")'

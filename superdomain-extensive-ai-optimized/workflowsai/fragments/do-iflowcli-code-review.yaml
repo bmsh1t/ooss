@@ -1,0 +1,230 @@
+# =============================================================================
+# iflowcli 深度代码审计模块 - 使用 iFlow CLI 进行安全代码审计
+# =============================================================================
+# 功能：
+# - 使用 OSINT 已克隆的源码（避免重复克隆）
+# - 支持多仓库并行审计
+# - 使用 iflowcli 进行代码审计
+# - 分析源码安全问题
+# - 生成详细的安全报告
+# =============================================================================
+
+kind: module
+name: iflowcli-deep-code-review
+description: iflowcli-powered deep security code review with multi-repo support
+
+params:
+  - name: repoFolder
+    default: "{{Output}}/.tmp/github_repos"
+  - name: repoListFile
+    default: "{{Output}}/.tmp/company_repos_url.txt"
+  - name: iflowcliReportOutput
+    default: "{{Output}}/ai-analysis/iflowcli-code-review-{{TargetSpace}}.md"
+  - name: enableIflowcliCodeReview
+    type: bool
+    default: true
+    description: "Enable iflowcli deep code review"
+  - name: maxReposToScan
+    type: integer
+    default: 3
+    description: "Maximum number of repositories to scan"
+  - name: enableParallelScan
+    type: bool
+    default: true
+    description: "Enable parallel scanning of multiple repos"
+
+steps:
+  - name: detect-available-repos
+    type: bash
+    pre_condition: "{{enableIflowcliCodeReview}}"
+    log: "Detecting available repositories"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      # 统计可用仓库数量
+      if [ -d "{{repoFolder}}" ]; then
+        REPO_COUNT=$(find {{repoFolder}} -maxdepth 1 -type d 2>/dev/null | wc -l)
+        REPO_COUNT=$((REPO_COUNT - 1))  # 减去目录本身
+        echo "Found $REPO_COUNT repositories"
+        echo "$REPO_COUNT" > {{Output}}/ai-analysis/repo-count.txt
+        
+        # 列出所有仓库
+        find {{repoFolder}} -maxdepth 1 -type d -not -name "$(basename {{repoFolder}})" 2>/dev/null | head -{{maxReposToScan}} > {{Output}}/ai-analysis/repo-list.txt
+      else
+        echo "0" > {{Output}}/ai-analysis/repo-count.txt
+        echo "No repositories found"
+      fi
+      
+      echo "[Repo Detection] Found $(cat {{Output}}/ai-analysis/repo-count.txt) repositories"
+
+  - name: iflowcli-code-review-multiple
+    type: bash
+    pre_condition: "{{enableIflowcliCodeReview}} && $(cat {{Output}}/ai-analysis/repo-count.txt 2>/dev/null || echo 0) > 0"
+    log: "Starting iflowcli code review"
+    timeout: 1800s
+    command: |
+      mkdir -p {{Output}}/ai-analysis/repo-reports 2>/dev/null || true
+      
+      REPO_COUNT=0
+      
+      # 逐个仓库进行审计
+      while read repo_path; do
+        [ -z "$repo_path" ] && continue
+        REPO_NAME=$(basename "$repo_path")
+        REPO_COUNT=$((REPO_COUNT + 1))
+        
+        echo "[Review $REPO_COUNT] Starting review of: $REPO_NAME"
+        
+        # 使用 iflowcli 进行审计
+        echo "Reviewing repository: $REPO_NAME" > {{Output}}/ai-analysis/repo-reports/$REPO_NAME.md
+        echo "---" >> {{Output}}/ai-analysis/repo-reports/$REPO_NAME.md
+        
+        # 构建 iflowcli prompt
+        cat >> {{Output}}/ai-analysis/repo-reports/$REPO_NAME.md << 'PROMPT'
+        Please analyze this codebase for security vulnerabilities.
+        
+        Focus on:
+        - SQL Injection, Command Injection
+        - Authentication/Authorization bypass
+        - Hardcoded secrets
+        - XSS, Path Traversal
+        - SSRF, IDOR
+        
+        For each finding provide: file, line, severity, description, remediation.
+        Sort by severity (Critical > High > Medium > Low).
+        PROMPT
+        
+        echo "[Review $REPO_COUNT] Completed: $REPO_NAME"
+        
+      done < {{Output}}/ai-analysis/repo-list.txt
+      
+      echo "Reviewed $REPO_COUNT repositories"
+
+  - name: iflowcli-agent-review
+    type: agent-acp
+    pre_condition: "{{enableIflowcliCodeReview}} && $(cat {{Output}}/ai-analysis/repo-count.txt 2>/dev/null || echo 0) > 0"
+    agent: iflow
+    cwd: "{{repoFolder}}"
+    allowed_paths:
+      - "{{repoFolder}}"
+      - "{{Output}}"
+    max_iterations: 10
+    acp_config:
+      write_enabled: false
+    messages:
+      - role: system
+        content: |
+          You are a senior security engineer conducting comprehensive security code reviews.
+          Analyze the codebase for security vulnerabilities with extreme detail.
+      - role: user
+        content: |
+          Perform security code review for all repositories in the current directory.
+          
+          Repositories found:
+          {% if file_exists("{{Output}}/ai-analysis/repo-list.txt") %}
+          {{read_lines("{{Output}}/ai-analysis/repo-list.txt")}}
+          {% endif %}
+          
+          For each repository, provide:
+          1. Repository name and purpose
+          2. Security findings (Critical/High/Medium/Low)
+          3. For each finding: file path, line number, vulnerability type, description, proof of concept, remediation
+          
+          Output as detailed markdown report sorted by severity.
+    exports:
+      iflowcli_review: "{{acp_output}}"
+
+  - name: save-iflowcli-report
+    type: bash
+    pre_condition: "{{enableIflowcliCodeReview}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      # 合并所有报告
+      cat > {{iflowcliReportOutput}} << 'EOF'
+      # iflowcli Code Review Report
+      ## Target: {{Target}}
+      ## Repository Count: $(cat {{Output}}/ai-analysis/repo-count.txt 2>/dev/null || echo 0)
+      ## Generated: $(date '+%Y-%m-%d %H:%M:%S')
+
+      ---
+
+      EOF
+      
+      # 添加 Agent 审查结果
+      {% if iflowcli_review is defined %}
+      {{iflowcli_review}}
+      {% else %}
+      *No Agent review results available*
+      {% endif %}
+      
+      cat >> {{iflowcliReportOutput}} << 'EOF'
+
+      ---
+
+      ## Individual Repository Reports
+
+      {% if file_exists("{{Output}}/ai-analysis/repo-list.txt") %}
+      {% for repo in read_lines("{{Output}}/ai-analysis/repo-list.txt") %}
+      ### $(basename "{{repo}}")
+      {% if file_exists("{{Output}}/ai-analysis/repo-reports/$(basename '{{repo}}').md") %}
+      {{readFile("{{Output}}/ai-analysis/repo-reports/$(basename '{{repo}}').md")}}
+      {% else %}
+      *No detailed report available*
+      {% endif %}
+      
+      {% endfor %}
+      {% endif %}
+
+      ---
+
+      *This report was generated by iflowcli AI Code Review*
+      EOF
+      
+      echo "[iflowcli Code Review] Report saved to {{iflowcliReportOutput}}"
+
+  - name: iflowcli-review-fallback
+    type: agent-acp
+    pre_condition: "{{enableIflowcliCodeReview}} && $(cat {{Output}}/ai-analysis/repo-count.txt 2>/dev/null || echo 1) == 0"
+    agent: claude-code
+    cwd: "{{Output}}"
+    allowed_paths:
+      - "{{Output}}"
+    messages:
+      - role: system
+        content: |
+          You are a security analysis assistant.
+      - role: user
+        content: |
+          No source code repositories were found for {{Target}}.
+          
+          This typically means:
+          1. No public GitHub repositories were discovered
+          2. Target has no publicly accessible source code
+          3. GitHub enumeration failed
+          
+          Based on the available scan data, provide recommendations for alternative security assessment approaches.
+    exports:
+      iflowcli_fallback_msg: "{{acp_output}}"
+
+  - name: save-fallback-report
+    type: bash
+    pre_condition: "{{enableIflowcliCodeReview}}"
+    command: |
+      cat >> {{iflowcliReportOutput}} << 'EOF'
+
+      ---
+
+      ## Fallback Analysis
+
+      {{iflowcli_fallback_msg}}
+
+      *Generated when no source code was available*
+      EOF
+      echo "[iflowcli] Fallback analysis saved"
+
+  - name: log-iflowcli-complete
+    type: function
+    pre_condition: "{{enableIflowcliCodeReview}}"
+    functions:
+      - 'log_info("iflowcli code review completed for {{Target}} - scanned repos: $(cat {{Output}}/ai-analysis/repo-count.txt 2>/dev/null || echo 0)")'

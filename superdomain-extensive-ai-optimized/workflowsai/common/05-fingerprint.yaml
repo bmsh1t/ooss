@@ -1,0 +1,291 @@
+# =============================================================================
+# Module Workflow: Technology Fingerprinting
+# =============================================================================
+# 合并: favicon-recon.yaml + waf-detection.yaml + cms-scanner.yaml
+# 功能: Favicon 指纹、WAF 检测、CMS 识别
+# =============================================================================
+
+kind: module
+name: fingerprint
+description: Technology fingerprinting - favicon, WAF, CMS detection
+tags: fingerprint, favicon, waf, cms, technology, detection
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 功能开关
+  - name: enableFaviconRecon
+    type: bool
+    default: true
+  - name: enableWafDetection
+    type: bool
+    default: true
+  - name: enableCmsScanner
+    type: bool
+    default: true
+  - name: enableVirtualhosts
+    type: bool
+    default: true
+  - name: enableLlmProbe
+    type: bool
+    default: true
+    description: "Enable LLM service probing (julius)"
+  - name: llmProbeAugustus
+    type: bool
+    default: false
+    description: "Include augustus generator config in julius output"
+
+  # 输入文件
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: ipsFile
+    default: "{{Output}}/ipspace/ip-{{TargetSpace}}.txt"
+  - name: subdomainsFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: archiveUrlFile
+    default: "{{Output}}/archive/archive-urls-{{TargetSpace}}.txt"
+  - name: spiderUrlFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+
+  # 工具参数
+  - name: favireconThreads
+    default: 50
+  - name: toolsDir
+    default: "/root/Tools"
+  - name: cmseekPath
+    default: "{{toolsDir}}/CMSeeK/cmseek.py"
+
+  # 输出目录
+  - name: outputDir
+    default: "{{Output}}/fingerprint"
+  - name: faviconOutput
+    default: "{{outputDir}}/favicon/favicon-{{TargetSpace}}.jsonl"
+  - name: wafOutput
+    default: "{{outputDir}}/waf/waf-{{TargetSpace}}.txt"
+  - name: cmsOutput
+    default: "{{outputDir}}/cms/cms-{{TargetSpace}}.txt"
+  - name: virtualhostsOutput
+    default: "{{outputDir}}/virtualhosts-{{TargetSpace}}.txt"
+  - name: llmProbeOutput
+    default: "{{outputDir}}/llm-probe-{{TargetSpace}}.jsonl"
+  - name: llmProbeTxtOutput
+    default: "{{outputDir}}/llm-probe-{{TargetSpace}}.txt"
+
+  # LLM 技术栈攻击建议配置
+  - name: enableLlmTechAttack
+    type: bool
+    default: true
+    description: "Enable LLM-powered tech stack attack suggestions"
+  - name: llmTechAttackReport
+    default: "{{outputDir}}/llm-tech-attack-{{TargetSpace}}.md"
+    description: "LLM tech stack attack suggestions report"
+  - name: httpFingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+    description: "HTTP fingerprint results for tech analysis"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - favirecon
+    - wafw00f
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: favicon-results
+    path: "{{faviconOutput}}"
+    type: jsonl
+    description: Favicon fingerprinting results
+
+  - name: waf-results
+    path: "{{wafOutput}}"
+    type: text
+    description: Detected WAFs
+
+  - name: cms-results
+    path: "{{cmsOutput}}"
+    type: text
+    description: Detected CMS information
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup: Create output folders
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating fingerprint output folders"
+    functions:
+      - 'create_folder("{{outputDir}}/favicon")'
+      - 'create_folder("{{outputDir}}/waf")'
+      - 'create_folder("{{outputDir}}/cms")'
+
+  # ===========================================================================
+  # Phase 1: Favicon Technology Detection
+  # ===========================================================================
+  - name: favirecon-scan
+    type: function
+    pre_condition: '{{enableFaviconRecon}} && file_exists("{{httpFile}}")'
+    log: "Running favicon technology detection"
+    functions:
+      - 'exec_cmd("cat {{httpFile}} | favirecon -silent -t {{favireconThreads}} -json -o {{faviconOutput}} 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: WAF Detection
+  # ===========================================================================
+  - name: wafw00f-scan
+    type: bash
+    pre_condition: '{{enableWafDetection}} && file_exists("{{httpFile}}")'
+    log: "Running WAF detection"
+    command: 'wafw00f -i {{httpFile}} -o {{wafOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: CMS Detection
+  # ===========================================================================
+  - name: prepare-cms-input
+    type: function
+    pre_condition: '{{enableCmsScanner}}'
+    log: "Preparing CMS scan input"
+    functions:
+      - 'exec_cmd("head -n 200 {{archiveUrlFile}} 2>/dev/null >> {{outputDir}}/cms/cms-targets.txt || true")'
+      - 'exec_cmd("head -n 200 {{spiderUrlFile}} 2>/dev/null >> {{outputDir}}/cms/cms-targets.txt || true")'
+      - 'exec_cmd("head -n 200 {{httpFile}} 2>/dev/null >> {{outputDir}}/cms/cms-targets.txt || true")'
+      - 'sort_unix("{{outputDir}}/cms/cms-targets.txt")'
+
+  - name: cmseek-scan
+    type: foreach
+    pre_condition: '{{enableCmsScanner}} && file_exists("{{outputDir}}/cms/cms-targets.txt") && file_exists("{{cmseekPath}}")'
+    log: "Running CMSeeK CMS detection"
+    input: "{{outputDir}}/cms/cms-targets.txt"
+    variable: url
+    threads: 5
+    step:
+      name: cmseek-single
+      type: bash
+      command: 'cd {{toolsDir}}/CMSeeK && python3 cmseek.py -u [[url]] --batch -r 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  - name: parse-cms-results
+    type: function
+    pre_condition: '{{enableCmsScanner}}'
+    log: "Parsing CMS scan results"
+    functions:
+      - 'exec_cmd("find {{outputDir}}/cms -name cms-*.json 2>/dev/null | head -100 >> {{cmsOutput}} || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: Virtualhosts Discovery
+  # ===========================================================================
+  - name: virtualhosts-scan
+    type: bash
+    log: "Discovering virtual hosts"
+    pre_condition: '{{enableVirtualhosts}} && file_exists("{{ipsFile}}") && file_exists("{{subdomainsFile}}")'
+    command: 'VhostFinder -ips {{ipsFile}} -wordlist {{subdomainsFile}} -verify 2>/dev/null | grep "+" > {{virtualhostsOutput}} || true'
+
+  # ===========================================================================
+  # Phase 5: LLM Service Probing
+  # ===========================================================================
+  - name: llm-probe-scan
+    type: bash
+    pre_condition: '{{enableLlmProbe}} && file_exists("{{httpFile}}")'
+    log: "Probing for LLM services (julius)"
+    command: |
+      : > {{llmProbeOutput}}
+      : > {{llmProbeTxtOutput}}
+
+      if [ "{{llmProbeAugustus}}" = "true" ]; then
+        julius -o jsonl -q probe --augustus -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
+      else
+        julius -o jsonl -q probe -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
+      fi
+
+      if [ -s "{{llmProbeOutput}}" ]; then
+        jq -r '[(.target // .url // "unknown"), (.provider // .service // "unknown"), (.probe // "n/a")] | @tsv' {{llmProbeOutput}} 2>/dev/null  | awk -F'\t' '{printf "%s [%s] [%s]\n", $1, $2, $3}' > {{llmProbeTxtOutput}} || true
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: LLM Tech Stack Attack Suggestions (P1)
+  # ===========================================================================
+  - name: llm-tech-attack-suggestions
+    type: llm
+    pre_condition: '{{enableLlmTechAttack}} && file_exists("{{httpFingerprintFile}}")'
+    log: "Generating tech stack attack suggestions with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior penetration tester specializing in technology-specific attacks.
+          Based on the detected technology stack, provide:
+          
+          1. **Known CVEs**: Recent critical vulnerabilities for detected technologies
+          2. **Configuration Issues**: Common misconfigurations for each tech
+          3. **Attack Vectors**: Specific attack paths based on tech combination
+          4. **Tools & Techniques**: Recommended tools and exploitation techniques
+          5. **Detection Evasion**: How to avoid WAF/IDS for each attack
+          
+          Technology categories to analyze:
+          - Web Servers (nginx, apache, iis)
+          - Frameworks (laravel, django, spring, express, next.js)
+          - CMS (wordpress, drupal, joomla)
+          - Databases (mysql, postgresql, mongodb, redis)
+          - Cloud/CDN (aws, azure, cloudflare, akamai)
+          - Languages (php, java, python, node.js, ruby)
+          
+          Provide actionable attack suggestions with specific CVEs and PoCs where known.
+          Format in Markdown.
+      - role: user
+        content: |
+          Analyze the detected technology stack for {{Target}} and suggest attack strategies:
+          
+          Fingerprint data:
+          {{readFile("{{httpFingerprintFile}}") if file_exists("{{httpFingerprintFile}}") else "No fingerprint data"}}
+          
+          WAF detection:
+          {{readFile("{{wafOutput}}") if file_exists("{{wafOutput}}") else "No WAF detected"}}
+          
+          CMS detection:
+          {{readFile("{{cmsOutput}}") if file_exists("{{cmsOutput}}") else "No CMS detected"}}
+          
+          Provide specific attack suggestions with CVEs, tools, and techniques.
+    exports:
+      tech_attack_suggestions: "{{llm_tech_attack_suggestions_content}}"
+
+  - name: save-llm-tech-attack-report
+    type: bash
+    pre_condition: "{{enableLlmTechAttack}}"
+    log: "Saving LLM tech attack suggestions report"
+    command: |
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      echo "# Tech Stack Attack Suggestions - {{Target}}" > {{llmTechAttackReport}}
+      echo "" >> {{llmTechAttackReport}}
+      echo "**Generated:** $(date)" >> {{llmTechAttackReport}}
+      echo "" >> {{llmTechAttackReport}}
+      echo "{{tech_attack_suggestions}}" >> {{llmTechAttackReport}}
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 7: Summary
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "Fingerprinting summary"
+    functions:
+      - 'db_total_assets("{{faviconOutput}}")'

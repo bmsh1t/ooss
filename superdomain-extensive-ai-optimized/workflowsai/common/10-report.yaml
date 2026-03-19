@@ -1,0 +1,538 @@
+# =============================================================================
+# Module Workflow: Final Report Generation
+# =============================================================================
+# 聚合所有扫描结果，生成最终报告
+# =============================================================================
+
+kind: module
+name: generate-final-report
+description: Aggregate all scan results and generate final report
+tags: report, summary, aggregation
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 输入文件 - 资产
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+
+  # 输入文件 - 指纹和爬取
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: spiderFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+
+  # 输入文件 - 内容分析
+  - name: jsSecretsFile
+    default: "{{Output}}/content-analysis/js-secrets-{{TargetSpace}}.txt"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: websocketMisconfigFile
+    default: "{{Output}}/content-analysis/ws-misconfig-{{TargetSpace}}.txt"
+  - name: graphqlEndpointsFile
+    default: "{{Output}}/content-analysis/graphql-endpoints-{{TargetSpace}}.txt"
+  - name: gfDir
+    default: "{{Output}}/gf"
+  - name: paramsFile
+    default: "{{Output}}/content-analysis/params-{{TargetSpace}}.json"
+  - name: dictKeysFile
+    default: "{{Output}}/content-analysis/dict-keys-{{TargetSpace}}.txt"
+
+  # 输入文件 - 漏洞扫描
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCleanFile
+    default: "{{Output}}/vulnscan/clean-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: ssrfCallbackFile
+    default: "{{Output}}/vuln-scan-suite/ssrf-callback-{{TargetSpace}}.txt"
+  - name: sstiFile
+    default: "{{Output}}/vuln-scan-suite/ssti-{{TargetSpace}}.txt"
+  - name: sqliFile
+    default: "{{Output}}/vuln-scan-suite/sqli-{{TargetSpace}}.txt"
+  - name: lfiFile
+    default: "{{Output}}/vuln-scan-suite/lfi-{{TargetSpace}}.txt"
+  - name: secretFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: takeoverFile
+    default: "{{Output}}/vuln-scan-suite/takeover-{{TargetSpace}}.txt"
+
+  # 输入文件 - OSINT
+  - name: osintEmailsFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: osintReposFile
+    default: "{{Output}}/osint/github-company-secrets-{{TargetSpace}}.json"
+  - name: osintCloudFile
+    default: "{{Output}}/osint/cloud-{{TargetSpace}}.txt"
+
+  # LLM 报告生成配置
+  - name: enableLlmReport
+    type: bool
+    default: true
+    description: "Enable LLM-powered report generation and analysis"
+  - name: llmExecutiveSummary
+    default: "{{Output}}/report/llm-executive-summary-{{TargetSpace}}.md"
+    description: "LLM-generated executive summary"
+  - name: llmRiskAssessment
+    default: "{{Output}}/report/llm-risk-assessment-{{TargetSpace}}.md"
+    description: "LLM-generated risk assessment"
+  - name: llmRecommendations
+    default: "{{Output}}/report/llm-recommendations-{{TargetSpace}}.md"
+    description: "LLM-generated remediation recommendations"
+  - name: enableLlmAttackSurface
+    type: bool
+    default: true
+    description: "Enable LLM-powered attack surface analysis"
+  - name: llmAttackSurfaceReport
+    default: "{{Output}}/report/llm-attack-surface-{{TargetSpace}}.md"
+    description: "LLM attack surface analysis report"
+
+  # 输出文件
+  - name: reportDir
+    default: "{{Output}}/report"
+  - name: summaryFile
+    default: "{{Output}}/report/executive-summary-{{TargetSpace}}.md"
+  - name: fullReportFile
+    default: "{{Output}}/report/full-report-{{TargetSpace}}.md"
+  - name: jsonStatsFile
+    default: "{{Output}}/report/statistics-{{TargetSpace}}.json"
+  - name: assetsSummaryFile
+    default: "{{Output}}/report/assets-summary-{{TargetSpace}}.md"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - jq
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: executive-summary
+    path: "{{summaryFile}}"
+    type: markdown
+    description: Executive summary for stakeholders
+
+  - name: full-report
+    path: "{{fullReportFile}}"
+    type: markdown
+    description: Detailed technical report
+
+  - name: statistics
+    path: "{{jsonStatsFile}}"
+    type: json
+    description: Statistical data in JSON format
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating report folder"
+    functions:
+      - 'create_folder("{{reportDir}}")'
+
+  # ---------------------------------------------------------------------------
+  # 收集统计数据
+  # ---------------------------------------------------------------------------
+  - name: collect-statistics
+    type: bash
+    log: "Collecting scan statistics"
+    command: |
+      # 资产统计
+      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      URLS=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      
+      # 内容分析
+      JS_ENDPOINTS=$(wc -l < {{jsEndpointsFile}} 2>/dev/null || echo 0)
+      WS_MISCONFIG=$(wc -l < {{websocketMisconfigFile}} 2>/dev/null || echo 0)
+      GRAPHQL=$(wc -l < {{graphqlEndpointsFile}} 2>/dev/null || echo 0)
+      
+      # OSINT
+      EMAILS=$(wc -l < {{osintEmailsFile}} 2>/dev/null || echo 0)
+      CLOUD_ASSETS=$(wc -l < {{osintCloudFile}} 2>/dev/null || echo 0)
+      
+      # 漏洞统计
+      CRITICAL=$(wc -l < {{nucleiCriticalFile}} 2>/dev/null || echo 0)
+      HIGH=$(wc -l < {{nucleiHighFile}} 2>/dev/null || echo 0)
+      TOTAL_VULNS=$(wc -l < {{nucleiFile}} 2>/dev/null || echo 0)
+      SECRETS=$(wc -l < {{secretFile}} 2>/dev/null || echo 0)
+      TAKEOVERS=$(wc -l < {{takeoverFile}} 2>/dev/null || echo 0)
+      
+      # 生成 JSON
+      cat > {{jsonStatsFile}} << EOF
+      {
+        "target": "{{Target}}",
+        "scan_date": "$(date -Iseconds)",
+        "statistics": {
+          "assets": {"subdomains": $SUBDOMAINS, "resolved": $RESOLVED, "urls": $URLS},
+          "content": {"js_endpoints": $JS_ENDPOINTS, "ws_misconfig": $WS_MISCONFIG, "graphql": $GRAPHQL},
+          "osint": {"emails": $EMAILS, "cloud_assets": $CLOUD_ASSETS},
+          "vulnerabilities": {"total": $TOTAL_VULNS, "critical": $CRITICAL, "high": $HIGH},
+          "secrets": $SECRETS,
+          "takeovers": $TAKEOVERS
+        }
+      }
+      EOF
+      
+      echo "[STATS] Subdomains: $SUBDOMAINS, URLs: $URLS"
+      echo "[STATS] Critical: $CRITICAL, High: $HIGH, Total: $TOTAL_VULNS"
+
+  # ---------------------------------------------------------------------------
+  # 生成执行摘要
+  # ---------------------------------------------------------------------------
+  - name: generate-executive-summary
+    type: bash
+    log: "Generating executive summary"
+    command: |
+      SUBDOMAINS=$(jq -r '.statistics.assets.subdomains' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      URLS=$(jq -r '.statistics.assets.urls' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      CRITICAL=$(jq -r '.statistics.vulnerabilities.critical' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      HIGH=$(jq -r '.statistics.vulnerabilities.high' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      TOTAL_VULNS=$(jq -r '.statistics.vulnerabilities.total' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      SECRETS=$(jq -r '.statistics.secrets' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      TAKEOVERS=$(jq -r '.statistics.takeovers' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      
+      # 风险等级
+      [ "$CRITICAL" -gt 0 ] && RISK_LEVEL="🔴 CRITICAL" && RISK_ACTION="立即修复关键漏洞"
+      [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -gt 0 ] && RISK_LEVEL="🟠 HIGH" && RISK_ACTION="尽快修复高危漏洞"
+      [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -eq 0 ] && [ "$TOTAL_VULNS" -gt 0 ] && RISK_LEVEL="🟡 MEDIUM" && RISK_ACTION="计划修复中等漏洞"
+      [ "$TOTAL_VULNS" -eq 0 ] && RISK_LEVEL="🟢 LOW" && RISK_ACTION="继续保持监控"
+      
+      cat > {{summaryFile}} << EOF
+      # 执行摘要 - {{Target}}
+      
+      **扫描日期**: $(date '+%Y-%m-%d %H:%M:%S')
+      **风险等级**: $RISK_LEVEL
+      
+      ---
+      
+      ## 资产概览
+      
+      | 类别 | 数量 |
+      |------|------|
+      | 🎯 子域名 | $SUBDOMAINS |
+      | 🌐 HTTP 端点 | $URLS |
+      
+      ## 漏洞发现
+      
+      | 严重程度 | 数量 |
+      |----------|------|
+      | 🔴 关键 (Critical) | $CRITICAL |
+      | 🟠 高危 (High) | $HIGH |
+      | 📊 总计 | $TOTAL_VULNS |
+      
+      ## 其他发现
+      
+      | 类别 | 数量 |
+      |------|------|
+      | 🔑 敏感信息泄露 | $SECRETS |
+      | ⚠️ 子域名接管风险 | $TAKEOVERS |
+      
+      ---
+      
+      ## 建议行动
+      
+      $RISK_ACTION
+      
+      ---
+      
+      *本报告由 Osmedeus 自动生成*
+      EOF
+
+  # ---------------------------------------------------------------------------
+  # 生成完整技术报告
+  # ---------------------------------------------------------------------------
+  - name: generate-full-report
+    type: bash
+    log: "Generating full technical report"
+    command: |
+      cat {{summaryFile}} > {{fullReportFile}} 2>/dev/null || true
+      
+      echo -e "\n---\n\n## 详细发现\n" >> {{fullReportFile}}
+      
+      # 关键漏洞
+      if [ -f "{{nucleiCriticalFile}}" ] && [ -s "{{nucleiCriticalFile}}" ]; then
+        echo -e "\n### 🔴 关键漏洞\n" >> {{fullReportFile}}
+        jq -r '"- **\(.template-id)**: \(.info.name) at \(.matched-at)"' {{nucleiCriticalFile}} 2>/dev/null | head -50 >> {{fullReportFile}} || true
+      fi
+      
+      # 高危漏洞
+      if [ -f "{{nucleiHighFile}}" ] && [ -s "{{nucleiHighFile}}" ]; then
+        echo -e "\n### 🟠 高危漏洞\n" >> {{fullReportFile}}
+        jq -r '"- **\(.template-id)**: \(.info.name) at \(.matched-at)"' {{nucleiHighFile}} 2>/dev/null | head -50 >> {{fullReportFile}} || true
+      fi
+      
+      # 敏感信息
+      if [ -f "{{secretFile}}" ] && [ -s "{{secretFile}}" ]; then
+        echo -e "\n### 🔑 敏感信息泄露\n\`\`\`" >> {{fullReportFile}}
+        head -20 {{secretFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+      
+      # 子域名接管
+      if [ -f "{{takeoverFile}}" ] && [ -s "{{takeoverFile}}" ]; then
+        echo -e "\n### ⚠️ 子域名接管风险\n\`\`\`" >> {{fullReportFile}}
+        cat {{takeoverFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+      
+      # WebSocket 错误配置
+      if [ -f "{{websocketMisconfigFile}}" ] && [ -s "{{websocketMisconfigFile}}" ]; then
+        echo -e "\n### 🌐 WebSocket Origin 错误配置\n\`\`\`" >> {{fullReportFile}}
+        cat {{websocketMisconfigFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+      
+      # GraphQL 端点
+      if [ -f "{{graphqlEndpointsFile}}" ] && [ -s "{{graphqlEndpointsFile}}" ]; then
+        echo -e "\n### 📊 GraphQL 端点\n\`\`\`" >> {{fullReportFile}}
+        cat {{graphqlEndpointsFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+      
+      echo -e "\n---\n\n*报告生成时间: $(date '+%Y-%m-%d %H:%M:%S')*" >> {{fullReportFile}}
+
+  # ---------------------------------------------------------------------------
+  # LLM Executive Summary Generation
+  # ---------------------------------------------------------------------------
+  - name: llm-executive-summary
+    type: llm
+    pre_condition: '{{enableLlmReport}}'
+    log: "Generating executive summary with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior security consultant. Generate an executive summary for a security assessment.
+          Focus on business impact, not technical details.
+          Include:
+          1. Overall risk level (Critical/High/Medium/Low)
+          2. Key findings summary
+          3. Business impact assessment
+          4. Recommended actions
+          
+          Format in Markdown, keep it concise for C-level executives.
+      - role: user
+        content: |
+          Generate an executive summary for security assessment of {{Target}}.
+          
+          Subdomains discovered: {{file_length("{{subdomainFile}}") if file_exists("{{subdomainFile}}") else 0}}
+          Live hosts: {{file_length("{{httpFile}}") if file_exists("{{httpFile}}") else 0}}
+          URLs collected: {{file_length("{{spiderFile}}") if file_exists("{{spiderFile}}") else 0}}
+          
+          {{readFile("{{nucleiFile}}") if file_exists("{{nucleiFile}}") else "No vulnerability data"}}
+    exports:
+      executive_summary: "{{llm_executive_summary_content}}"
+
+  - name: save-llm-executive-summary
+    type: bash
+    pre_condition: "{{enableLlmReport}}"
+    log: "Saving LLM executive summary"
+    command: |
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      echo "# Executive Summary - {{Target}}" > {{llmExecutiveSummary}}
+      echo "" >> {{llmExecutiveSummary}}
+      echo "{{executive_summary}}" >> {{llmExecutiveSummary}}
+    on_error:
+      - action: continue
+
+  - name: llm-risk-assessment
+    type: llm
+    pre_condition: '{{enableLlmReport}} && file_exists("{{nucleiFile}}")'
+    log: "Generating risk assessment with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a security risk analyst. Generate a detailed risk assessment.
+          Include:
+          1. Vulnerability breakdown by severity
+          2. Attack surface analysis
+          3. Threat modeling insights
+          4. Risk scoring (CVSS context)
+          
+          Format in Markdown with clear sections.
+      - role: user
+        content: |
+          Generate risk assessment for {{Target}}:
+          
+          Vulnerability scan results:
+          {{readFile("{{nucleiFile}}")}}
+          
+          Fingerprint data:
+          {{readFile("{{fingerprintFile}}") if file_exists("{{fingerprintFile}}") else "No fingerprint data"}}
+    exports:
+      risk_assessment: "{{llm_risk_assessment_content}}"
+
+  - name: save-llm-risk-assessment
+    type: bash
+    pre_condition: "{{enableLlmReport}}"
+    log: "Saving LLM risk assessment"
+    command: |
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      echo "# Risk Assessment - {{Target}}" > {{llmRiskAssessment}}
+      echo "" >> {{llmRiskAssessment}}
+      echo "{{risk_assessment}}" >> {{llmRiskAssessment}}
+    on_error:
+      - action: continue
+
+  - name: llm-recommendations
+    type: llm
+    pre_condition: '{{enableLlmReport}}'
+    log: "Generating remediation recommendations with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a security consultant. Generate actionable remediation recommendations.
+          Prioritize by:
+          1. Critical vulnerabilities requiring immediate action
+          2. Quick wins that can be implemented quickly
+          3. Long-term security improvements
+          
+          Include specific steps and code examples where applicable.
+      - role: user
+        content: |
+          Generate remediation recommendations for {{Target}}:
+          
+          Vulnerabilities:
+          {{readFile("{{nucleiFile}}") if file_exists("{{nucleiFile}}") else "No vulnerability data"}}
+          
+          Secrets found:
+          {{readFile("{{secretFile}}") if file_exists("{{secretFile}}") else "No secrets data"}}
+          
+          Misconfigurations:
+          {{readFile("{{websocketMisconfigFile}}") if file_exists("{{websocketMisconfigFile}}") else "No misconfig data"}}
+    exports:
+      recommendations: "{{llm_recommendations_content}}"
+
+  - name: save-llm-recommendations
+    type: bash
+    pre_condition: "{{enableLlmReport}}"
+    log: "Saving LLM recommendations"
+    command: |
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      echo "# Remediation Recommendations - {{Target}}" > {{llmRecommendations}}
+      echo "" >> {{llmRecommendations}}
+      echo "{{recommendations}}" >> {{llmRecommendations}}
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: LLM Attack Surface Analysis (P2)
+  # ===========================================================================
+  - name: llm-attack-surface-analysis
+    type: llm
+    pre_condition: '{{enableLlmAttackSurface}}'
+    log: "Generating attack surface analysis with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior red team lead specializing in attack surface management.
+          Create a comprehensive attack surface analysis that:
+          
+          1. **Asset Correlation**: Map relationships between discovered assets
+             - Subdomains to IP addresses
+             - Services to technologies
+             - Credentials to systems
+             - Vulnerabilities to attack paths
+          
+          2. **Attack Path Analysis**: Identify potential attack chains
+             - External to internal pivot points
+             - Privilege escalation opportunities
+             - Lateral movement possibilities
+             - Data exfiltration routes
+          
+          3. **Critical Asset Identification**: High-value targets
+             - Authentication systems
+             - Database servers
+             - Administrative interfaces
+             - Internal tools/exposure
+          
+          4. **Risk Scoring**: Calculate overall risk score
+             - Exposure level (Public/Internal)
+             - Vulnerability severity
+             - Business impact
+             - Exploitability
+          
+          5. **Attack Graph**: Visual representation of attack surface
+             - Entry points
+             - Pivot points
+             - Target assets
+          
+          Provide actionable intelligence for red team operations.
+          Format in Markdown with structured sections.
+      - role: user
+        content: |
+          Generate attack surface analysis for {{Target}}:
+          
+          Subdomains discovered:
+          {{readFile("{{subdomainFile}}") if file_exists("{{subdomainFile}}") else "No subdomains"}}
+          
+          HTTP services:
+          {{readFile("{{httpFile}}") if file_exists("{{httpFile}}") else "No HTTP services"}}
+          
+          Technologies detected:
+          {{readFile("{{httpFingerprintFile}}") if file_exists("{{httpFingerprintFile}}") else "No fingerprint data"}}
+          
+          Vulnerabilities found:
+          {{readFile("{{nucleiFile}}") if file_exists("{{nucleiFile}}") else "No vulnerabilities"}}
+          
+          Secrets/credentials:
+          {{readFile("{{secretsFile}}") if file_exists("{{secretsFile}}") else "No secrets"}}
+          
+          WAF/CDN:
+          {{readFile("{{wafFile}}") if file_exists("{{wafFile}}") else "No WAF data"}}
+          
+          Provide a comprehensive attack surface analysis with attack paths.
+    exports:
+      attack_surface: "{{llm_attack_surface_analysis_content}}"
+
+  - name: save-llm-attack-surface-report
+    type: bash
+    pre_condition: "{{enableLlmAttackSurface}}"
+    log: "Saving LLM attack surface analysis report"
+    command: |
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      echo "# Attack Surface Analysis - {{Target}}" > {{llmAttackSurfaceReport}}
+      echo "" >> {{llmAttackSurfaceReport}}
+      echo "**Generated:** $(date)" >> {{llmAttackSurfaceReport}}
+      echo "" >> {{llmAttackSurfaceReport}}
+      echo "{{attack_surface}}" >> {{llmAttackSurfaceReport}}
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # 发送报告通知
+  # ---------------------------------------------------------------------------
+  - name: send-report-notification
+    type: function
+    log: "Sending report notification"
+    pre_condition: 'file_exists("{{summaryFile}}")'
+    functions:
+      - 'send_telegram_file("{{summaryFile}}", "Security Scan Report - {{Target}}")'
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  - name: report-generation-summary
+    type: function
+    log: "Report generation complete"
+    functions:
+      - 'db_total_assets("{{fullReportFile}}")'

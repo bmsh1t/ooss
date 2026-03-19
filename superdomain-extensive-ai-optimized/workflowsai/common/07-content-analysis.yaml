@@ -1,0 +1,837 @@
+# =============================================================================
+# Module Workflow: Content Analysis
+# =============================================================================
+# 合并: GF Patterns + JS 分析 + 参数发现 + WebSocket + GraphQL + Wordlist
+# =============================================================================
+
+kind: module
+name: content-analysis
+description: Content analysis - GF patterns, JS analysis, parameter discovery, WebSocket, GraphQL
+tags: gf, js, param, analysis, patterns, secrets, websocket, graphql
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 工具路径
+  - name: toolsDir
+    default: "/root/Tools"
+
+  # 功能开关
+  - name: enableGfPatterns
+    type: bool
+    default: true
+  - name: enableJsAnalysis
+    type: bool
+    default: true
+  - name: enableParamDiscovery
+    type: bool
+    default: true
+  - name: enableWebSocketCheck
+    type: bool
+    default: true
+  - name: enableGraphQLScan
+    type: bool
+    default: true
+  - name: enableWordlistGen
+    type: bool
+    default: true
+  - name: enableDnsValidation
+    type: bool
+    default: false
+  - name: enableJsSecretScan
+    type: bool
+    default: true
+  - name: enableJsSubExtract
+    type: bool
+    default: true
+    description: "Extract new subdomains from JS/crawl outputs"
+  - name: enableUrlExt
+    type: bool
+    default: true
+    description: "Classify URLs by file extension (.sql, .bak, .env, etc.)"
+
+  # 输入文件
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: spiderUrlFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+  - name: archiveUrlFile
+    default: "{{Output}}/archive/archive-urls-{{TargetSpace}}.txt"
+  - name: subdomainsFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+
+  # 工具参数
+  - name: jsThreads
+    default: "{{threads}}"
+  - name: arjunThreads
+    default: 10
+  - name: arjunMethod
+    default: "GET"
+  - name: paramLimit
+    default: 1000
+
+  # 输出目录
+  - name: outputDir
+    default: "{{Output}}/content-analysis"
+  - name: gfDir
+    default: "{{Output}}/gf"
+
+  # 输出文件
+  - name: combinedUrlsRawFile
+    default: "{{outputDir}}/combined-urls-raw.txt"
+  - name: combinedUrlsFile
+    default: "{{outputDir}}/combined-urls.txt"
+  - name: domainsRawFile
+    default: "{{outputDir}}/domains-raw.txt"
+  - name: domainsValidFile
+    default: "{{outputDir}}/domains-valid.txt"
+  - name: jsLinksFile
+    default: "{{outputDir}}/js-links-{{TargetSpace}}.txt"
+  - name: jsLiveLinksFile
+    default: "{{outputDir}}/js-live-{{TargetSpace}}.txt"
+  - name: jsUrlsFile
+    default: "{{Output}}/links/js-urls-{{TargetSpace}}.txt"
+  - name: jsSecretsFile
+    default: "{{outputDir}}/js-secrets-{{TargetSpace}}.txt"
+  - name: jsSecretsJsmapFile
+    default: "{{outputDir}}/js-secrets-jsmap-{{TargetSpace}}.txt"
+  - name: jsEndpointsFile
+    default: "{{outputDir}}/js-endpoints-{{TargetSpace}}.txt"
+  - name: jsSourcemapDir
+    default: "{{outputDir}}/sourcemapper"
+  - name: jsJsmapUrlsFile
+    default: "{{outputDir}}/js-jsmap-urls-{{TargetSpace}}.txt"
+  - name: paramsOutputFile
+    default: "{{outputDir}}/params-{{TargetSpace}}.json"
+  - name: websocketEndpointsFile
+    default: "{{outputDir}}/ws-endpoints-{{TargetSpace}}.txt"
+  - name: websocketValidFile
+    default: "{{outputDir}}/ws-valid-{{TargetSpace}}.txt"
+  - name: websocketMisconfigFile
+    default: "{{outputDir}}/ws-misconfig-{{TargetSpace}}.txt"
+  - name: graphqlEndpointsFile
+    default: "{{outputDir}}/graphql-endpoints-{{TargetSpace}}.txt"
+  - name: graphqlSchemaDir
+    default: "{{outputDir}}/graphql-schemas"
+  - name: dictKeysFile
+    default: "{{outputDir}}/dict-keys-{{TargetSpace}}.txt"
+  - name: dictValuesFile
+    default: "{{outputDir}}/dict-values-{{TargetSpace}}.txt"
+  - name: dictWordsFile
+    default: "{{outputDir}}/dict-words-{{TargetSpace}}.txt"
+  - name: urlExtFile
+    default: "{{outputDir}}/url-ext-{{TargetSpace}}.txt"
+  # 原始 URL 生成的 wordlist (DNS验证前)
+  - name: dictKeysRawFile
+    default: "{{outputDir}}/dict-keys-raw-{{TargetSpace}}.txt"
+  - name: dictValuesRawFile
+    default: "{{outputDir}}/dict-values-raw-{{TargetSpace}}.txt"
+  - name: dictWordsRawFile
+    default: "{{outputDir}}/dict-words-raw-{{TargetSpace}}.txt"
+  # JS 子域名提取
+  - name: jsExtractedHostsFile
+    default: "{{outputDir}}/js-extracted-hosts-{{TargetSpace}}.txt"
+  - name: jsNewSubsFile
+    default: "{{outputDir}}/js-new-subs-{{TargetSpace}}.txt"
+  - name: jsResolvedSubsFile
+    default: "{{outputDir}}/js-resolved-subs-{{TargetSpace}}.txt"
+
+  # LLM Secrets 分析配置
+  - name: enableLlmSecretsAnalysis
+    type: bool
+    default: true
+    description: "Enable LLM-powered secrets risk analysis"
+  - name: llmSecretsReport
+    default: "{{outputDir}}/llm-secrets-analysis-{{TargetSpace}}.md"
+    description: "LLM secrets risk analysis report"
+  - name: enableLlmCodeReview
+    type: bool
+    default: false
+    description: "Enable LLM code review for discovered JS files"
+  
+  # LLM JS API 端点提取配置
+  - name: enableLlmJsApiExtract
+    type: bool
+    default: true
+    description: "Enable LLM-powered JS API endpoint extraction"
+  - name: llmJsApiReport
+    default: "{{outputDir}}/llm-js-api-endpoints-{{TargetSpace}}.md"
+    description: "LLM JS API endpoints analysis report"
+  - name: jsApiEndpointsFile
+    default: "{{outputDir}}/js-api-endpoints-{{TargetSpace}}.txt"
+    description: "Extracted API endpoints from JS files"
+  
+  # LLM 敏感信息上下文分析配置
+  - name: enableLlmSensitiveContext
+    type: bool
+    default: true
+    description: "Enable LLM-powered sensitive info context analysis"
+  - name: llmSensitiveContextReport
+    default: "{{outputDir}}/llm-sensitive-context-{{TargetSpace}}.md"
+    description: "LLM sensitive context analysis report"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - gf
+    - anew
+    - katana
+    - arjun
+    - titus
+    - trufflehog
+    - httpx
+    - unfurl
+    - puredns
+    - subjs
+    - mantra
+    - sourcemapper
+    - jsluice
+    - xnLinkFinder
+    - interlace
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: lfi-patterns
+    path: "{{gfDir}}/lfi-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with LFI-prone patterns
+
+  - name: ssti-patterns
+    path: "{{gfDir}}/ssti-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with SSTI-prone patterns
+
+  - name: sqli-patterns
+    path: "{{gfDir}}/sqli-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with SQLi-prone patterns
+
+  - name: ssrf-patterns
+    path: "{{gfDir}}/ssrf-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with SSRF-prone patterns
+
+  - name: rce-patterns
+    path: "{{gfDir}}/rce-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with RCE-prone patterns
+
+  - name: xss-patterns
+    path: "{{gfDir}}/xss-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with XSS-prone patterns
+
+  - name: redirect-patterns
+    path: "{{gfDir}}/redirect-{{TargetSpace}}.txt"
+    type: text
+    description: URLs with redirect patterns
+
+  - name: js-links
+    path: "{{jsLinksFile}}"
+    type: text
+    description: JavaScript URLs extracted by subjs
+
+  - name: js-live-links
+    path: "{{jsLiveLinksFile}}"
+    type: text
+    description: Live JavaScript URLs verified by httpx
+
+  - name: js-urls
+    path: "{{jsUrlsFile}}"
+    type: text
+    description: URLs extracted from JavaScript by katana
+
+  - name: js-endpoints
+    path: "{{jsEndpointsFile}}"
+    type: text
+    description: Endpoints extracted from JavaScript files
+
+  - name: js-secrets
+    path: "{{jsSecretsFile}}"
+    type: text
+    description: Secrets found in JavaScript files
+
+  - name: js-secrets-jsmap
+    path: "{{jsSecretsJsmapFile}}"
+    type: text
+    description: Secrets found in sourcemapped JavaScript files
+
+  - name: websocket-misconfig
+    path: "{{websocketMisconfigFile}}"
+    type: text
+    description: WebSocket endpoints with origin misconfiguration
+
+  - name: graphql-endpoints
+    path: "{{graphqlEndpointsFile}}"
+    type: text
+    description: Discovered GraphQL endpoints
+
+  - name: dict-keys
+    path: "{{dictKeysFile}}"
+    type: text
+    description: Extracted parameter keys for fuzzing
+
+  - name: js-extracted-subs
+    path: "{{jsResolvedSubsFile}}"
+    type: text
+    description: New subdomains extracted from JS/crawl outputs
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  - name: create-output-folders
+    type: bash
+    log: "Creating output folders"
+    command: |
+      mkdir -p "{{outputDir}}" "{{gfDir}}" "{{graphqlSchemaDir}}" 2>/dev/null || true
+
+  # ===========================================================================
+  # Phase 1: Prepare Combined URL List (DNS Validation Optional)
+  # ===========================================================================
+  - name: prepare-combined-urls
+    type: bash
+    log: "Preparing combined URL list"
+    command: |
+      # 合并所有URL文件
+      for f in "{{httpFile}}" "{{spiderUrlFile}}" "{{archiveUrlFile}}"; do
+        [ -f "$f" ] && cat "$f" >> {{combinedUrlsRawFile}} || true
+      done
+      sort -u {{combinedUrlsRawFile}} -o {{combinedUrlsRawFile}} 2>/dev/null || true
+
+      # 过滤超长 URL (2048 字符限制，与 reconftw 一致)
+      sed -i '/^.\{2048\}./d' {{combinedUrlsRawFile}} 2>/dev/null || true
+
+      # 复制原始文件用于后续处理
+      cp {{combinedUrlsRawFile}} {{combinedUrlsFile}} 2>/dev/null || true
+
+      # DNS 验证 (可选)
+      if [ "{{enableDnsValidation}}" = "true" ]; then
+        cat {{combinedUrlsFile}} | unfurl -u domains 2>/dev/null | sort -u > {{domainsRawFile}} || true
+        puredns resolve {{domainsRawFile}} -w {{domainsValidFile}} 2>/dev/null || true
+        valid_domains=$(cat {{domainsValidFile}} 2>/dev/null | tr '\n' '|' | sed 's/|$//')
+        if [ -n "$valid_domains" ]; then
+          grep -aE "^https?://($valid_domains)(:[0-9]+)?(/[^[:space:]]*)?$" {{combinedUrlsFile}} 2>/dev/null |  sort -u > {{combinedUrlsFile}}.tmp || true
+          [ -s {{combinedUrlsFile}}.tmp ] && mv {{combinedUrlsFile}}.tmp {{combinedUrlsFile}} || rm -f {{combinedUrlsFile}}.tmp
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: GF Patterns Extraction
+  # ===========================================================================
+  - name: gf-patterns
+    type: bash
+    pre_condition: '{{enableGfPatterns}}'
+    log: "Extracting vulnerability patterns"
+    command: |
+      for pattern in lfi ssti sqli rce xss ssrf redirect; do
+        cat {{combinedUrlsFile}} | gf $pattern 2>/dev/null | anew -q {{gfDir}}/${pattern}-{{TargetSpace}}.txt || true
+      done
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: JavaScript Analysis (reconftw style)
+  # ===========================================================================
+  - name: extract-js-urls
+    type: function
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{httpFile}}")'
+    log: "Extracting JavaScript URLs with subjs"
+    functions:
+      - 'exec_cmd("subjs -ua \"Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0\" -c 40 < {{httpFile}} 2>/dev/null | grep -aEo \"https?://[^ ]+\" | anew -q {{jsLinksFile}} || true")'
+    on_error:
+      - action: continue
+
+  - name: verify-js-urls
+    type: function
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLinksFile}}")'
+    log: "Verifying live JavaScript URLs"
+    functions:
+      - 'exec_cmd("httpx -silent -follow-redirects -random-agent -status-code -content-type -mc 200 -ct javascript -timeout 10 -threads {{jsThreads}} < {{jsLinksFile}} 2>/dev/null | awk \"/\\\\[200\\\\]/ && /javascript/ {print \\$1}\" | anew -q {{jsLiveLinksFile}} || true")'
+    on_error:
+      - action: continue
+
+  - name: katana-js-crawl
+    type: function
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
+    log: "Crawling JavaScript files with katana"
+    functions:
+      - 'exec_cmd("katana -jsl {{jsLiveLinksFile}} -jc -d 1 -c {{jsThreads}} -fs rdn -aff -o {{jsUrlsFile}} 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  - name: jsa-deep-analysis
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    log: "Running JSA deep analysis for JS URL extraction (DEEP mode)"
+    command: |
+      if [ -s "{{jsUrlsFile}}" ]; then
+        # 使用 JSA 工具从 JS 文件中提取更多 URL (与 reconftw DEEP 模式一致)
+        if [ -x "{{toolsDir}}/JSA/venv/bin/python3" ] && [ -f "{{toolsDir}}/JSA/jsa.py" ]; then
+          interlace -tL {{jsUrlsFile}} -threads 10 -c "{{toolsDir}}/JSA/venv/bin/python3 {{toolsDir}}/JSA/jsa.py -f _target_ | anew -q {{combinedUrlsFile}}" 2>/dev/null || true
+          echo "[JSA] Deep JS analysis completed"
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  - name: sourcemap-analysis
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
+    log: "Extracting from sourcemaps"
+    command: |
+      mkdir -p {{jsSourcemapDir}} 2>/dev/null || true
+      
+      # 使用 interlace 并行处理 sourcemap
+      interlace -tL {{jsLiveLinksFile}} -threads 10 -c "sourcemapper -jsurl '_target_' -output {{jsSourcemapDir}}/_cleantarget_" 2>/dev/null || true
+      
+      # 从 sourcemap 提取 URLs (find 需要括号分组)
+      find {{jsSourcemapDir}} \( -name "*.js" -o -name "*.ts" \) 2>/dev/null | jsluice urls 2>/dev/null | jq -r .url 2>/dev/null > {{jsJsmapUrlsFile}} || true
+    on_error:
+      - action: continue
+
+  - name: extract-js-endpoints
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
+    log: "Extracting JS endpoints with xnLinkFinder"
+    command: |
+      # 使用 xnLinkFinder 收集 endpoints (带 scope 过滤)
+      if [ -f "{{subdomainsFile}}" ]; then
+        xnLinkFinder -i {{jsLiveLinksFile}} -sf {{subdomainsFile}} -d 2 -o {{jsEndpointsFile}} 2>/dev/null || true
+      else
+        xnLinkFinder -i {{jsLiveLinksFile}} -d 2 -o {{jsEndpointsFile}} 2>/dev/null || true
+      fi
+      
+      # 合并 katana 和 jsluice 的结果
+      [ -s {{jsUrlsFile}} ] && cat {{jsUrlsFile}} | anew -q {{jsEndpointsFile}} || true
+      [ -s {{jsJsmapUrlsFile}} ] && cat {{jsJsmapUrlsFile}} | anew -q {{jsEndpointsFile}} || true
+    on_error:
+      - action: continue
+
+  - name: js-secret-scan
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} && {{enableJsSecretScan}} && file_exists("{{jsLiveLinksFile}}")'
+    log: "Scanning JS for secrets"
+    command: |
+      cat {{jsLiveLinksFile}} | mantra -ua "Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0" -s 2>/dev/null | anew -q {{jsSecretsFile}} || true
+
+      if [ -d "{{jsSourcemapDir}}" ]; then
+        trufflehog filesystem {{jsSourcemapDir}} -j 2>/dev/null | jq -c 2>/dev/null | anew -q {{jsSecretsJsmapFile}} || true
+        find {{jsSourcemapDir}} -name "*.js" 2>/dev/null | jsluice secrets -j 2>/dev/null | anew -q {{jsSecretsJsmapFile}} || true
+        titus scan --format json {{jsSourcemapDir}} 2>/dev/null | jq -c 2>/dev/null | anew -q {{jsSecretsFile}} || true
+      fi
+
+      rm -rf {{jsSourcemapDir}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: Subdomain Extraction from JS/Crawl Outputs
+  # ===========================================================================
+  - name: extract-hostnames-from-js
+    type: bash
+    pre_condition: '{{enableJsSubExtract}}'
+    log: "Extracting hostnames from JS/crawl outputs"
+    command: |
+      : > {{jsExtractedHostsFile}}
+      
+      # 从 JS/爬虫输出文件中提取主机名
+      for f in {{jsLiveLinksFile}} {{jsUrlsFile}} {{jsEndpointsFile}} {{combinedUrlsFile}}; do
+        if [ -f "$f" ]; then
+          grep -aoE 'https?://[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' "$f" 2>/dev/null  | sed -E 's|^https?://||' | sed -E 's|[:/].*||' >> {{jsExtractedHostsFile}} || true
+        fi
+      done
+      
+      # 从 JS secrets 文件中提取主机名 (可能引用内部主机)
+      for f in {{jsSecretsFile}} {{jsSecretsJsmapFile}}; do
+        if [ -f "$f" ]; then
+          grep -aoE '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' "$f" 2>/dev/null  >> {{jsExtractedHostsFile}} || true
+        fi
+      done
+      
+      # 去重并过滤有效域名
+      sort -u {{jsExtractedHostsFile}} 2>/dev/null  | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' > {{jsExtractedHostsFile}}.tmp || true
+      mv {{jsExtractedHostsFile}}.tmp {{jsExtractedHostsFile}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: filter-known-subdomains
+    type: bash
+    pre_condition: '{{enableJsSubExtract}} && file_exists("{{jsExtractedHostsFile}}") && file_length("{{jsExtractedHostsFile}}") > 0'
+    log: "Filtering known subdomains"
+    command: |
+      # 过滤已知子域名
+      if [ -f "{{subdomainsFile}}" ]; then
+        sort -u {{jsExtractedHostsFile}} > {{outputDir}}/.tmp_js_hosts.txt 2>/dev/null || true
+        sort -u {{subdomainsFile}} > {{outputDir}}/.tmp_known_subs.txt 2>/dev/null || true
+        comm -23 {{outputDir}}/.tmp_js_hosts.txt {{outputDir}}/.tmp_known_subs.txt > {{jsNewSubsFile}} 2>/dev/null || true
+        rm -f {{outputDir}}/.tmp_js_hosts.txt {{outputDir}}/.tmp_known_subs.txt 2>/dev/null || true
+      else
+        cp {{jsExtractedHostsFile}} {{jsNewSubsFile}} 2>/dev/null || true
+      fi
+    on_error:
+      - action: continue
+
+  - name: resolve-js-subdomains
+    type: bash
+    pre_condition: '{{enableJsSubExtract}} && file_exists("{{jsNewSubsFile}}") && file_length("{{jsNewSubsFile}}") > 0'
+    log: "Resolving new subdomains from JS extraction"
+    command: |
+      : > {{jsResolvedSubsFile}}
+      
+      # DNS 验证
+      puredns resolve {{jsNewSubsFile}} --wildcard-tests 30 -w {{jsResolvedSubsFile}} 2>/dev/null || true
+      
+      # 合并到子域名文件
+      if [ -s "{{jsResolvedSubsFile}}" ]; then
+        cat {{jsResolvedSubsFile}} | anew -q {{subdomainsFile}} || true
+        echo "[JS-EXTRACT] Found $(wc -l < {{jsResolvedSubsFile}} 2>/dev/null || echo 0) new subdomains from JS extraction"
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: Parameter Discovery
+  # ===========================================================================
+  - name: prepare-arjun-input
+    type: bash
+    pre_condition: '{{enableParamDiscovery}} && file_exists("{{combinedUrlsFile}}")'
+    log: "Preparing URLs with parameters for Arjun"
+    command: |
+      grep -E '[?&]' {{combinedUrlsFile}} 2>/dev/null | head -n {{paramLimit}} > {{outputDir}}/arjun-input.txt || true
+    on_error:
+      - action: continue
+
+  - name: arjun-scan
+    type: bash
+    pre_condition: '{{enableParamDiscovery}} && file_exists("{{outputDir}}/arjun-input.txt") && file_length("{{outputDir}}/arjun-input.txt") > 0'
+    log: "Running parameter discovery"
+    command: |
+      arjun -i {{outputDir}}/arjun-input.txt -t {{arjunThreads}} -m {{arjunMethod}} -oJ {{paramsOutputFile}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: WebSocket Detection
+  # ===========================================================================
+  - name: websocket-check
+    type: bash
+    pre_condition: '{{enableWebSocketCheck}} && file_exists("{{combinedUrlsFile}}")'
+    log: "Checking WebSocket endpoints"
+    command: |
+      grep -aEo 'wss?://[^ "]+' {{combinedUrlsFile}} 2>/dev/null | sort -u > {{websocketEndpointsFile}} || true
+      
+      # 并行检测 WebSocket 握手
+      cat {{websocketEndpointsFile}} 2>/dev/null | xargs -P 10 -I WS sh -c '
+        ws="$1"
+        host=$(echo "$ws" | sed "s|^wss\?://||" | cut -d"/" -f1)
+        wskey=$(head -c 16 /dev/urandom | base64 2>/dev/null)
+        code=$(curl -sk --http1.1 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Host: $host" -H "Sec-WebSocket-Key: $wskey" -H "Sec-WebSocket-Version: 13" "$ws" 2>/dev/null)
+        [ "$code" = "101" ] && echo "HANDSHAKE $ws"
+      ' _ WS > {{websocketValidFile}} 2>/dev/null || true
+      
+      # 并行检测 Origin 绕过
+      cat {{websocketValidFile}} 2>/dev/null | sed 's/HANDSHAKE //' | xargs -P 10 -I WS sh -c '
+        ws="$1"
+        host=$(echo "$ws" | sed "s|^wss\?://||" | cut -d"/" -f1)
+        wskey=$(head -c 16 /dev/urandom | base64 2>/dev/null)
+        code=$(curl -sk --http1.1 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Origin: https://evil.example" -H "Host: $host" -H "Sec-WebSocket-Key: $wskey" -H "Sec-WebSocket-Version: 13" "$ws" 2>/dev/null)
+        [ "$code" = "101" ] && echo "ORIGIN-ALLOWED $ws"
+      ' _ WS > {{websocketMisconfigFile}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 7: GraphQL Detection
+  # ===========================================================================
+  - name: graphql-detect
+    type: bash
+    pre_condition: '{{enableGraphQLScan}} && file_exists("{{httpFile}}")'
+    log: "Detecting GraphQL endpoints"
+    command: |
+      # 并行检测 GraphQL endpoints (xargs -I 替换需要在 sh -c 外部传递参数)
+      cat {{httpFile}} 2>/dev/null | xargs -P 10 -I URL sh -c '
+        url="$1"
+        for path in /graphql /api/graphql /v1/graphql; do
+          if curl -s -m 3 -H "Content-Type: application/json" -d "{\"query\":\"{__schema{types{name}}}\"}" "${url}${path}" 2>/dev/null | grep -q "__schema"; then
+            echo "${url}${path}"
+            break
+          fi
+        done
+      ' _ URL > {{graphqlEndpointsFile}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: graphql-introspection
+    type: bash
+    pre_condition: '{{enableGraphQLScan}} && file_length("{{graphqlEndpointsFile}}") > 0'
+    log: "Running GraphQL introspection"
+    command: |
+      mkdir -p {{graphqlSchemaDir}} 2>/dev/null || true
+      # 并行执行 introspection
+      cat {{graphqlEndpointsFile}} 2>/dev/null | xargs -P 5 -I EP sh -c '
+        ep="$1"
+        host=$(echo "$ep" | sed "s|^[^/]*//||; s|/.*$||")
+        curl -s -m 10 -H "Content-Type: application/json" -d "{\"query\":\"{__schema{queryType{name}mutationType{name}types{name}}}\"}" "$ep" 2>/dev/null | jq "." > {{graphqlSchemaDir}}/${host}.json 2>/dev/null || true
+      ' _ EP || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 8: Wordlist Generation
+  # ===========================================================================
+  - name: wordlist-gen
+    type: bash
+    pre_condition: '{{enableWordlistGen}}'
+    log: "Generating wordlists from raw and validated URLs"
+    command: |
+      # 从验证后的 URL 生成 wordlist
+      if [ -f "{{combinedUrlsFile}}" ]; then
+        cat {{combinedUrlsFile}} | unfurl -u keys 2>/dev/null | sed 's/[][]//g; s/[#]//g; s/[}{]//g' > {{dictKeysFile}} || true
+        cat {{combinedUrlsFile}} | unfurl -u values 2>/dev/null | sed 's/[][]//g; s/[#]//g; s/[}{]//g' > {{dictValuesFile}} || true
+        tr '[:punct:]' '\n' < {{combinedUrlsFile}} | sed '/^$/d' > {{dictWordsFile}} || true
+      fi
+
+      # 从原始 URL 生成 wordlist (DNS验证前)
+      if [ -f "{{combinedUrlsRawFile}}" ]; then
+        cat {{combinedUrlsRawFile}} | unfurl -u keys 2>/dev/null | sed 's/[][]//g; s/[#]//g; s/[}{]//g' > {{dictKeysRawFile}} || true
+        cat {{combinedUrlsRawFile}} | unfurl -u values 2>/dev/null | sed 's/[][]//g; s/[#]//g; s/[}{]//g' > {{dictValuesRawFile}} || true
+        tr '[:punct:]' '\n' < {{combinedUrlsRawFile}} | sed '/^$/d' > {{dictWordsRawFile}} || true
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 8a: URL Extension Classification
+  # ===========================================================================
+  - name: url-ext-classify
+    type: bash
+    pre_condition: '{{enableUrlExt}} && file_exists("{{combinedUrlsFile}}")'
+    log: "Classifying URLs by file extension"
+    command: |
+      : > {{urlExtFile}}
+
+      # 扩展名列表 (敏感文件类型)
+      ext_pattern='\.(sql|bak|env|config|conf|ini|log|old|backup|zip|tar|gz|rar|7z|pem|key|pub|db|sqlite|yaml|yml|json|xml|md|txt|csv|xls|xlsx|doc|docx|pdf|swf|jar|war|ear|wsdl|asmx|ashx|jsp|php|asp|aspx)(\?.*)?$'
+
+      # 提取有敏感扩展名的 URL
+      grep -iE "$ext_pattern" {{combinedUrlsFile}} 2>/dev/null | sort -u > {{urlExtFile}} || true
+
+      if [ -s "{{urlExtFile}}" ]; then
+        count=$(wc -l < {{urlExtFile}} 2>/dev/null || echo 0)
+        echo "[URL-EXT] Found $count URLs with interesting extensions"
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 9: LLM Secrets Risk Analysis
+  # ===========================================================================
+  - name: llm-secrets-analysis
+    type: llm
+    pre_condition: '{{enableLlmSecretsAnalysis}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}"))'
+    log: "Analyzing discovered secrets with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior security analyst specializing in secret detection and credential exposure.
+          Analyze the discovered secrets and provide:
+          1. Risk level for each secret type (Critical/High/Medium/Low)
+          2. Potential impact if exploited
+          3. Recommended immediate actions
+          4. False positive likelihood assessment
+          
+          Format in Markdown with clear categorization.
+      - role: user
+        content: |
+          Analyze these discovered secrets from JavaScript analysis for {{Target}}:
+          
+          Secrets from JS files:
+          {{readFile("{{jsSecretsFile}}") if file_exists("{{jsSecretsFile}}") else "No secrets found"}}
+          
+          Secrets from Source maps:
+          {{readFile("{{jsSecretsJsmapFile}}") if file_exists("{{jsSecretsJsmapFile}}") else "No secrets found"}}
+          
+          Provide a risk assessment and prioritize findings.
+    exports:
+      secrets_analysis: "{{llm_secrets_analysis_content}}"
+
+  - name: save-llm-secrets-report
+    type: bash
+    pre_condition: "{{enableLlmSecretsAnalysis}}"
+    log: "Saving LLM secrets analysis report"
+    command: |
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      echo "# Secrets Risk Analysis - {{Target}}" > {{llmSecretsReport}}
+      echo "" >> {{llmSecretsReport}}
+      echo "**Generated:** $(date)" >> {{llmSecretsReport}}
+      echo "" >> {{llmSecretsReport}}
+      echo "{{secrets_analysis}}" >> {{llmSecretsReport}}
+    on_error:
+      - action: continue
+
+  - name: llm-code-review
+    type: llm
+    pre_condition: '{{enableLlmCodeReview}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    log: "Performing LLM code review on discovered JS files"
+    messages:
+      - role: system
+        content: |
+          You are a senior application security engineer. Review JavaScript code for security issues:
+          1. Authentication/Authorization bypasses
+          2. Sensitive data exposure
+          3. Insecure API endpoints
+          4. Client-side validation weaknesses
+          5. DOM manipulation vulnerabilities
+          
+          Focus on high-confidence findings only. Report in Markdown.
+      - role: user
+        content: |
+          Review JavaScript files discovered for {{Target}}.
+          
+          JS URLs discovered:
+          {{readFile("{{jsUrlsFile}}")}}
+          
+          Endpoints found in JS:
+          {{readFile("{{jsEndpointsFile}}") if file_exists("{{jsEndpointsFile}}") else "No endpoints data"}}
+    exports:
+      code_review: "{{llm_code_review_content}}"
+
+  # ===========================================================================
+  # Phase 10: LLM JS API Endpoint Extraction (P0)
+  # ===========================================================================
+  - name: llm-js-api-extraction
+    type: llm
+    pre_condition: '{{enableLlmJsApiExtract}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    log: "Extracting hidden API endpoints from JS files with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior penetration tester specializing in API discovery and JavaScript analysis.
+          Analyze the JavaScript files and extract:
+          
+          1. **Hidden API Endpoints**: REST, GraphQL, WebSocket endpoints not obvious from UI
+          2. **API Versioning**: v1, v2, beta endpoints
+          3. **Parameter Pollution Points**: Endpoints accepting multiple parameters
+          4. **Debug/Test Endpoints**: /debug, /test, /internal paths
+          5. **Authentication Bypass Candidates**: Endpoints missing auth checks
+          6. **Sensitive Operations**: Password reset, user management, admin functions
+          
+          Output format:
+          - List each endpoint with HTTP method
+          - Identify potential parameters (from URL patterns, fetch calls)
+          - Rate exploitability (High/Medium/Low)
+          - Suggest specific test payloads where applicable
+          
+          Format in Markdown with actionable findings.
+      - role: user
+        content: |
+          Analyze JavaScript files for {{Target}} to discover hidden API endpoints:
+          
+          JS URLs discovered:
+          {{readFile("{{jsUrlsFile}}")}}
+          
+          Known endpoints from JS analysis:
+          {{readFile("{{jsEndpointsFile}}") if file_exists("{{jsEndpointsFile}}") else "No endpoints data"}}
+          
+          URL parameters found:
+          {{readFile("{{gfDir}}/params-{{TargetSpace}}.txt") if file_exists("{{gfDir}}/params-{{TargetSpace}}.txt") else "No params data"}}
+          
+          Provide actionable API endpoint findings for penetration testing.
+    exports:
+      js_api_endpoints: "{{llm_js_api_extraction_content}}"
+
+  - name: save-llm-js-api-report
+    type: bash
+    pre_condition: "{{enableLlmJsApiExtract}}"
+    log: "Saving LLM JS API extraction report"
+    command: |
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      echo "# JS API Endpoints Analysis - {{Target}}" > {{llmJsApiReport}}
+      echo "" >> {{llmJsApiReport}}
+      echo "**Generated:** $(date)" >> {{llmJsApiReport}}
+      echo "" >> {{llmJsApiReport}}
+      echo "{{js_api_endpoints}}" >> {{llmJsApiReport}}
+      
+      # 提取API端点到单独文件供后续扫描使用
+      grep -oE '(https?://[^ ]+|/api/[^ ]+|/v[0-9]+/[^ ]+)' {{llmJsApiReport}} 2>/dev/null  | sort -u > {{jsApiEndpointsFile}} || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 11: LLM Sensitive Context Analysis (P1)
+  # ===========================================================================
+  - name: llm-sensitive-context-analysis
+    type: llm
+    pre_condition: '{{enableLlmSensitiveContext}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}"))'
+    log: "Analyzing sensitive info context with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior red team operator specializing in credential harvesting and sensitive data exploitation.
+          Analyze discovered sensitive information with focus on:
+          
+          1. **Exploitability Assessment**: Can this credential be used immediately?
+          2. **Context Analysis**: What system/service does it belong to?
+          3. **Lateral Movement**: Can this lead to other compromises?
+          4. **Business Impact**: What's the worst case if exploited?
+          5. **Chaining Potential**: Can this be combined with other findings?
+          
+          For each finding, provide:
+          - Confidence level (Confirmed/Likely/Possible)
+          - Access scope (Full/Partial/Limited)
+          - Recommended exploitation steps
+          - Remediation priority
+          
+          Be specific and actionable. Focus on real-world exploitation.
+          Format in Markdown.
+      - role: user
+        content: |
+          Analyze the exploitability of discovered sensitive information for {{Target}}:
+          
+          Secrets from JS files:
+          {{readFile("{{jsSecretsFile}}") if file_exists("{{jsSecretsFile}}") else "No secrets found"}}
+          
+          Secrets from Source maps:
+          {{readFile("{{jsSecretsJsmapFile}}") if file_exists("{{jsSecretsJsmapFile}}") else "No secrets found"}}
+          
+          Known endpoints context:
+          {{readFile("{{jsEndpointsFile}}") if file_exists("{{jsEndpointsFile}}") else "No endpoints data"}}
+          
+          Provide an exploitation-focused analysis with actionable next steps.
+    exports:
+      sensitive_context: "{{llm_sensitive_context_analysis_content}}"
+
+  - name: save-llm-sensitive-context-report
+    type: bash
+    pre_condition: "{{enableLlmSensitiveContext}}"
+    log: "Saving LLM sensitive context analysis report"
+    command: |
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      echo "# Sensitive Context Analysis - {{Target}}" > {{llmSensitiveContextReport}}
+      echo "" >> {{llmSensitiveContextReport}}
+      echo "**Generated:** $(date)" >> {{llmSensitiveContextReport}}
+      echo "" >> {{llmSensitiveContextReport}}
+      echo "{{sensitive_context}}" >> {{llmSensitiveContextReport}}
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Summary
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "Content analysis complete"
+    functions:
+      - 'db_total_assets("{{combinedUrlsFile}}")'

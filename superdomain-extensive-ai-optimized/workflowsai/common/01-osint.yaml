@@ -1,0 +1,633 @@
+# =============================================================================
+# Module Workflow: OSINT & Cloud Enumeration (合并版)
+# =============================================================================
+# 合并: osint-recon.yaml + enum-cloud.yaml + osint-gather.yaml
+# 功能: WHOIS, 邮箱收集, 密码泄露, 云资源枚举, GitHub/Google Dorks, 
+#       Metadata, API Leaks, Domain Info, 第三方配置, SPF/DMARC
+# =============================================================================
+
+kind: module
+name: osint
+description: Comprehensive OSINT - WHOIS, emails, leaks, dorks, metadata, cloud, API leaks
+tags: osint, email, cloud, github, aws, azure, gcp, reconnaissance, leaks
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # =========================
+  # 功能开关 - 基础 OSINT
+  # =========================
+  - name: enableWhois
+    type: bool
+    default: true
+  - name: enableEmailCollection
+    type: bool
+    default: true
+  - name: enableEmailLeaks
+    type: bool
+    default: true
+  - name: enableGithubDorks
+    type: bool
+    default: false
+  - name: enableGoogleDorks
+    type: bool
+    default: true
+  - name: enableMetadataExtraction
+    type: bool
+    default: true
+  - name: enableMetagoofil
+    type: bool
+    default: false
+    description: Download documents and extract metadata with exiftool
+  - name: enableDomainInfo
+    type: bool
+    default: true
+  - name: enableThirdParty
+    type: bool
+    default: true
+  - name: enableSpoof
+    type: bool
+    default: true
+  - name: enableMailHygiene
+    type: bool
+    default: true
+
+  # =========================
+  # 功能开关 - GitHub
+  # =========================
+  - name: enableGithubRepos
+    type: bool
+    default: false
+    description: Clone and scan company GitHub repos for secrets
+  - name: enableGithubLeaks
+    type: bool
+    default: true
+    description: Search GitHub-wide for leaked secrets with ghleaks
+  - name: enableGithubActionsAudit
+    type: bool
+    default: false
+    description: Audit GitHub Actions for secret exposure with gato
+  - name: enableGithubEndpoints
+    type: bool
+    default: true
+    description: Extract API endpoints from GitHub code search
+  - name: secretsEngine
+    default: titus
+    description: Secrets scanning engine (titus/noseyparker)
+  - name: githubTokensFile
+    default: "{{ExternalConfigs}}/github_tokens.txt"
+
+  # =========================
+  # 功能开关 - API Leaks
+  # =========================
+  - name: enableApiKeyLeaks
+    type: bool
+    default: true
+  - name: enablePostleaksNg
+    type: bool
+    default: true
+    description: Enhance Postman leak scanning with postleaksNg
+
+  # =========================
+  # 功能开关 - Cloud Enum
+  # =========================
+  - name: enableCloudEnum
+    type: bool
+    default: true
+
+  # =========================
+  # 工具路径
+  # =========================
+  - name: toolsDir
+    default: "/root/Tools"
+  - name: cloudenumDir
+    default: "{{toolsDir}}/cloud_enum"
+  - name: cloudenumThreads
+    default: 20
+  - name: cloudenumQuickscan
+    type: bool
+    default: true
+
+  # =========================
+  # 输出文件 - OSINT
+  # =========================
+  - name: outputDir
+    default: "{{Output}}/osint"
+  - name: whoisOutput
+    default: "{{outputDir}}/whois-{{TargetSpace}}.txt"
+  - name: emailsOutput
+    default: "{{outputDir}}/emails-{{TargetSpace}}.txt"
+  - name: passwordsOutput
+    default: "{{outputDir}}/passwords-{{TargetSpace}}.txt"
+  - name: githubDorksOutput
+    default: "{{outputDir}}/github-dorks-{{TargetSpace}}.txt"
+  - name: googleDorksOutput
+    default: "{{outputDir}}/google-dorks-{{TargetSpace}}.txt"
+  - name: metadataOutput
+    default: "{{outputDir}}/metadata-{{TargetSpace}}.txt"
+  - name: domainInfoOutput
+    default: "{{outputDir}}/domain-info-{{TargetSpace}}.txt"
+  - name: thirdPartyOutput
+    default: "{{outputDir}}/third-party-misconfig-{{TargetSpace}}.txt"
+  - name: spoofOutput
+    default: "{{outputDir}}/spoof-{{TargetSpace}}.txt"
+  - name: mailHygieneOutput
+    default: "{{outputDir}}/mail-hygiene-{{TargetSpace}}.txt"
+  - name: apiLeaksOutput
+    default: "{{outputDir}}/api-leaks-{{TargetSpace}}.txt"
+
+  # =========================
+  # 输出文件 - GitHub
+  # =========================
+  - name: githubReposOutput
+    default: "{{outputDir}}/github-company-secrets-{{TargetSpace}}.json"
+  - name: githubLeaksOutput
+    default: "{{outputDir}}/github-leaks-{{TargetSpace}}.json"
+  - name: githubActionsOutput
+    default: "{{outputDir}}/github-actions-audit-{{TargetSpace}}.json"
+  - name: metagoofilOutput
+    default: "{{outputDir}}/metagoofil-results-{{TargetSpace}}.txt"
+  - name: githubEndpointsOutput
+    default: "{{outputDir}}/github-endpoints-{{TargetSpace}}.txt"
+
+  # =========================
+  # 输出文件 - Cloud Enum
+  # =========================
+  - name: cloudEnumJsonOutput
+    default: "{{outputDir}}/cloud-enum-{{TargetSpace}}.jsonl"
+  - name: cloudAssetsOutput
+    default: "{{outputDir}}/cloud-assets-{{TargetSpace}}.txt"
+  - name: cloudTrufflehogOutput
+    default: "{{outputDir}}/cloud-trufflehog-{{TargetSpace}}.jsonl"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - whois
+    - unfurl
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: whois-info
+    path: "{{whoisOutput}}"
+    type: text
+    description: WHOIS information for target domain
+
+  - name: emails
+    path: "{{emailsOutput}}"
+    type: text
+    description: Discovered email addresses
+
+  - name: passwords
+    path: "{{passwordsOutput}}"
+    type: text
+    description: Leaked passwords
+
+  - name: github-dorks
+    path: "{{githubDorksOutput}}"
+    type: text
+    description: GitHub dork findings
+
+  - name: google-dorks
+    path: "{{googleDorksOutput}}"
+    type: text
+    description: Google dork findings
+
+  - name: metadata
+    path: "{{metadataOutput}}"
+    type: text
+    description: Organization metadata
+
+  - name: postman-leaks
+    path: "{{outputDir}}/postman_leaks.txt"
+    type: text
+    description: Postman public API leaks
+
+  - name: swagger-leaks
+    path: "{{outputDir}}/swagger_leaks.txt"
+    type: text
+    description: Swagger/OpenAPI leaks
+
+  - name: api-leaks
+    path: "{{apiLeaksOutput}}"
+    type: text
+    description: All API key leaks combined
+
+  - name: cloud-resources
+    path: "{{cloudAssetsOutput}}"
+    type: text
+    description: Discovered cloud resources
+
+  - name: cloud-enum-json
+    path: "{{cloudEnumJsonOutput}}"
+    type: jsonl
+    description: cloud_enum JSON results
+
+  - name: cloud-trufflehog
+    path: "{{cloudTrufflehogOutput}}"
+    type: jsonl
+    description: Trufflehog scan results for public cloud buckets
+
+  - name: third-party
+    path: "{{thirdPartyOutput}}"
+    type: text
+    description: Third party misconfigurations
+
+  - name: spoof
+    path: "{{spoofOutput}}"
+    type: text
+    description: Spoofable domain check
+
+  - name: mail-hygiene
+    path: "{{mailHygieneOutput}}"
+    type: text
+    description: SPF/DMARC configuration
+
+  - name: github-repos-secrets
+    path: "{{githubReposOutput}}"
+    type: json
+    description: Secrets found in company GitHub repos
+
+  - name: github-leaks
+    path: "{{githubLeaksOutput}}"
+    type: json
+    description: GitHub-wide secret leaks
+
+  - name: github-actions-audit
+    path: "{{githubActionsOutput}}"
+    type: json
+    description: GitHub Actions security audit
+
+  - name: github-endpoints
+    path: "{{githubEndpointsOutput}}"
+    type: text
+    description: API endpoints extracted from GitHub code search
+
+  - name: metagoofil-metadata
+    path: "{{metagoofilOutput}}"
+    type: text
+    description: Document metadata extraction
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup: Create output folders
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating OSINT output folders"
+    functions:
+      - 'create_folder("{{outputDir}}")'
+      - 'create_folder("{{Output}}/.tmp")'
+      - 'create_folder("{{Output}}/.tmp/github_repos")'
+      - 'create_folder("{{Output}}/.tmp/github")'
+
+  # ===========================================================================
+  # Phase 1: WHOIS Lookup
+  # ===========================================================================
+  - name: whois-lookup
+    type: bash
+    log: "Performing WHOIS lookup"
+    pre_condition: "{{enableWhois}}"
+    command: 'whois {{Target}} > {{whoisOutput}} 2>&1'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: Email Collection & Leak Search
+  # ===========================================================================
+  - name: email-collection
+    type: bash
+    pre_condition: '{{enableEmailCollection}}'
+    log: "Collecting email addresses"
+    command: 'emailfinder -d {{Target}} 2>/dev/null > {{emailsOutput}} || python3 {{toolsDir}}/emailfinder/emailfinder.py -d {{Target}} 2>/dev/null > {{emailsOutput}} || true'
+    on_error:
+      - action: continue
+
+  - name: email-leaks
+    type: bash
+    log: "Searching for email leaks with whois"
+    pre_condition: "{{enableEmailLeaks}}"
+    command: 'whois {{Target}} 2>/dev/null | grep -iE "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" >> {{emailsOutput}} || true'
+    on_error:
+      - action: continue
+
+  - name: password-leaks
+    type: bash
+    log: "Searching for leaked passwords with LeakSearch"
+    pre_condition: "{{enableEmailLeaks}}"
+    command: 'cd "{{toolsDir}}/LeakSearch" 2>/dev/null && "{{toolsDir}}/LeakSearch/venv/bin/python3" LeakSearch.py -k {{Target}} -o {{passwordsOutput}} 2>/dev/null || LeakSearch.py -k {{Target}} -o {{passwordsOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: GitHub Dorks
+  # ===========================================================================
+  - name: github-dorks
+    type: bash
+    log: "Searching GitHub for sensitive data"
+    pre_condition: "{{enableGithubDorks}}"
+    command: '[ -f "{{githubTokensFile}}" ] && gitdorks_go -gd {{toolsDir}}/gitdorks_go/Dorks/medium_dorks.txt -nws 20 -target {{Target}} -tf {{githubTokensFile}} -ew 3 > {{githubDorksOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: Google Dorks
+  # ===========================================================================
+  - name: google-dorks
+    type: bash
+    log: "Searching Google dorks"
+    pre_condition: "{{enableGoogleDorks}}"
+    command: '"{{toolsDir}}/dorks_hunter/venv/bin/python3" "{{toolsDir}}/dorks_hunter/dorks_hunter.py" -d {{Target}} -o {{googleDorksOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: Metadata Extraction
+  # ===========================================================================
+  - name: metadata-extraction
+    type: bash
+    log: "Extracting organization metadata"
+    pre_condition: "{{enableMetadataExtraction}}"
+    command: 'echo "{{Target}}" | metabigor related -s whois > {{metadataOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  - name: metagoofil-extraction
+    type: bash
+    log: "Downloading documents and extracting metadata with metagoofil"
+    pre_condition: "{{enableMetagoofil}}"
+    command: 'mkdir -p {{Output}}/.tmp/metagoofil_{{TargetSpace}} && (cd "{{toolsDir}}/metagoofil" 2>/dev/null && "{{toolsDir}}/metagoofil/venv/bin/python3" metagoofil.py -d {{Target}} -t pdf,docx,xlsx -l 10 -w -o "{{Output}}/.tmp/metagoofil_{{TargetSpace}}/" 2>/dev/null || true) && exiftool -r "{{Output}}/.tmp/metagoofil_{{TargetSpace}}" 2>/dev/null | egrep -i "Author|Creator|Email|Producer|Template" | sort -u > {{metagoofilOutput}} || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: GitHub Repos Secret Scan
+  # ===========================================================================
+  - name: github-repos-enum
+    type: bash
+    log: "Enumerating company GitHub repos"
+    pre_condition: "{{enableGithubRepos}}"
+    command: 'COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}") && if [ -f "{{githubTokensFile}}" ]; then GH_TOKEN=$(head -n 1 {{githubTokensFile}} 2>/dev/null) && [ -n "$GH_TOKEN" ] && echo "$COMPANY" | enumerepo -token - -o {{Output}}/.tmp/company_repos.json 2>/dev/null <<< "$GH_TOKEN" || true; fi && if [ -s "{{Output}}/.tmp/company_repos.json" ]; then jq -r ".[].repos[].url" {{Output}}/.tmp/company_repos.json 2>/dev/null > {{Output}}/.tmp/company_repos_url.txt || true; fi && if [ -s "{{Output}}/.tmp/company_repos_url.txt" ]; then while read repo; do git clone "$repo" {{Output}}/.tmp/github_repos/$(basename "$repo" .git) 2>/dev/null || true; done < {{Output}}/.tmp/company_repos_url.txt; fi'
+    on_error:
+      - action: continue
+
+  - name: github-repos-secrets-scan
+    type: bash
+    log: "Scanning cloned repos for secrets"
+    pre_condition: "{{enableGithubRepos}}"
+    command: |
+      if [ "{{secretsEngine}}" = "titus" ]; then
+        for dir in {{Output}}/.tmp/github_repos/*/; do
+          [ -d "$dir" ] && titus scan --format json "$dir" 2>/dev/null > {{Output}}/.tmp/github/titus_secret_$(basename "$dir").json || true
+        done
+      fi
+      if [ "{{secretsEngine}}" = "noseyparker" ]; then
+        for dir in {{Output}}/.tmp/github_repos/*/; do
+          [ -d "$dir" ] && noseyparker scan --datastore {{Output}}/.tmp/github/np_ds_$(basename "$dir") "$dir" 2>/dev/null && noseyparker report --datastore {{Output}}/.tmp/github/np_ds_$(basename "$dir") --format json > {{Output}}/.tmp/github/nosey_$(basename "$dir").json 2>/dev/null || true
+        done
+      fi
+      if [ -s "{{Output}}/.tmp/company_repos_url.txt" ]; then
+        while read repo; do
+          trufflehog git "$repo" -j 2>/dev/null >> {{Output}}/.tmp/github/trufflehog.json || true
+        done < {{Output}}/.tmp/company_repos_url.txt
+      fi
+      if ls {{Output}}/.tmp/github/*.json 1>/dev/null 2>&1; then
+        cat {{Output}}/.tmp/github/*.json 2>/dev/null | jq -c 2>/dev/null > {{githubReposOutput}}
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 7: GitHub Leaks (ghleaks)
+  # ===========================================================================
+  - name: github-leaks-scan
+    type: bash
+    log: "Searching GitHub-wide for leaked secrets with ghleaks"
+    pre_condition: "{{enableGithubLeaks}}"
+    command: '{{toolsDir}}/ghleaks/ghleaks -q {{Target}} --threads 5 --report {{githubLeaksOutput}} --no-banner'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 8: GitHub Actions Audit (gato)
+  # ===========================================================================
+  - name: github-actions-audit
+    type: bash
+    log: "Auditing GitHub Actions for secret exposure with gato"
+    pre_condition: "{{enableGithubActionsAudit}}"
+    command: 'COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}") && echo "$COMPANY" > {{Output}}/.tmp/gato_orgs.txt && GATO_BIN=$(command -v gato 2>/dev/null || echo "{{toolsDir}}/gato/venv/bin/gato") && [ -f "{{githubTokensFile}}" ] && GH_TOKEN=$(head -n 1 {{githubTokensFile}} 2>/dev/null) && export GH_TOKEN && "$GATO_BIN" e --enum_wf_artifacts --skip_sh_runner_enum -O {{Output}}/.tmp/gato_orgs.txt -oJ {{githubActionsOutput}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 9: GitHub Endpoints Extraction
+  # ===========================================================================
+  - name: github-endpoints
+    type: bash
+    log: "Extracting API endpoints from GitHub code search"
+    pre_condition: "{{enableGithubEndpoints}}"
+    command: |
+      : > {{githubEndpointsOutput}}
+      if [ -f "{{githubTokensFile}}" ]; then
+        github-endpoints -q -k -d {{Target}} -t {{githubTokensFile}} -o {{githubEndpointsOutput}} 2>/dev/null || true
+      fi
+      if [ -s "{{githubEndpointsOutput}}" ]; then
+        count=$(wc -l < {{githubEndpointsOutput}})
+        echo "[github-endpoints] Found $count endpoints from GitHub code search"
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 10: Domain Info (Azure Tenant, Scopify)
+  # ===========================================================================
+  - name: domain-info
+    type: function
+    log: "Getting domain info (Azure tenant, Scopify)"
+    pre_condition: "{{enableDomainInfo}}"
+    functions:
+      - 'exec_cmd(": > {{domainInfoOutput}}")'
+      - 'exec_cmd("if [ -x \"{{toolsDir}}/msftrecon/venv/bin/python3\" ]; then \"{{toolsDir}}/msftrecon/venv/bin/python3\" \"{{toolsDir}}/msftrecon/msftrecon/msftrecon.py\" -d {{Target}} 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
+      - 'exec_cmd("COMPANY=$(echo \"{{Target}}\" | unfurl format %r 2>/dev/null || echo \"{{Target}}\") && if [ -f \"{{toolsDir}}/Scopify/scopify.py\" ]; then python3 \"{{toolsDir}}/Scopify/scopify.py\" -c \"$COMPANY\" 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
+      - 'exec_cmd("if [ ! -s \"{{domainInfoOutput}}\" ]; then echo \"No additional domain info found\" > {{domainInfoOutput}}; fi")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 11: Third Party Misconfigurations
+  # ===========================================================================
+  - name: third-party-misconfig
+    type: bash
+    log: "Checking third party misconfigurations"
+    pre_condition: "{{enableThirdParty}}"
+    command: 'COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}") && misconfig-mapper -target {{Target}} -as-domain true -permutations false -skip-ssl -service "*" -verbose 0 2>/dev/null > {{thirdPartyOutput}} && misconfig-mapper -target "$COMPANY" -skip-ssl -service "*" -verbose 0 2>/dev/null >> {{thirdPartyOutput}} || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 12: Spoof Check
+  # ===========================================================================
+  - name: spoof-check
+    type: bash
+    log: "Checking for spoofable domains"
+    pre_condition: "{{enableSpoof}}"
+    command: 'if [ -x "{{toolsDir}}/Spoofy/venv/bin/python3" ] && [ -f "{{toolsDir}}/Spoofy/spoofy.py" ]; then (cd "{{toolsDir}}/Spoofy" && "{{toolsDir}}/Spoofy/venv/bin/python3" spoofy.py -d {{Target}} 2>/dev/null > {{spoofOutput}}); fi'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 13: Mail Hygiene (SPF/DMARC)
+  # ===========================================================================
+  - name: mail-hygiene
+    type: bash
+    log: "Checking SPF/DMARC configuration"
+    pre_condition: "{{enableMailHygiene}}"
+    command: 'printf "Domain: {{Target}}\n\nTXT records:\n" > {{mailHygieneOutput}} && dig +short TXT {{Target}} 2>/dev/null | sed "s/^/  /" >> {{mailHygieneOutput}} && printf "\nDMARC record:\n" >> {{mailHygieneOutput}} && dig +short TXT _dmarc.{{Target}} 2>/dev/null | sed "s/^/  /" >> {{mailHygieneOutput}}'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 14: API Leak Detection
+  # ===========================================================================
+  - name: api-leaks-postman
+    type: bash
+    log: "Scanning Postman public API leaks with porch-pirate"
+    pre_condition: "{{enableApiKeyLeaks}}"
+    command: 'porch-pirate -s {{Target}} -l 25 --dump 2>/dev/null > {{outputDir}}/postman_leaks.txt || porch-pirate -s {{Target}} -l 25 2>/dev/null > {{outputDir}}/postman_leaks.txt || : > {{outputDir}}/postman_leaks.txt'
+    on_error:
+      - action: continue
+
+  - name: api-leaks-swagger
+    type: bash
+    log: "Scanning Swagger/OpenAPI leaks with SwaggerSpy"
+    pre_condition: "{{enableApiKeyLeaks}}"
+    command: '(cd "{{toolsDir}}/SwaggerSpy" 2>/dev/null && "{{toolsDir}}/SwaggerSpy/venv/bin/python3" swaggerspy.py {{Target}} 2>/dev/null || true) | grep -i "[*]\|URL" > {{outputDir}}/swagger_leaks.txt || : > {{outputDir}}/swagger_leaks.txt'
+    on_error:
+      - action: continue
+
+  - name: api-leaks-postleaks
+    type: bash
+    log: "Enhancing Postman leaks with postleaksNg"
+    pre_condition: "{{enableApiKeyLeaks}} && {{enablePostleaksNg}}"
+    command: 'mkdir -p {{outputDir}}/postleaks_results && postleaksNg -k {{Target}} --output {{outputDir}}/postleaks_results -t 10 2>/dev/null || true; if ls {{outputDir}}/postleaks_results/*.json 1>/dev/null 2>&1; then jq -r ".url // empty" {{outputDir}}/postleaks_results/*.json 2>/dev/null | grep -aE "^https?://" >> {{outputDir}}/postman_leaks.txt || true; fi'
+    on_error:
+      - action: continue
+
+  - name: api-leaks-trufflehog
+    type: function
+    log: "Analyzing leaks with trufflehog"
+    pre_condition: "{{enableApiKeyLeaks}}"
+    functions:
+      - 'exec_cmd(": > {{apiLeaksOutput}}")'
+      - 'exec_cmd("if [ -s \"{{outputDir}}/postman_leaks.txt\" ]; then trufflehog filesystem {{outputDir}}/postman_leaks.txt -j 2>/dev/null | jq -c 2>/dev/null >> {{outputDir}}/postman_leaks_trufflehog.json || true; fi")'
+      - 'exec_cmd("if [ -s \"{{outputDir}}/swagger_leaks.txt\" ]; then trufflehog filesystem {{outputDir}}/swagger_leaks.txt -j 2>/dev/null | jq -c 2>/dev/null >> {{outputDir}}/swagger_leaks_trufflehog.json || true; fi")'
+      - 'append_file("{{apiLeaksOutput}}", "{{outputDir}}/postman_leaks_trufflehog.json")'
+      - 'append_file("{{apiLeaksOutput}}", "{{outputDir}}/swagger_leaks_trufflehog.json")'
+      - 'exec_cmd("if [ ! -s \"{{apiLeaksOutput}}\" ]; then echo \"No API key leaks detected\" > {{apiLeaksOutput}}; fi")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 15: Cloud Storage Enumeration (using company name, no subdomains)
+  # ===========================================================================
+  - name: cloud-enum-basic
+    type: bash
+    pre_condition: '{{enableCloudEnum}}'
+    log: "Enumerating cloud storage with cloud_enum"
+    command: |
+      COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}")
+      PREFIX=$(echo "{{Target}}" | cut -d. -f1)
+      FUZZ_FILE="{{cloudenumDir}}/enum_tools/fuzz.txt"
+
+      # 确定 -m/-b 参数
+      if [ -f "$FUZZ_FILE" ]; then
+        MUTATIONS="-m $FUZZ_FILE -b $FUZZ_FILE"
+      else
+        MUTATIONS="-m {{cloudenumDir}}/cloud_enum.py -b {{cloudenumDir}}/cloud_enum.py"
+      fi
+
+      # Quickscan 参数
+      QS_FLAG=""
+      [ "{{cloudenumQuickscan}}" = "true" ] && QS_FLAG="-qs"
+
+      # 运行 cloud_enum (JSON 输出)
+      cloud_enum  -k "$COMPANY" -k "{{Target}}" -k "$PREFIX" -t {{cloudenumThreads}} $MUTATIONS $QS_FLAG -f json -l {{cloudEnumJsonOutput}} 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: cloud-enum-process-results
+    type: bash
+    pre_condition: '{{enableCloudEnum}} && file_exists("{{cloudEnumJsonOutput}}")'
+    log: "Processing cloud_enum results"
+    command: |
+      # 提取所有云资产
+      jq -Rr 'fromjson? | select(.target) | .target' {{cloudEnumJsonOutput}} 2>/dev/null  | sort -u > {{cloudAssetsOutput}} || true
+
+      # 统计发现数量
+      if [ -s "{{cloudAssetsOutput}}" ]; then
+        count=$(wc -l < {{cloudAssetsOutput}})
+        echo "[cloud_enum] Found $count cloud assets"
+      fi
+    on_error:
+      - action: continue
+
+  - name: cloud-enum-trufflehog
+    type: bash
+    pre_condition: '{{enableCloudEnum}} && file_exists("{{cloudEnumJsonOutput}}") && file_length("{{cloudEnumJsonOutput}}") > 0'
+    log: "Scanning public cloud buckets with trufflehog"
+    command: |
+      : > {{cloudTrufflehogOutput}}
+
+      # 提取公开的 AWS S3 桶
+      jq -Rr '
+        fromjson?
+        | select(.platform == "aws" and .access == "public" and (.msg | test("(?i)s3 bucket")))
+        | .target
+      ' {{cloudEnumJsonOutput}} 2>/dev/null | sort -u | while read target; do
+        # 从 URL 提取 bucket 名称
+        bucket_host="${target#http://}"
+        bucket_host="${bucket_host#https://}"
+        bucket_host="${bucket_host%%/*}"
+        if [[ "$bucket_host" =~ ^([^.]+)\.s3([.-][^.]+)?\.amazonaws\.com$ ]]; then
+          bucket_name="${BASH_REMATCH[1]}"
+          trufflehog s3 --bucket="$bucket_name" -j 2>/dev/null | jq -c 2>/dev/null >> {{cloudTrufflehogOutput}} || true
+        fi
+      done
+
+      # 提取公开的 GCP 存储桶
+      jq -Rr '
+        fromjson?
+        | select(.platform == "gcp" and .access == "public")
+        | .target
+      ' {{cloudEnumJsonOutput}} 2>/dev/null | sort -u | while read target; do
+        project_id="${target#http://}"
+        project_id="${project_id#https://}"
+        project_id="${project_id%%/*}"
+        if [ -n "$project_id" ]; then
+          trufflehog gcs --project-id="$project_id" -j 2>/dev/null | jq -c 2>/dev/null >> {{cloudTrufflehogOutput}} || true
+        fi
+      done
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 16: Summary
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "OSINT summary"
+    functions:
+      - 'db_total_assets("{{emailsOutput}}")'
+      - 'db_total_assets("{{passwordsOutput}}")'

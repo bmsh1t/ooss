@@ -1,0 +1,196 @@
+# =============================================================================
+# Module Workflow: URL Pattern Classification (GF)
+# =============================================================================
+# Classify URLs by vulnerability patterns using gf (grep for patterns)
+# Matches reconFTW url_gf function in modules/web.sh
+# =============================================================================
+
+kind: module
+name: url-gf
+description: Classify URLs by vulnerability patterns using gf patterns
+tags: url, gf, pattern, classification
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # Input from parameter discovery (parameterized URLs)
+  - name: urlExtractFile
+    default: "{{Output}}/params/parameterized-urls-{{TargetSpace}}.txt"
+
+  - name: gfOutputDir
+    default: "{{Output}}/gf"
+
+  - name: combineGfOutput
+    default: "{{Output}}/gf/all-patterns-{{TargetSpace}}.txt"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - gf
+    - cut
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: gf-ssrf
+    path: "{{gfOutputDir}}/ssrf.txt"
+    type: text
+    description: URLs matching SSRF patterns
+
+  - name: gf-sqli
+    path: "{{gfOutputDir}}/sqli.txt"
+    type: text
+    description: URLs matching SQLi patterns
+
+  - name: gf-xss
+    path: "{{gfOutputDir}}/xss.txt"
+    type: text
+    description: URLs matching XSS patterns
+
+  - name: gf-lfi
+    path: "{{gfOutputDir}}/lfi.txt"
+    type: text
+    description: URLs matching LFI patterns
+
+  - name: gf-all
+    path: "{{combineGfOutput}}"
+    type: text
+    description: All matched URLs combined
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Setup: Create output folders
+  # ---------------------------------------------------------------------------
+  - name: create-output-folders
+    type: function
+    log: "Creating GF output folder"
+    functions:
+      - 'create_folder("{{gfOutputDir}}")'
+
+  # ---------------------------------------------------------------------------
+  # Check input file exists
+  # ---------------------------------------------------------------------------
+  - name: check-input
+    type: function
+    log: "Checking input file"
+    pre_condition: '!file_exists("{{urlExtractFile}}")'
+    functions:
+      - 'log_error("Input file {{urlExtractFile}} not found")'
+      - 'skip()'
+
+  # ---------------------------------------------------------------------------
+  # Run GF pattern matching for each pattern
+  # ---------------------------------------------------------------------------
+  - name: gf-ssrf
+    type: bash
+    log: "Matching SSRF patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf ssrf 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/ssrf.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-sqli
+    type: bash
+    log: "Matching SQLi patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf sqli 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/sqli.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-xss
+    type: bash
+    log: "Matching XSS patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf xss 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/xss.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-lfi
+    type: bash
+    log: "Matching LFI patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf lfi 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/lfi.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-rce
+    type: bash
+    log: "Matching RCE patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf rce 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/rce.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-ssti
+    type: bash
+    log: "Matching SSTI patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf ssti 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/ssti.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-redirect
+    type: bash
+    log: "Matching Redirect patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf redirect 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/redirect.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-traversal
+    type: bash
+    log: "Matching Path Traversal patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf traversal 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/traversal.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-params
+    type: bash
+    log: "Matching Interesting Parameters patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf interestingparams 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/interestingparams.txt" || true'
+    on_error: 
+      - action: continue
+
+  - name: gf-debug
+    type: bash
+    log: "Matching Debug Logic patterns"
+    pre_condition: 'file_exists("{{urlExtractFile}}")'
+    command: 'cat "{{urlExtractFile}}" | gf debug_logic 2>/dev/null | cut -d ":" -f3-5 > "{{gfOutputDir}}/debug_logic.txt" || true'
+    on_error: 
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Combine all GF results (SSRF + Redirect for SSRF scanning)
+  # ---------------------------------------------------------------------------
+  - name: combine-ssrf-redirect
+    type: bash
+    log: "Combining SSRF and Redirect patterns"
+    commands:
+      - 'cat "{{gfOutputDir}}/ssrf.txt" "{{gfOutputDir}}/redirect.txt" 2>/dev/null | sort -u > "{{gfOutputDir}}/ssrf-combined.txt"'
+    on_error: 
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Log summary
+  # ---------------------------------------------------------------------------
+  - name: log-summary
+    type: function
+    log: "URL pattern classification completed"
+    functions:
+      - 'db_total_assets("{{outputDir}}")'
+    on_error:
+      - action: continue

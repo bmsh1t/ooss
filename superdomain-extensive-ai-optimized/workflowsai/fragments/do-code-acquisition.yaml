@@ -1,0 +1,164 @@
+# =============================================================================
+# 多源代码获取模块 - 支持 GitHub/GitLab/Gitee
+# =============================================================================
+# 功能：
+# - 从多个来源获取源码仓库
+# - 支持 GitHub、GitLab、Gitee
+# - 自动克隆和分析
+# =============================================================================
+
+kind: module
+name: multi-source-code-acquisition
+description: Acquire source code from multiple platforms
+
+params:
+  - name: codeOutputDir
+    default: "{{Output}}/code"
+  - name: githubReposFile
+    default: "{{Output}}/.tmp/company_repos_url.txt"
+  - name: enableCodeAcquisition
+    type: bool
+    default: true
+    description: "Enable multi-source code acquisition"
+  - name: enableGitHub
+    type: bool
+    default: true
+    description: "Enable GitHub repos"
+  - name: enableGitLab
+    type: bool
+    default: true
+    description: "Enable GitLab repos"
+  - name: enableGitee
+    type: bool
+    default: false
+    description: "Enable Gitee repos"
+  - name: maxRepos
+    type: integer
+    default: 5
+    description: "Maximum repos to acquire"
+
+steps:
+  - name: create-code-dir
+    type: bash
+    pre_condition: "{{enableCodeAcquisition}}"
+    command: |
+      mkdir -p {{codeOutputDir}}/github
+      mkdir -p {{codeOutputDir}}/gitlab
+      mkdir -p {{codeOutputDir}}/gitee
+      echo "[Code Acquisition] Directories created"
+
+  - name: acquire-github-repos
+    type: bash
+    pre_condition: "{{enableCodeAcquisition}} && {{enableGitHub}}"
+    timeout: 600s
+    command: |
+      if [ -f "{{githubReposFile}}" ]; then
+        COUNT=0
+        while read repo_url && [ $COUNT -lt {{maxRepos}} ]; do
+          [ -z "$repo_url" ] && continue
+          REPO_NAME=$(basename "$repo_url" .git)
+          
+          if [ ! -d "{{codeOutputDir}}/github/$REPO_NAME" ]; then
+            echo "[GitHub] Cloning: $REPO_NAME"
+            git clone --depth 1 "$repo_url" "{{codeOutputDir}}/github/$REPO_NAME" 2>/dev/null &&  echo "[GitHub] Success: $REPO_NAME" || echo "[GitHub] Failed: $REPO_NAME"
+            COUNT=$((COUNT + 1))
+          else
+            echo "[GitHub] Already exists: $REPO_NAME"
+          fi
+        done < {{githubReposFile}}
+      else
+        echo "[GitHub] No repos file found"
+      fi
+      
+      # 统计
+      GH_COUNT=$(find {{codeOutputDir}}/github -maxdepth 1 -type d 2>/dev/null | wc -l)
+      GH_COUNT=$((GH_COUNT - 1))
+      echo "GitHub repos acquired: $GH_COUNT"
+
+  - name: acquire-gitlab-repos
+    type: bash
+    pre_condition: "{{enableCodeAcquisition}} && {{enableGitLab}}"
+    timeout: 600s
+    command: |
+      # 尝试从目标域名发现 GitLab
+      TARGET="{{Target}}"
+      
+      # 常见的 GitLab 实例
+      GITLAB_INSTANCES="gitlab.com"
+      
+      # 搜索 GitLab 上的仓库
+      for INSTANCE in $GITLAB_INSTANCES; do
+        SEARCH_URL="https://$INSTANCE/api/v4/projects?search=$TARGET&per_page={{maxRepos}}"
+        
+        echo "[GitLab] Searching on $INSTANCE..."
+        
+        # 使用 GitLab API 搜索（需要token时可增强）
+        curl -s "$SEARCH_URL" 2>/dev/null | jq -r '.[].http_url_to_repo' 2>/dev/null | while read repo_url; do
+          [ -z "$repo_url" ] && continue
+          REPO_NAME=$(basename "$repo_url" .git)
+          
+          if [ ! -d "{{codeOutputDir}}/gitlab/$REPO_NAME" ]; then
+            echo "[GitLab] Cloning: $REPO_NAME"
+            git clone --depth 1 "$repo_url" "{{codeOutputDir}}/gitlab/$REPO_NAME" 2>/dev/null &&  echo "[GitLab] Success: $REPO_NAME" || echo "[GitLab] Failed: $REPO_NAME"
+          fi
+        done
+      done
+      
+      GL_COUNT=$(find {{codeOutputDir}}/gitlab -maxdepth 1 -type d 2>/dev/null | wc -l)
+      GL_COUNT=$((GL_COUNT - 1))
+      echo "GitLab repos acquired: $GL_COUNT"
+
+  - name: acquire-gitee-repos
+    type: bash
+    pre_condition: "{{enableCodeAcquisition}} && {{enableGitee}}"
+    timeout: 600s
+    command: |
+      TARGET="{{Target}}"
+      
+      # 搜索 Gitee
+      SEARCH_URL="https://gitee.com/api/v5/search/repositories?word=$TARGET&per_page={{maxRepos}}"
+      
+      echo "[Gitee] Searching..."
+      
+      curl -s "$SEARCH_URL" 2>/dev/null | jq -r '.[].clone_url' 2>/dev/null | while read repo_url; do
+        [ -z "$repo_url" ] && continue
+        REPO_NAME=$(basename "$repo_url" .git)
+        
+        if [ ! -d "{{codeOutputDir}}/gitee/$REPO_NAME" ]; then
+          echo "[Gitee] Cloning: $REPO_NAME"
+          git clone --depth 1 "$repo_url" "{{codeOutputDir}}/gitee/$REPO_NAME" 2>/dev/null &&  echo "[Gitee] Success: $REPO_NAME" || echo "[Gitee] Failed: $REPO_NAME"
+        fi
+      done
+      
+      GE_COUNT=$(find {{codeOutputDir}}/gitee -maxdepth 1 -type d 2>/dev/null | wc -1)
+      echo "Gitee repos acquired: $GE_COUNT"
+
+  - name: summarize-acquisition
+    type: bash
+    pre_condition: "{{enableCodeAcquisition}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      GH_COUNT=$(find {{codeOutputDir}}/github -maxdepth 1 -type d 2>/dev/null | wc -l)
+      GH_COUNT=$((GH_COUNT - 1))
+      
+      GL_COUNT=$(find {{codeOutputDir}}/gitlab -maxdepth 1 -type d 2>/dev/null | wc -l)
+      GL_COUNT=$((GL_COUNT - 1))
+      
+      GE_COUNT=$(find {{codeOutputDir}}/gitee -maxdepth 1 -type d 2>/dev/null | wc -1)
+      
+      TOTAL=$((GH_COUNT + GL_COUNT + GE_COUNT))
+      
+      cat > {{Output}}/ai-analysis/code-acquisition-summary.txt << EOF
+      Code Acquisition Summary
+      ========================
+      GitHub: $GH_COUNT
+      GitLab: $GL_COUNT
+      Gitee:  $GE_COUNT
+      Total:  $TOTAL
+      
+      Code directory: {{codeOutputDir}}
+      EOF
+      
+      echo "[Code Acquisition] Total: $TOTAL repos"
+      echo "GitHub: $GH_COUNT, GitLab: $GL_COUNT, Gitee: $GE_COUNT"

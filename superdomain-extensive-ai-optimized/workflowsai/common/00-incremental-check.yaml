@@ -1,0 +1,128 @@
+# =============================================================================
+# Module Workflow: Incremental Check
+# =============================================================================
+# 功能: 检测资产变化，实现快速重扫优化
+# =============================================================================
+
+kind: module
+name: incremental-check
+description: Check for asset changes before running downstream scans
+tags: incremental, diff, optimization, rescan
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: incrementalDir
+    default: "{{Output}}/.incremental"
+  - name: backupDir
+    default: "{{Output}}/backup"
+  - name: incrementalThreshold
+    default: 0
+
+  # 输出文件
+  - name: newSubdomainsFile
+    default: "{{incrementalDir}}/new-subdomains.txt"
+  - name: newHttpFile
+    default: "{{incrementalDir}}/new-http.txt"
+  - name: incrementalReportFile
+    default: "{{incrementalDir}}/incremental-report.txt"
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: new-subdomains
+    path: "{{newSubdomainsFile}}"
+    type: text
+    description: New subdomains found since last scan
+
+  - name: incremental-report
+    path: "{{incrementalReportFile}}"
+    type: text
+    description: Incremental scan summary report
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  - name: create-folders
+    type: function
+    log: "Creating incremental directories"
+    functions:
+      - 'create_folder("{{incrementalDir}}")'
+      - 'create_folder("{{incrementalDir}}/previous")'
+      - 'create_folder("{{backupDir}}")'
+
+  # ===========================================================================
+  # Check Subdomain Changes (优化: 支持 backupDir)
+  # ===========================================================================
+  - name: check-subdomain-changes
+    type: function
+    log: "Checking subdomain changes"
+    functions:
+      # 直接使用 backupDir 进行对比
+      - 'set_var("hasBackup", to_string(file_exists("{{backupDir}}/subdomain-{{TargetSpace}}.txt")))'
+      # 使用 exec_cmd 执行 diff
+      - 'exec_cmd("comm -13 <(sort -u {{backupDir}}/subdomain-{{TargetSpace}}.txt 2>/dev/null) <(sort -u {{subdomainFile}} 2>/dev/null) > {{newSubdomainsFile}} 2>/dev/null || cp {{subdomainFile}} {{newSubdomainsFile}} 2>/dev/null")'
+      - 'sort_unix("{{newSubdomainsFile}}")'
+      # 更新备份
+      - 'exec_cmd("cp {{subdomainFile}} {{backupDir}}/subdomain-{{TargetSpace}}.txt")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Check HTTP Endpoint Changes
+  # ===========================================================================
+  - name: check-http-changes
+    type: function
+    log: "Checking HTTP endpoint changes"
+    functions:
+      - 'exec_cmd("comm -13 <(sort -u {{incrementalDir}}/previous/http.txt 2>/dev/null) <(sort -u {{httpFile}} 2>/dev/null) > {{newHttpFile}} 2>/dev/null || cp {{httpFile}} {{newHttpFile}} 2>/dev/null")'
+      - 'sort_unix("{{newHttpFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Generate Incremental Report
+  # ===========================================================================
+  - name: generate-report
+    type: bash
+    log: "Generating incremental report"
+    command: |
+      echo "================================================" > {{incrementalReportFile}}
+      echo "Incremental Scan Report - {{Target}}" >> {{incrementalReportFile}}
+      echo "Date: $(date +%Y-%m-%d_%H:%M:%S)" >> {{incrementalReportFile}}
+      new_subs=$(wc -l < {{newSubdomainsFile}} 2>/dev/null || echo 0)
+      new_http=$(wc -l < {{newHttpFile}} 2>/dev/null || echo 0)
+      echo "New Subdomains: $new_subs" >> {{incrementalReportFile}}
+      echo "New HTTP: $new_http" >> {{incrementalReportFile}}
+      echo "================================================" >> {{incrementalReportFile}}
+
+  # ===========================================================================
+  # Save Current State for Next Run
+  # ===========================================================================
+  - name: save-current-state
+    type: function
+    log: "Saving current state"
+    functions:
+      - 'exec_cmd("cp {{subdomainFile}} {{incrementalDir}}/previous/subdomains.txt 2>/dev/null")'
+      - 'exec_cmd("cp {{httpFile}} {{incrementalDir}}/previous/http.txt 2>/dev/null")'
+      - 'exec_cmd("cp {{resolvedFile}} {{incrementalDir}}/previous/resolved.txt 2>/dev/null")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Summary
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "Incremental check summary"
+    functions:
+      - 'db_total_assets("{{newSubdomainsFile}}")'

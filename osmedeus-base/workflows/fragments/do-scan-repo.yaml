@@ -1,0 +1,490 @@
+kind: module
+name: do-scan-repo
+description: Static vulnerability scan and secret detection on git repositories
+tags: sast,secrets,repository,kingfisher,semgrep,trivy
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  - name: repoFolder
+    default: "{{Output}}/source-repo"
+
+  - name: semgrepJobs
+    default: "15"
+
+  - name: kingfisherJobs
+    default: "15"
+
+  - name: gitDepth
+    default: "1000"
+
+  - name: crawlingTime
+    default: "2m"
+
+  - name: crawlingDepth
+    default: "3"
+
+  # SARIF outputs
+  - name: semgrepSarif
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.sarif"
+
+  - name: semgrepJson
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.json"
+
+  - name: kingfisherSarif
+    default: "{{Output}}/secret/kingfisher-{{TargetSpace}}.sarif"
+
+  - name: trivySarif
+    default: "{{Output}}/sast/trivy-report-{{TargetSpace}}.sarif"
+
+  - name: bearerSarif
+    default: "{{Output}}/sast/bearer-{{TargetSpace}}.sarif"
+
+  # Markdown reports
+  - name: semgrepMarkdown
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.md"
+
+  - name: kingfisherMarkdown
+    default: "{{Output}}/secret/kingfisher-{{TargetSpace}}.md"
+
+  - name: trivyMarkdown
+    default: "{{Output}}/sast/trivy-report-{{TargetSpace}}.md"
+
+  - name: bearerMarkdown
+    default: "{{Output}}/sast/bearer-{{TargetSpace}}.md"
+
+  # LLM 代码审查配置
+  - name: enableLlmCodeReview
+    type: bool
+    default: true
+    description: "Enable LLM-powered security code review"
+  - name: llmCodeReviewReport
+    default: "{{Output}}/sast/llm-code-review-{{TargetSpace}}.md"
+    description: "LLM security code review report"
+  - name: llmVulnAnalysis
+    default: "{{Output}}/sast/llm-vuln-analysis-{{TargetSpace}}.md"
+    description: "LLM vulnerability analysis report"
+  - name: enableAgentCodeReview
+    type: bool
+    default: false
+    description: "Enable full Agent-based code review (requires claude-code or similar)"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - kingfisher
+    - trivy
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: semgrep-sarif
+    path: "{{semgrepSarif}}"
+    type: text
+    description: Semgrep SARIF results
+
+  - name: kingfisher-sarif
+    path: "{{kingfisherSarif}}"
+    type: text
+    description: Kingfisher SARIF results
+
+  - name: trivy-sarif
+    path: "{{trivySarif}}"
+    type: text
+    description: Trivy SARIF results
+
+  - name: bearer-sarif
+    path: "{{bearerSarif}}"
+    type: text
+    description: Bearer SARIF results
+    optional: true
+
+  - name: semgrep-markdown
+    path: "{{semgrepMarkdown}}"
+    type: text
+    description: Semgrep markdown report
+
+  - name: kingfisher-markdown
+    path: "{{kingfisherMarkdown}}"
+    type: text
+    description: Kingfisher markdown report
+
+  - name: trivy-markdown
+    path: "{{trivyMarkdown}}"
+    type: text
+    description: Trivy markdown report
+
+  - name: bearer-markdown
+    path: "{{bearerMarkdown}}"
+    type: text
+    description: Bearer markdown report
+
+  - name: llm-code-review
+    path: "{{llmCodeReviewReport}}"
+    type: markdown
+    description: LLM security code review report
+
+  - name: llm-vuln-analysis
+    path: "{{llmVulnAnalysis}}"
+    type: json
+    description: LLM vulnerability correlation analysis
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Setup: Create output folders and clean the old output if it exist
+  # ---------------------------------------------------------------------------
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders for SAST and secret scanning"
+    functions:
+      - 'create_folder("{{Output}}/sast")'
+      - 'create_folder("{{Output}}/secret")'
+      - 'rm_rf("{{repoFolder}}")'
+
+  - name: clone-repository
+    type: bash
+    log: "Cloning repository with depth {{gitDepth}}"
+    pre_condition: 'is_url("{{Target}}")'
+    commands:
+      - "git clone --depth={{gitDepth}} {{Target}} {{repoFolder}}"
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Handle folder input: Copy local folder to repoFolder
+  # ---------------------------------------------------------------------------
+  - name: handle-folder-input
+    type: function
+    log: "Checking if input is a local folder and copying it"
+    pre_condition: 'dir_length("{{Target}}") > 0'
+    functions:
+      - 'printf("=> Looks like the input is a folder, copying it to {{repoFolder}}")'
+      - 'exec_cmd("rm -rf {{repoFolder}}")'
+      - 'exec_cmd("cp -r {{Target}} {{repoFolder}}")'
+
+  # ---------------------------------------------------------------------------
+  # Handle URL input: Download web content with katana
+  # ---------------------------------------------------------------------------
+  - name: handle-url-input
+    type: function
+    log: "Downloading HTML response for standard URL input"
+    pre_condition: 'is_url("{{Target}}") && !is_compress("{{Target}}")'
+    functions:
+      - 'printf("=> It appears that the input is a standard URL. Downloading the HTML response instead")'
+      - 'exec_cmd("rm -rf {{repoFolder}}")'
+      - 'exec_cmd("katana -u {{Target}} -silent -headless --no-sandbox -depth {{crawlingDepth}} -jc -crawl-duration {{crawlingTime}} -store-response-dir {{repoFolder}}")'
+
+
+  # ---------------------------------------------------------------------------
+  # Handle target is compressed file (local)
+  # ---------------------------------------------------------------------------
+  - name: handle-compress-local
+    type: function
+    log: "Extracting compressed archive to repo folder"
+    pre_condition: '!is_url("{{Target}}") && is_compress("{{Target}}")'
+    functions:
+      - 'extract_to("{{Target}}", "{{repoFolder}}")'
+
+  # ---------------------------------------------------------------------------
+  # Handle target is compressed file URL (download then extract)
+  # ---------------------------------------------------------------------------
+  - name: handle-compress-url
+    type: function
+    log: "Downloading and extracting compressed archive from URL"
+    pre_condition: 'is_url("{{Target}}") && is_compress("{{Target}}")'
+    functions:
+      - 'wget("{{Target}}", "/tmp/{{TargetSpace}}-archive")'
+      - 'extract_to("/tmp/{{TargetSpace}}-archive", "{{repoFolder}}")'
+
+  # ---------------------------------------------------------------------------
+  # Detect repository language
+  # ---------------------------------------------------------------------------
+  - name: detect-repo-language
+    type: function
+    log: "Detecting primary language of the repository"
+    functions:
+      - 'var repoLanguage = detect_language("{{repoFolder}}") ; printf("Detecting primary language of the repository: " + repoLanguage)'
+    exports:
+      repoLanguage: 'detect_language("{{repoFolder}}")'
+
+  # ---------------------------------------------------------------------------
+  # Semgrep static analysis scan
+  # ---------------------------------------------------------------------------
+  - name: semgrep-scan
+    type: bash
+    log: "Running semgrep static analysis"
+    commands:
+      - "semgrep scan --quiet --config auto --jobs={{semgrepJobs}} --json-output={{semgrepJson}} --sarif-output={{semgrepSarif}} {{repoFolder}}"
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Kingfisher secret scan
+  # ---------------------------------------------------------------------------
+  - name: kingfisher-scan
+    type: bash
+    log: "Running kingfisher secret scan"
+    commands:
+      - "kingfisher --quiet scan {{repoFolder}} --num-jobs {{kingfisherJobs}} --format sarif --output {{kingfisherSarif}}"
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Trivy filesystem scan
+  # ---------------------------------------------------------------------------
+  - name: trivy-scan
+    type: bash
+    log: "Running trivy filesystem scan"
+    commands:
+      - "trivy --quiet fs {{repoFolder}} --format sarif --output {{trivySarif}}"
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Bearer SAST scan
+  # ---------------------------------------------------------------------------
+  - name: bearer-scan
+    type: bash
+    log: "Running bearer SAST scan if semgrep did not produce results"
+    pre_condition: '!file_exists("{{semgrepSarif}}")'
+    commands:
+      - "bearer --quiet scan {{repoFolder}} --format sarif --output {{bearerSarif}}"
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Import SARIF results into database
+  # ---------------------------------------------------------------------------
+  - name: import-semgrep-sarif
+    type: function
+    log: "Importing semgrep SARIF results into database"
+    pre_condition: 'file_exists("{{semgrepSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{semgrepSarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-kingfisher-sarif
+    type: function
+    log: "Importing kingfisher SARIF results into database"
+    pre_condition: 'file_exists("{{kingfisherSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{kingfisherSarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-trivy-sarif
+    type: function
+    log: "Importing trivy SARIF results into database"
+    pre_condition: 'file_exists("{{trivySarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{trivySarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-bearer-sarif
+    type: function
+    log: "Importing bearer SARIF results into database"
+    pre_condition: 'file_exists("{{bearerSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{bearerSarif}}")'
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Convert SARIF results to markdown reports
+  # ---------------------------------------------------------------------------
+  - name: semgrep-markdown-report
+    type: function
+    log: "Converting semgrep SARIF to markdown report"
+    pre_condition: 'file_exists("{{semgrepSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{semgrepSarif}}", "{{semgrepMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: kingfisher-markdown-report
+    type: function
+    log: "Converting kingfisher SARIF to markdown report"
+    pre_condition: 'file_exists("{{kingfisherSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{kingfisherSarif}}", "{{kingfisherMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: trivy-markdown-report
+    type: function
+    log: "Converting trivy SARIF to markdown report"
+    pre_condition: 'file_exists("{{trivySarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{trivySarif}}", "{{trivyMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: bearer-markdown-report
+    type: function
+    log: "Converting bearer SARIF to markdown report"
+    pre_condition: 'file_exists("{{bearerSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{bearerSarif}}", "{{bearerMarkdown}}")'
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # LLM Security Code Review
+  # ---------------------------------------------------------------------------
+  - name: llm-security-code-review
+    type: llm
+    pre_condition: '{{enableLlmCodeReview}} && dir_length("{{repoFolder}}") > 0'
+    log: "Running LLM-powered security code review"
+    messages:
+      - role: system
+        content: |
+          You are a senior security engineer conducting a focused security review of code.
+
+          OBJECTIVE:
+          Perform a security-focused code review to identify HIGH-CONFIDENCE security vulnerabilities.
+          Focus ONLY on security implications - do not comment on style or best practices.
+
+          SECURITY CATEGORIES TO EXAMINE:
+          - Input Validation: SQL injection, Command injection, XXE, Path traversal, Template injection
+          - Authentication & Authorization: Auth bypass, Privilege escalation, Session flaws
+          - Crypto & Secrets: Hardcoded credentials, Weak crypto, Improper key storage
+          - Injection & Code Execution: Deserialization RCE, Eval injection, XSS
+          - Data Exposure: Sensitive data logging, PII leaks, API data leakage
+
+          CRITICAL INSTRUCTIONS:
+          1. MINIMIZE FALSE POSITIVES: Only flag issues where you're >80% confident of exploitability
+          2. AVOID NOISE: Skip theoretical issues, style concerns, or low-impact findings
+          3. FOCUS ON IMPACT: Prioritize vulnerabilities leading to unauthorized access or data breach
+          4. EXCLUSIONS: Do NOT report DOS, secrets on disk (handled separately), or rate limiting
+
+          OUTPUT FORMAT:
+          Return findings in Markdown with:
+          - File and line number
+          - Severity (HIGH/MEDIUM/LOW)
+          - Category (e.g., sql_injection, xss)
+          - Description and exploit scenario
+          - Recommendation
+      - role: user
+        content: |
+          Review the code in {{repoFolder}} for security vulnerabilities.
+
+          Detected language: {{repoLanguage}}
+
+          Previous scan results for context:
+          {{readFile("{{semgrepJson}}") if file_exists("{{semgrepJson}}") else "No semgrep results"}}
+
+          Focus on HIGH and MEDIUM findings only. Each finding should be actionable.
+    exports:
+      code_review: "{{llm_security_code_review_content}}"
+
+  - name: save-llm-code-review
+    type: bash
+    pre_condition: "{{enableLlmCodeReview}}"
+    log: "Saving LLM code review report"
+    command: |
+      mkdir -p {{Output}}/sast 2>/dev/null || true
+      echo "# LLM Security Code Review - {{Target}}" > {{llmCodeReviewReport}}
+      echo "" >> {{llmCodeReviewReport}}
+      echo "**Repository:** {{Target}}" >> {{llmCodeReviewReport}}
+      echo "**Language:** {{repoLanguage}}" >> {{llmCodeReviewReport}}
+      echo "**Generated:** $(date)" >> {{llmCodeReviewReport}}
+      echo "" >> {{llmCodeReviewReport}}
+      echo "{{code_review}}" >> {{llmCodeReviewReport}}
+    on_error:
+      - action: continue
+
+  - name: llm-vuln-correlation
+    type: llm
+    pre_condition: '{{enableLlmCodeReview}} && (file_exists("{{semgrepSarif}}") || file_exists("{{kingfisherSarif}}") || file_exists("{{trivySarif}}"))'
+    log: "Correlating vulnerabilities across scan results with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a security analyst. Correlate findings from multiple SAST tools and:
+          1. Identify duplicate findings across tools
+          2. Prioritize unique high-confidence vulnerabilities
+          3. Filter likely false positives
+          4. Provide consolidated risk assessment
+
+          Return JSON with:
+          - "unique_findings": count of unique vulnerabilities
+          - "duplicates": count of duplicate findings
+          - "false_positives": count of likely false positives
+          - "risk_score": overall risk score 1-10
+          - "priority_findings": array of top 5 finding descriptions
+      - role: user
+        content: |
+          Correlate findings from these SAST scan results for {{Target}}:
+
+          Semgrep results:
+          {{readFile("{{semgrepSarif}}") if file_exists("{{semgrepSarif}}") else "No semgrep results"}}
+
+          Kingfisher secrets:
+          {{readFile("{{kingfisherSarif}}") if file_exists("{{kingfisherSarif}}") else "No kingfisher results"}}
+
+          Trivy results:
+          {{readFile("{{trivySarif}}") if file_exists("{{trivySarif}}") else "No trivy results"}}
+    response_format:
+      type: json_object
+    exports:
+      correlation: "{{llm_vuln_correlation_content}}"
+
+  - name: save-llm-vuln-analysis
+    type: bash
+    pre_condition: "{{enableLlmCodeReview}}"
+    log: "Saving LLM vulnerability correlation analysis"
+    command: |
+      mkdir -p {{Output}}/sast 2>/dev/null || true
+      echo "# Vulnerability Correlation Analysis - {{Target}}" > {{llmVulnAnalysis}}
+      echo "" >> {{llmVulnAnalysis}}
+      echo "{{correlation}}" >> {{llmVulnAnalysis}}
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Agent-based Deep Code Review (Optional - requires claude-code/codex)
+  # ---------------------------------------------------------------------------
+  - name: agent-deep-code-review
+    type: agent-acp
+    pre_condition: '{{enableAgentCodeReview}} && dir_length("{{repoFolder}}") > 0'
+    agent: claude-code
+    cwd: "{{repoFolder}}"
+    allowed_paths:
+      - "{{repoFolder}}"
+      - "{{Output}}"
+    acp_config:
+      write_enabled: false
+    messages:
+      - role: system
+        content: |
+          You are a senior security engineer conducting a comprehensive security code review.
+          Use the security-code-reviewer methodology:
+          1. Repository Context Research - understand security frameworks in use
+          2. Comparative Analysis - compare against secure coding patterns
+          3. Vulnerability Assessment - trace data flow, identify injection points
+      - role: user
+        content: |
+          Perform a comprehensive security code review of this repository for {{Target}}.
+
+          Focus on:
+          - HIGH-CONFIDENCE vulnerabilities only (>80% confidence)
+          - SQL injection, Command injection, Auth bypass, Hardcoded secrets
+          - XSS, Path traversal, Deserialization issues
+
+          Generate a markdown report with findings including file, line, severity, and remediation.
+    exports:
+      agent_review: "{{acp_output}}"

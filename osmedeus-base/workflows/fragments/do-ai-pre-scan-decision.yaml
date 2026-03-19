@@ -1,0 +1,231 @@
+# =============================================================================
+# AI 预扫描决策模块 - 新增
+# =============================================================================
+# 功能：
+# - 在子域名枚举后快速分析，预测高价值目标
+# - 生成智能扫描优先级列表
+# - 减少后续扫描的盲目性
+# - 使用新增的 12 个安全 preset 工具
+# =============================================================================
+
+kind: module
+name: ai-pre-scan-decision
+description: AI-powered pre-scan decision making - analyze subdomains before heavy scanning
+
+params:
+  - name: preScanOutput
+    default: "{{Output}}/ai-analysis/pre-scan-decision-{{TargetSpace}}.json"
+  - name: priorityListOutput
+    default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+  - name: memoryOutput
+    default: "{{Output}}/ai-analysis/memory-pre-scan-{{TargetSpace}}.json"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: enablePreScan
+    type: bool
+    default: true
+    description: "Enable pre-scan AI decision making"
+  - name: maxPriorityTargets
+    type: integer
+    default: 50
+    description: "Maximum number of high-priority targets to output"
+
+steps:
+  - name: prepare-pre-scan
+    type: function
+    pre_condition: "{{enablePreScan}}"
+    log: "Preparing pre-scan analysis"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI pre-scan decision for {{Target}}")'
+
+  - name: collect-subdomain-data
+    type: bash
+    pre_condition: "{{enablePreScan}}"
+    log: "Collecting subdomain data for AI analysis"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      # 统计子域名
+      TOTAL_SUBS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      RESOLVED_COUNT=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      
+      # 提取高价值关键词的子域名
+      KEYWORDS="admin|api|dashboard|portal|login|test|dev|staging|beta|preview|vpn|mail|git|svn|jenkins|console|management"
+      
+      PRIORITY_SUBS=""
+      if [ -f "{{subdomainFile}}" ]; then
+        PRIORITY_SUBS=$(grep -iE "$KEYWORDS" {{subdomainFile}} 2>/dev/null | head -50 || true)
+      fi
+      
+      # 收集子域名样本（前100个用于分析）
+      SAMPLE_SUBS=""
+      if [ -f "{{subdomainFile}}" ]; then
+        SAMPLE_SUBS=$(head -100 {{subdomainFile}} 2>/dev/null || true)
+      fi
+      
+      cat > {{Output}}/ai-analysis/pre-scan-stats.json << EOF
+      {
+        "total_subdomains": $TOTAL_SUBS,
+        "resolved_count": $RESOLVED_COUNT,
+        "target": "{{Target}}",
+        "priority_keywords": "$KEYWORDS"
+      }
+      EOF
+      
+      echo "[Pre-Scan] Total: $TOTAL_SUBS, Resolved: $RESOLVED_COUNT"
+      echo "$PRIORITY_SUBS" > {{Output}}/ai-analysis/temp-priority.txt
+
+  - name: ai-pre-scan-analysis
+    type: agent
+    pre_condition: "{{enablePreScan}}"
+    max_iterations: 8
+    system_prompt: |
+      你是一个智能安全侦察专家。
+      你的任务是在大规模扫描之前，根据子域名特征预测高价值目标。
+      
+      分析要点：
+      1. 识别高风险子域名（测试、开发、管理等）
+      2. 识别可能暴露敏感信息的子域名
+      3. 根据域名特征预测技术栈
+      4. 生成优先级扫描列表
+      
+      重要约束：
+      - 只返回有效的 JSON
+      - 所有数值必须是有效数字
+      - 必须返回完整的 JSON 对象
+    query: |
+      分析以下 {{Target}} 的子域名数据，预测高价值扫描目标：
+      
+      ## 统计信息
+      {{readFile("{{Output}}/ai-analysis/pre-scan-stats.json")}}
+      
+      ## 子域名样本（前50个）
+      {{read_lines("{{subdomainFile}}")[:50]}}
+      
+      ## 高优先级关键词匹配的子域名
+      {{read_lines("{{Output}}/ai-analysis/temp-priority.txt")[:30]}}
+      
+      请输出完整的 JSON 格式决策建议：
+      ```json
+      {
+        "priority_targets": ["高优先级目标1", "目标2"],
+        "predicted_tech_stack": ["技术栈1", "技术栈2"],
+        "risk_indicators": ["风险指示1", "风险指示2"],
+        "recommended_scan_order": ["建议扫描顺序1", "建议扫描顺序2"],
+        "skip_reasons": ["可跳过的原因1"],
+        "focus_areas": ["重点关注1", "重点关注2"],
+        "reasoning": "决策理由"
+      }
+      ```
+      
+      只输出 JSON，不要其他内容。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+      - preset: save_content
+    exports:
+      pre_scan_json: "{{agent_content}}"
+
+  - name: save-pre-scan-result
+    type: bash
+    pre_condition: "{{enablePreScan}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 保存原始结果
+      echo '{{pre_scan_json}}' > {{preScanOutput}} 2>/dev/null || echo '{}' > {{preScanOutput}}
+      
+      # 验证并提取优先级目标
+      if jq empty {{preScanOutput}} 2>/dev/null; then
+        echo "[Pre-Scan] JSON valid"
+        
+        # 提取优先级目标列表
+        jq -r '.priority_targets[] // ""' {{preScanOutput}} 2>/dev/null | head -{{maxPriorityTargets}} > {{priorityListOutput}} || true
+        
+        # 提取技术栈
+        jq -r '.predicted_tech_stack[] // ""' {{preScanOutput}} 2>/dev/null > {{Output}}/ai-analysis/predicted-tech.txt || true
+        
+        # 提取重点区域
+        jq -r '.focus_areas[] // ""' {{preScanOutput}} 2>/dev/null > {{Output}}/ai-analysis/focus-areas-pre.txt || true
+        
+        PRIORITY_COUNT=$(wc -l < {{priorityListOutput}} 2>/dev/null || echo 0)
+        echo "[Pre-Scan] Priority targets: $PRIORITY_COUNT"
+      else
+        echo "[Pre-Scan] JSON invalid, using default"
+        # 回退：复制原始子域名
+        cp {{subdomainFile}} {{priorityListOutput}} 2>/dev/null || true
+      fi
+
+  - name: generate-pre-scan-config
+    type: bash
+    pre_condition: "{{enablePreScan}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 读取 AI 决策
+      if [ -f "{{preScanOutput}}" ]; then
+        TECH_STACK=$(jq -r '.predicted_tech_stack[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        FOCUS=$(jq -r '.focus_areas[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+      else
+        TECH_STACK=""
+        FOCUS=""
+      fi
+      
+      # 生成预扫描配置
+      cat > {{Output}}/ai-analysis/pre-scan-config.yaml << EOF
+      # AI Pre-Scan Configuration
+      # Generated by ai-pre-scan-decision module
+      # Target: {{Target}}
+      # Generated: $(date)
+      
+      # Predicted Technology Stack
+      predicted_tech_stack: "$TECH_STACK"
+      
+      # Focus Areas
+      focus_areas: "$FOCUS"
+      
+      # Priority Targets File
+      priority_targets_file: "{{priorityListOutput}}"
+      
+      # Skip Reasons (targets to skip)
+      skip_reasons: $(jq -r '.skip_reasons[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' || echo "")
+      
+      # Reasoning
+      reasoning: $(jq -r '.reasoning // "AI-generated"' {{preScanOutput}} 2>/dev/null || echo "AI-generated")
+      EOF
+      
+      echo "[Pre-Scan] Config saved"
+
+  - name: save-memory-context
+    type: bash
+    pre_condition: "{{enablePreScan}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      PRIORITY_COUNT=$(wc -l < {{priorityListOutput}} 2>/dev/null || echo 0)
+      
+      cat > {{memoryOutput}} << EOF
+      {
+        "target": "{{Target}}",
+        "timestamp": "$(date -Iseconds)",
+        "phase": "pre-scan-decision",
+        "total_subdomains": $(jq -r '.total_subdomains // 0' {{Output}}/ai-analysis/pre-scan-stats.json 2>/dev/null),
+        "priority_targets": $PRIORITY_COUNT,
+        "next_phases": ["dns-resolve", "http-probe", "vuln-scan"]
+      }
+      EOF
+      
+      echo "[AI Memory] Pre-scan context saved"
+
+  - name: log-pre-scan-complete
+    type: function
+    pre_condition: "{{enablePreScan}}"
+    functions:
+      - 'log_info("AI Pre-scan decision completed for {{Target}}")'

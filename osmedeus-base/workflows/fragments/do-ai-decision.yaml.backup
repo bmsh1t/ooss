@@ -1,0 +1,76 @@
+# =============================================================================
+# AI智能决策模块 - 根据扫描结果动态选择下一步
+# =============================================================================
+# 功能：
+# - 分析当前扫描结果
+# - 动态调整扫描策略
+# - 决定是否继续深入扫描
+# =============================================================================
+
+kind: module
+name: ai-intelligent-decision
+description: AI-powered intelligent decision making for scan strategy
+
+params:
+  - name: decisionOutput
+    default: "{{Output}}/ai-decision.json"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: enableAiDecision
+    type: bool
+    default: true
+    description: "Enable AI intelligent decision making"
+
+steps:
+  - name: ai-strategy-decision
+    type: agent
+    pre_condition: "{{enableAiDecision}}"
+    max_iterations: 3
+    system_prompt: |
+      你是一个智能安全扫描策略分析师。
+      你的任务是根据当前的扫描结果，分析目标的安全态势，并决定下一步的扫描策略。
+    query: |
+      分析以下扫描结果，为下一步扫描提供智能决策建议：
+      
+      发现的子域名: {{file_length("{{subdomainFile}}") if file_exists("{{subdomainFile}}") else 0}}
+      存活的HTTP服务: {{file_length("{{httpFile}}") if file_exists("{{httpFile}}") else 0}}
+      
+      {% if file_exists("{{fingerprintFile}}") %}
+      技术指纹:
+      {{read_lines("{{fingerprintFile}}")[:50]}}
+      {% endif %}
+      
+      请提供:
+      1. 当前扫描的优先级评估 (高/中/低)
+      2. 建议的深入扫描方向
+      3. 是否需要启用额外扫描模块
+      4. 风险等级评估
+      
+      以JSON格式输出决策结果，包含: priority, recommended_actions, additional_modules, risk_level
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+      - preset: save_content
+    exports:
+      decision_result: "{{agent_content}}"
+      decision_iterations: "{{agent_iterations}}"
+
+  - name: save-decision-result
+    type: bash
+    pre_condition: "{{enableAiDecision}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      echo "{{decision_result}}" > {{decisionOutput}}
+      echo "[AI Decision] Strategy analysis saved"
+
+  - name: log-decision-summary
+    type: function
+    pre_condition: "{{enableAiDecision}} && defined('decision_result')"
+    functions:
+      - 'log_info("AI Decision: " + "{{decision_result}}"[:200])'

@@ -1,0 +1,267 @@
+# =============================================================================
+# SUPERDOMAIN EXTENSIVE - Ultimate Reconnaissance Workflow (AI 优化版)
+# =============================================================================
+# 
+# 优化版本 - 整合 AI 智能分析
+# 
+# 改进:
+# - 模块整合优化 (25+ 模块 -> 12 个模块)
+# - 并行执行优化
+# - AI 预扫描决策 (新增)
+# - AI 语义搜索 RAG 功能 (新增)
+# - 实时 WAF 规避 (新增)
+# - AI 分析模块化: vuln-validation + attack-chain + path-planning
+# - 使用新增的 12 个安全 preset 工具
+# 
+# AI 分析模块说明:
+# - ai-vuln-validation: 漏洞验证，识别假阳性
+# - ai-attack-chain: 攻击链分析，构建攻击路径
+# - ai-path-planning: 攻击路径规划，生成执行计划
+# - ai-intelligent-analysis: 协调器，汇总结果生成统一配置
+# 
+# Usage:
+#   osmedeus run -f superdomain-extensive -t example.com
+# =============================================================================
+
+kind: flow
+name: superdomain-extensive
+description: Ultimate reconnaissance - AI-powered workflow with intelligent analysis
+tags: "recon, domain, extensive, full, vuln, osint, super, ai"
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # ===========================================================
+  # 全局范围限制参数
+  # ===========================================================
+  - name: globalTimeout
+    type: string
+    default: "6h"
+    description: "Maximum total workflow execution time"
+  
+  - name: maxSubdomains
+    type: integer
+    default: 50000
+  - name: maxUrls
+    type: integer
+    default: 100000
+  - name: rateLimit
+    type: integer
+    default: 150
+
+  # ===========================================================
+  # AI 智能分析配置
+  # ===========================================================
+  - name: enableLlmAnalysis
+    type: bool
+    default: true
+    description: "Enable AI-powered vulnerability analysis"
+  - name: enablePreScanDecision
+    type: bool
+    default: true
+    description: "Enable AI pre-scan decision making"
+  - name: enableSemanticSearch
+    type: bool
+    default: true
+    description: "Enable semantic search RAG"
+  - name: enableWafBypass
+    type: bool
+    default: true
+    description: "Enable real-time WAF bypass"
+  - name: enableLlmCodeReview
+    type: bool
+    default: true
+    description: "Enable AI code review"
+  - name: enableLlmReport
+    type: bool
+    default: true
+    description: "Enable AI report generation"
+  - name: enableVulnValidation
+    type: bool
+    default: true
+    description: "Enable AI vulnerability validation"
+  - name: enableAttackChain
+    type: bool
+    default: true
+    description: "Enable AI attack chain analysis"
+  - name: enablePathPlanning
+    type: bool
+    default: true
+    description: "Enable AI attack path planning"
+
+  # ===========================================================
+  # 规避检测与 WAF 感知配置
+  # ===========================================================
+  - name: enableWafAwareScan
+    type: bool
+    default: true
+  - name: wafRateLimit
+    type: integer
+    default: 20
+  - name: wafRequestDelay
+    type: string
+    default: "2s"
+
+  # ===========================================================
+  # 扫描并发与速率控制
+  # ===========================================================
+  - name: nucleiThreads
+    type: integer
+    default: 10
+  - name: nucleiRateLimit
+    type: integer
+    default: 30
+  - name: nucleiTimeout
+    type: string
+    default: "8h"
+  - name: nucleiSeverity
+    type: string
+    default: "critical,high,medium"
+
+  # ===========================================================
+  # 输出文件路径
+  # ===========================================================
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: vulnDir
+    default: "{{Output}}/vulnscan"
+
+# -----------------------------------------------------------------------------
+# MODULES SECTION
+# -----------------------------------------------------------------------------
+modules:
+  # ===========================================================================
+  # Phase 1: OSINT & Subdomain (并行)
+  # ===========================================================================
+  - name: osint
+    path: common/01-osint.yaml
+
+  - name: subdomain
+    path: common/02-subdomain.yaml
+    depends_on: [osint]
+
+  # ===========================================================================
+  # Phase 2: DNS Resolution
+  # ===========================================================================
+  - name: dns-resolve
+    path: common/03-dns-resolve.yaml
+    depends_on: [subdomain]
+
+  # ===========================================================================
+  # Phase 3: HTTP Probing
+  # ===========================================================================
+  - name: http-probe
+    path: common/04-http-probe.yaml
+    depends_on: [dns-resolve]
+
+  # ===========================================================================
+  # Phase 4: Fingerprinting & Web Crawl (并行)
+  # ===========================================================================
+  - name: fingerprint
+    path: common/05-fingerprint.yaml
+    depends_on: [http-probe]
+
+  - name: web-crawl
+    path: common/06-web-crawl.yaml
+    depends_on: [http-probe]
+
+  # ===========================================================================
+  # Phase 5: Content Analysis
+  # ===========================================================================
+  - name: content-analysis
+    path: common/07-content-analysis.yaml
+    depends_on: [http-probe, web-crawl]
+
+  # ===========================================================================
+  # Phase 6: Service Scan & Backup
+  # ===========================================================================
+  - name: service-scan
+    path: common/08-service-scan.yaml
+    depends_on: [dns-resolve, http-probe]
+
+  - name: scan-backup
+    path: common/scan-backup.yaml
+    depends_on: [http-probe, web-crawl]
+
+  - name: scan-content
+    path: common/scan-content.yaml
+    depends_on: [http-probe, content-analysis, scan-backup]
+
+  # ===========================================================================
+  # Phase 7: AI 智能分析 (模块化)
+  # ===========================================================================
+  
+  # AI 预扫描决策 - 在大量扫描前分析子域名，预测高价值目标
+  - name: ai-pre-scan-decision
+    path: fragments/do-ai-pre-scan-decision.yaml
+    depends_on: [subdomain, dns-resolve]
+    pre_condition: "{{enablePreScanDecision}}"
+
+  # AI 语义搜索 - RAG 功能，跨目标知识共享
+  - name: ai-semantic-search
+    path: fragments/do-ai-semantic-search.yaml
+    depends_on: [fingerprint, content-analysis]
+    pre_condition: "{{enableSemanticSearch}}"
+    params:
+      searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
+
+  # AI 实时 WAF 规避 - 动态分析 WAF 并生成规避策略
+  - name: ai-waf-bypass
+    path: fragments/do-ai-waf-bypass.yaml
+    depends_on: [http-probe, fingerprint]
+    pre_condition: "{{enableWafBypass}}"
+
+  # AI 漏洞验证 - 验证漏洞真实性，识别假阳性
+  - name: ai-vuln-validation
+    path: fragments/do-ai-vuln-validation.yaml
+    depends_on: [content-analysis, scan-content]
+    pre_condition: "{{enableVulnValidation}}"
+
+  # AI 攻击链分析 - 识别可串联的漏洞，构建攻击路径
+  - name: ai-attack-chain
+    path: fragments/do-ai-attack-chain.yaml
+    depends_on: [ai-vuln-validation]
+    pre_condition: "{{enableAttackChain}}"
+
+  # AI 攻击路径规划 - 生成详细的攻击执行计划
+  - name: ai-path-planning
+    path: fragments/do-ai-path-planning.yaml
+    depends_on: [ai-attack-chain]
+    pre_condition: "{{enablePathPlanning}}"
+
+  # AI 协调器 - 汇总分析结果，生成统一配置供 vuln-suite 使用
+  - name: ai-intelligent-analysis
+    path: fragments/do-ai-intelligent-analysis.yaml
+    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
+    pre_condition: "{{enableLlmAnalysis}}"
+
+  # ===========================================================================
+  # Phase 8: Vulnerability Scan (读取 AI 决策配置)
+  # ===========================================================================
+  - name: vuln-suite
+    path: common/09-vuln-suite.yaml
+    depends_on: [content-analysis, http-probe, dns-resolve, scan-content, ai-intelligent-analysis]
+
+  # ===========================================================================
+  # Phase 9: Code Review
+  # ===========================================================================
+  - name: ai-code-review
+    path: fragments/do-ai-code-review-enhanced.yaml
+    depends_on: [vuln-suite]
+    pre_condition: "{{enableLlmCodeReview}}"
+
+  # ===========================================================================
+  # Phase 10: Final Report
+  # ===========================================================================
+  - name: report
+    path: common/10-report.yaml
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review]
+    on_error:
+      - action: continue

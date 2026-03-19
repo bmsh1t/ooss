@@ -1,0 +1,86 @@
+# =============================================================================
+# Module Workflow: Checkpoint Manager
+# =============================================================================
+# Checkpoint system for resumable workflow execution
+# =============================================================================
+
+kind: module
+name: util-checkpoint
+description: Checkpoint management for resumable workflow execution
+tags: checkpoint, resume, utility, recovery
+hidden: true
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  - name: checkpointDir
+    default: "{{Output}}/.checkpoints"
+  
+  - name: checkpointName
+    required: true
+  
+  - name: checkpointMode
+    default: "auto"  # auto, force-new, force-resume
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Initialize checkpoint directory
+  # ---------------------------------------------------------------------------
+  - name: init-checkpoint-dir
+    type: function
+    log: "Initializing checkpoint directory"
+    functions:
+      - 'create_folder("{{checkpointDir}}")'
+
+  # ---------------------------------------------------------------------------
+  # Check checkpoint status
+  # ---------------------------------------------------------------------------
+  - name: check-checkpoint
+    type: function
+    log: "Checking checkpoint status"
+    functions:
+      - |
+        if file_exists("{{checkpointDir}}/{{checkpointName}}.done") && "{{checkpointMode}}" != "force-new"; then
+          set_var("checkpoint_skip", "true")
+          printf("Checkpoint {{checkpointName}} exists, skipping...")
+        else
+          set_var("checkpoint_skip", "false")
+        fi
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Save checkpoint (called after successful completion)
+  # ---------------------------------------------------------------------------
+  - name: save-checkpoint
+    type: function
+    log: "Saving checkpoint"
+    functions:
+      - 'exec_cmd("echo completed > {{checkpointDir}}/{{checkpointName}}.done")'
+      - 'exec_cmd("date >> {{checkpointDir}}/{{checkpointName}}.done")'
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Clear checkpoint
+  # ---------------------------------------------------------------------------
+  - name: clear-checkpoint
+    type: function
+    log: "Clearing checkpoint"
+    functions:
+      - 'exec_cmd("rm -f {{checkpointDir}}/{{checkpointName}}.done")'
+    on_error:
+      - action: continue
+
+# -----------------------------------------------------------------------------
+# UTILITY FUNCTIONS (for reference)
+# These would be implemented in the Osmedeus engine
+# -----------------------------------------------------------------------------
+# checkpoint_exists(path) -> bool
+# checkpoint_save(path, status) -> void
+# checkpoint_clear(path) -> void
+# checkpoint_list(dir) -> []string

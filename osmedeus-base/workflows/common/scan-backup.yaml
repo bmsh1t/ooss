@@ -1,0 +1,282 @@
+# =============================================================================
+# Module Workflow: Backup File Leak Scanner
+# =============================================================================
+# 功能: 网站备份文件泄露扫描
+# 工具: ihoneyBakFileScan_Modify.py
+# 特性:
+#   - 域名变体字典自动生成
+#   - 目录爬虫发现更多路径
+#   - HEAD 预检优化请求
+#   - 断点续扫支持
+# =============================================================================
+
+kind: module
+name: scan-backup
+description: Website backup file leak scanner - detects exposed backups (.zip, .sql, .bak, etc.)
+tags: backup, leak, sensitive, file, exposure
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # =========================
+  # Feature toggles
+  # =========================
+  - name: enableBackupScan
+    type: bool
+    default: true
+    description: "Enable backup file leak scanning"
+  - name: enableBackupCrawler
+    type: bool
+    default: true
+    description: "Enable directory crawler to discover more paths"
+  - name: enableBackupHeadPreflight
+    type: bool
+    default: true
+    description: "Use HEAD request for preflight check (faster)"
+
+  # =========================
+  # Input files
+  # =========================
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: spiderUrlFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+
+  # =========================
+  # Scan config
+  # =========================
+  - name: backupThreads
+    default: 50
+    description: "Number of threads for backup scanning"
+  - name: backupTimeout
+    default: "2h"
+    description: "Maximum scan duration"
+  - name: backupCrawlDepth
+    default: 2
+    description: "Crawler depth for directory discovery"
+  - name: backupUrlLimit
+    default: 500
+    description: "Maximum URLs to scan"
+  - name: backupMinSize
+    default: 100
+    description: "Minimum file size in bytes to consider"
+
+  # =========================
+  # Tool paths
+  # =========================
+  - name: toolsDir
+    default: "/root/Tools"
+  - name: backupScannerDir
+    default: "/root/Tools/ihoneyBakFileScan_Modify"
+  - name: backupScannerPath
+    default: "{{backupScannerDir}}/ihoneyBakFileScan_Modify.py"
+
+  # =========================
+  # Custom dictionary
+  # =========================
+  - name: backupCustomDict
+    default: ""
+    description: "Custom dictionary file path (appended to default)"
+
+  # =========================
+  # Output files
+  # =========================
+  - name: backupOutputDir
+    default: "{{Output}}/backup-scan"
+  - name: backupResultFile
+    default: "{{Output}}/backup-scan/backup-leaks-{{TargetSpace}}.txt"
+  - name: backupJsonFile
+    default: "{{Output}}/backup-scan/backup-leaks-{{TargetSpace}}.jsonl"
+  - name: backupMarkdownFile
+    default: "{{Output}}/backup-scan/backup-report-{{TargetSpace}}.md"
+  - name: backupStateFile
+    default: "{{Output}}/backup-scan/state-{{TargetSpace}}.json"
+
+  # =========================
+  # Proxy config
+  # =========================
+  - name: backupProxy
+    default: ""
+    description: "Proxy URL (e.g., socks5://127.0.0.1:1080)"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - python3
+    - jq
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: backup-leaks
+    path: "{{backupResultFile}}"
+    type: text
+    description: Discovered backup file leaks
+
+  - name: backup-report
+    path: "{{backupMarkdownFile}}"
+    type: markdown
+    description: Markdown report of backup leaks
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup: Create output folder
+  # ===========================================================================
+  - name: create-output-folder
+    type: function
+    log: "Creating backup scan output folder"
+    functions:
+      - 'create_folder("{{backupOutputDir}}")'
+
+  # ===========================================================================
+  # Check prerequisites
+  # ===========================================================================
+  - name: check-scanner-exists
+    type: function
+    log: "Checking if backup scanner exists"
+    pre_condition: '!file_exists("{{backupScannerPath}}")'
+    functions:
+      - 'log_warn("Backup scanner not found at {{backupScannerPath}}, skipping...")'
+      - 'skip()'
+
+  - name: check-input-file
+    type: function
+    log: "Checking input file"
+    pre_condition: '!file_exists("{{httpFile}}") || file_length("{{httpFile}}") == 0'
+    functions:
+      - 'log_warn("No HTTP targets found, skipping backup scan")'
+      - 'skip()'
+
+  - name: check-url-limit
+    type: function
+    log: "Checking URL limit"
+    pre_condition: 'file_length("{{httpFile}}") > {{backupUrlLimit}}'
+    functions:
+      - 'log_warn("Input exceeds limit ({{backupUrlLimit}}), truncating...")'
+      - 'exec_cmd("head -n {{backupUrlLimit}} {{httpFile}} > {{backupOutputDir}}/targets-truncated.txt")'
+
+  # ===========================================================================
+  # Prepare input targets
+  # ===========================================================================
+  - name: prepare-targets
+    type: function
+    log: "Preparing scan targets"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    functions:
+      - 'exec_cmd("cat {{httpFile}} > {{backupOutputDir}}/targets.txt")'
+      # Optionally add spider URLs for more coverage
+      - 'exec_cmd("cat {{spiderUrlFile}} 2>/dev/null >> {{backupOutputDir}}/targets.txt || true")'
+      - 'sort_unix("{{backupOutputDir}}/targets.txt")'
+
+  # ===========================================================================
+  # Run backup file scanner
+  # ===========================================================================
+  - name: run-backup-scanner
+    type: bash
+    log: "Running backup file leak scanner"
+    pre_condition: '{{enableBackupScan}} && file_exists("{{backupOutputDir}}/targets.txt")'
+    command: |
+      cd {{toolsDir}}/ihoneyBakFileScan_Modify
+      
+      # Build command arguments
+      CMD="python3 ihoneyBakFileScan_Modify.py"
+      CMD="$CMD -t {{backupThreads}}"
+      CMD="$CMD -f {{backupOutputDir}}/targets.txt"
+      CMD="$CMD -o {{backupResultFile}}"
+      
+      # Add crawler if enabled
+      if [ "{{enableBackupCrawler}}" = "true" ]; then
+        CMD="$CMD --crawl --crawl-depth {{backupCrawlDepth}}"
+      fi
+      
+      # Disable HEAD preflight if configured
+      if [ "{{enableBackupHeadPreflight}}" = "false" ]; then
+        CMD="$CMD --no-head"
+      fi
+      
+      # Add custom dictionary if specified
+      if [ -n "{{backupCustomDict}}" ] && [ -f "{{backupCustomDict}}" ]; then
+        CMD="$CMD -d {{backupCustomDict}}"
+      fi
+      
+      # Add proxy if specified
+      if [ -n "{{backupProxy}}" ]; then
+        CMD="$CMD -p {{backupProxy}}"
+      fi
+      
+      # Add resume state file
+      CMD="$CMD --resume {{backupStateFile}}"
+      
+      # Run with timeout
+      timeout -k 1m {{backupTimeout}} $CMD 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Process results
+  # ===========================================================================
+  - name: check-results
+    type: function
+    log: "Checking scan results"
+    pre_condition: '!file_exists("{{backupResultFile}}") || file_length("{{backupResultFile}}") == 0'
+    functions:
+      - 'log_info("No backup files found")'
+
+  - name: parse-results-to-json
+    type: function
+    log: "Parsing results to JSON format"
+    pre_condition: 'file_exists("{{backupResultFile}}") && file_length("{{backupResultFile}}") > 0'
+    functions:
+      # Parse output format: "URL size:XXX" -> JSON
+      - 'exec_cmd("cat {{backupResultFile}} | while read line; do url=$(echo \"$line\" | cut -d\" \" -f1); size=$(echo \"$line\" | grep -oP \"size:\\K[^\"]+\"); echo \"{\\\"url\\\":\\\"$url\\\",\\\"size\\\":\\\"$size\\\",\\\"severity\\\":\\\"high\\\",\\\"type\\\":\\\"backup-leak\\\"}\"; done > {{backupJsonFile}}")'
+    on_error:
+      - action: continue
+
+  - name: generate-markdown-report
+    type: function
+    log: "Generating markdown report"
+    pre_condition: 'file_exists("{{backupJsonFile}}") && file_length("{{backupJsonFile}}") > 0'
+    functions:
+      - 'convert_jsonl_to_markdown("{{backupJsonFile}}", "{{backupMarkdownFile}}")'
+
+  # ===========================================================================
+  # Import to database
+  # ===========================================================================
+  - name: import-backup-leaks
+    type: function
+    log: "Importing backup leaks to database"
+    pre_condition: 'file_exists("{{backupJsonFile}}") && file_length("{{backupJsonFile}}") > 0'
+    functions:
+      - 'db_total_assets("{{backupResultFile}}")'
+      - 'db_import_custom_asset("{{TargetSpace}}", "{{backupJsonFile}}", "backup-scan", "ihoneyBakFileScan")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Summary
+  # ===========================================================================
+  - name: backup-scan-summary
+    type: function
+    log: "Backup scan summary"
+    functions:
+      - 'db_total_assets("{{backupResultFile}}")'
+
+  # ===========================================================================
+  # Cleanup
+  # ===========================================================================
+  - name: cleanup-temp-files
+    type: function
+    log: "Cleaning up temporary files"
+    functions:
+      - 'exec_cmd("rm -f {{backupOutputDir}}/targets.txt {{backupOutputDir}}/targets-truncated.txt 2>/dev/null || true")'

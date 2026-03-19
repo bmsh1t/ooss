@@ -1,0 +1,170 @@
+# =============================================================================
+# AI攻击路径规划模块 - 生成完整攻击路线图
+# =============================================================================
+# 功能：
+# - 综合分析所有扫描结果
+# - 生成攻击路径规划
+# - 识别攻击链
+# - 提供具体利用步骤
+# =============================================================================
+
+kind: module
+name: ai-attack-path-planning
+description: AI-powered attack path planning and attack chain analysis
+
+params:
+  - name: attackPathOutput
+    default: "{{Output}}/ai-analysis/attack-path-{{TargetSpace}}.md"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: secretsFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: enableAttackPathPlanning
+    type: bool
+    default: true
+    description: "Enable AI attack path planning"
+
+steps:
+  - name: comprehensive-attack-analysis
+    type: agent
+    pre_condition: "{{enableAttackPathPlanning}}"
+    max_iterations: 8
+    system_prompt: |
+      你是一个资深的渗透测试专家和红队成员。
+      你的任务是基于全面的扫描结果，制定详细的攻击路径规划和攻击链分析。
+      
+      请从攻击者的角度思考，识别：
+      - 潜在的入口点
+      - 可利用的漏洞链
+      - 权限提升路径
+      - 横向移动机会
+    query: |
+      请对目标 {{Target}} 进行全面的攻击路径规划分析。
+      
+      ## 资产发现
+      子域名: {{file_length("{{subdomainFile}}") if file_exists("{{subdomainFile}}") else 0}}
+      HTTP服务: {{file_length("{{httpFile}}") if file_exists("{{httpFile}}") else 0}}
+      
+      ## 技术指纹
+      {% if file_exists("{{fingerprintFile}}") %}
+      {{read_lines("{{fingerprintFile}}")[:30]}}
+      {% endif %}
+      
+      ## 已发现漏洞
+      Critical: {{file_length("{{nucleiCriticalFile}}") if file_exists("{{nucleiCriticalFile}}") else 0}}
+      High: {{file_length("{{nucleiHighFile}}") if file_exists("{{nucleiHighFile}}") else 0}}
+      
+      {% if file_exists("{{nucleiFile}}") %}
+      漏洞详情:
+      {{read_lines("{{nucleiFile}}")[:20]}}
+      {% endif %}
+      
+      {% if file_exists("{{secretsFile}}") %}
+      ## 发现的敏感信息
+      {{read_lines("{{secretsFile}}")[:10]}}
+      {% endif %}
+      
+      {% if file_exists("{{jsEndpointsFile}}") %}
+      ## JS端点
+      {{read_lines("{{jsEndpointsFile}}")[:15]}}
+      {% endif %}
+      
+      {% if file_exists("{{osintFile}}") %}
+      ## OSINT信息
+      {{read_lines("{{osintFile}}")[:10]}}
+      {% endif %}
+      
+      请生成详细的攻击路径规划，包括：
+      1. **攻击概述** - 目标安全态势评估
+      2. **攻击路径图** - 推荐的攻击序列
+      3. **关键入口点** - 最有价值的攻击起点
+      4. **漏洞利用链** - 可串联的漏洞组合
+      5. **攻击步骤** - 详细的具体操作步骤
+      6. **预期成果** - 可能获得的权限/数据
+      7. **风险缓解建议** - 防御方如何防范
+      
+      输出格式：详细的Markdown报告
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+      - preset: http_get
+      - preset: http_request
+      - preset: save_content
+      - preset: bash
+    exports:
+      attack_plan: "{{agent_content}}"
+
+  - name: generate-attack-roadmap
+    type: bash
+    pre_condition: "{{enableAttackPathPlanning}} && defined('attack_plan')"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      cat > {{attackPathOutput}} << 'EOF'
+      # {{Target}} 攻击路径规划报告
+      ## 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+      ---
+
+      {{attack_plan}}
+
+      ---
+
+      *此报告由AI攻击路径规划模块自动生成*
+      *仅供参考和学习交流，请勿用于未授权的渗透测试*
+      EOF
+      
+      echo "[Attack Path Planning] Report saved to {{attackPathOutput}}"
+
+  - name: generate-exploit-checklist
+    type: agent
+    pre_condition: "{{enableAttackPathPlanning}} && defined('attack_plan')"
+    max_iterations: 2
+    system_prompt: |
+      你是一个渗透测试清单生成专家。
+      基于攻击规划，生成可执行的操作检查清单。
+    query: |
+      基于以下攻击规划：
+      
+      {{attack_plan[:3000]}}
+      
+      请生成一个可执行的检查清单，按优先级排序，包含：
+      1. 第一阶段检查项（入口点验证）
+      2. 第二阶段检查项（漏洞利用）
+      3. 第三阶段检查项（权限提升/横向移动）
+      4. 第四阶段检查项（数据获取/持久化）
+      
+      每个检查项格式：[状态] 具体操作 命令/方法
+    agent_tools:
+      - preset: save_content
+    exports:
+      exploit_checklist: "{{agent_content}}"
+
+  - name: save-checklist
+    type: bash
+    pre_condition: "{{enableAttackPathPlanning}} && defined('exploit_checklist')"
+    command: |
+      echo "{{exploit_checklist}}" >> {{attackPathOutput}}
+      echo "[Attack Path] Exploit checklist appended"
+
+  - name: log-planning-complete
+    type: function
+    pre_condition: "{{enableAttackPathPlanning}}"
+    functions:
+      - 'log_info("AI Attack Path Planning completed for {{Target}}")'

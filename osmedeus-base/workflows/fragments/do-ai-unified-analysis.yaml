@@ -1,0 +1,294 @@
+# =============================================================================
+# 统一 AI 分析模块 - 综合优化版 v2
+# =============================================================================
+# 优化内容:
+# - 合并漏洞验证 + 攻击链分析 + 攻击路径规划 (减少 3次调用 -> 1次)
+# - 使用 Memory 上下文共享
+# - 标准化 JSON + Markdown 双输出
+# - 添加详细的手动验证命令
+# =============================================================================
+
+kind: module
+name: ai-unified-analysis
+description: Unified AI analysis - combines vuln validation, attack chain & path planning
+
+params:
+  - name: unifiedOutputJson
+    default: "{{Output}}/ai-analysis/unified-analysis-{{TargetSpace}}.json"
+  - name: unifiedOutputMd
+    default: "{{Output}}/ai-analysis/unified-analysis-{{TargetSpace}}.md"
+  - name: memoryOutput
+    default: "{{Output}}/ai-analysis/ai-memory-{{TargetSpace}}.json"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: secretsFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: ssrfFile
+    default: "{{Output}}/vuln-scan-suite/ssrf-{{TargetSpace}}.txt"
+  - name: sstiFile
+    default: "{{Output}}/vuln-scan-suite/ssti-{{TargetSpace}}.txt"
+  - name: sqliFile
+    default: "{{Output}}/vuln-scan-suite/sqli-{{TargetSpace}}.txt"
+  - name: takeoverFile
+    default: "{{Output}}/vuln-scan-suite/takeover-{{TargetSpace}}.txt"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  - name: enableUnifiedAnalysis
+    type: bool
+    default: true
+  - name: enableMemory
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-analysis-data
+    type: function
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    log: "Preparing unified analysis"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting unified AI analysis for {{Target}}")'
+
+  - name: collect-analysis-data
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation 2>/dev/null || true
+      
+      CRITICAL=$(wc -l < {{nucleiCriticalFile}} 2>/dev/null || echo 0)
+      HIGH=$(wc -l < {{nucleiHighFile}} 2>/dev/null || echo 0)
+      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      HTTP_COUNT=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      SECRETS=$(wc -l < {{secretsFile}} 2>/dev/null || echo 0)
+      
+      TECH_STACK=""
+      if [ -f "{{fingerprintFile}}" ]; then
+        TECH_STACK=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[]' 2>/dev/null | head -15 | tr '\n' ',' | sed 's/,$//')
+      fi
+      
+      cat > {{Output}}/ai-analysis/unified-stats.json << EOF
+      {
+        "subdomains": $SUBDOMAINS,
+        "http_count": $HTTP_COUNT,
+        "resolved": $RESOLVED,
+        "critical": $CRITICAL,
+        "high": $HIGH,
+        "secrets": $SECRETS,
+        "tech_stack": "$TECH_STACK"
+      }
+      EOF
+      
+      echo "[Unified Analysis] Stats: Critical=$CRITICAL, High=$HIGH, Secrets=$SECRETS"
+
+  - name: unified-ai-analysis
+    type: agent
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    max_iterations: 12
+    system_prompt: |
+      你是一个资深渗透测试专家和安全分析师。
+      你的任务是对目标进行综合分析，包括：
+      1. 漏洞验证 - 验证发现的漏洞是否真实，识别假阳性
+      2. 攻击链分析 - 识别可串联的漏洞，构建攻击路径
+      3. 攻击路径规划 - 制定详细的可执行攻击计划
+      
+      重要约束：
+      - 必须返回结构化的 JSON 输出
+      - 每个漏洞必须有验证状态 (真实/假阳性/需手动验证)
+      - 攻击链必须包含具体的可执行步骤
+      - 提供手动验证的具体 curl 命令
+    query: |
+      请对目标 {{Target}} 进行综合分析：
+      
+      ## 资产统计
+      {{readFile("{{Output}}/ai-analysis/unified-stats.json")}}
+      
+      ## 已发现漏洞 (Nuclei)
+      Critical:
+      {% if file_exists("{{nucleiCriticalFile}}") %}
+      {{read_lines("{{nucleiCriticalFile}}")[:15]}}
+      {% else %}无{% endif %}
+      
+      High:
+      {% if file_exists("{{nucleiHighFile}}") %}
+      {{read_lines("{{nucleiHighFile}}")[:15]}}
+      {% else %}无{% endif %}
+      
+      ## 特殊漏洞
+      Secrets:
+      {% if file_exists("{{secretsFile}}") %}{{read_lines("{{secretsFile}}")[:10]}}{% else %}无{% endif %}
+      
+      SSRF:
+      {% if file_exists("{{ssrfFile}}") %}{{read_lines("{{ssrfFile}}")[:10]}}{% else %}无{% endif %}
+      
+      ## 技术栈
+      {% if file_exists("{{fingerprintFile}}") %}{{read_lines("{{fingerprintFile}}")[:15]}}{% endif %}
+      
+      ## WAF 保护
+      {% if file_exists("{{wafFile}}") %}{{read_lines("{{wafFile}}")[:10]}}{% endif %}
+      
+      请输出完整的 JSON 格式分析报告：
+      ```json
+      {
+        "summary": {"total_critical": 0, "total_high": 0, "risk_level": "高/中/低", "overall_assessment": "总体评估"},
+        "vulnerability_validation": {
+          "critical_findings": [{"id": "vuln-1", "finding": "漏洞描述", "url": "目标URL", "verification_status": "真实/假阳性/需手动验证", "confidence": "高/中/低", "manual_verification": {"command": "curl -v '验证URL'", "expected": "预期响应"}, "remediation": "修复建议"}],
+          "high_findings": [],
+          "special_vulns": {"ssrf": [], "ssti": [], "sqli": [], "secrets": [], "takeover": []}
+        },
+        "attack_chain": {"chains": [{"name": "链1名称", "entry_point": "入口漏洞", "steps": [{"step": 1, "action": "操作", "vulnerability": "漏洞", "result": "结果"}], "difficulty": "高/中/低", "impact": "影响"}], "critical_paths": ["路径1"]},
+        "attack_path_planning": {"overview": "攻击概述", "phases": [{"phase": "第一阶段", "objectives": ["目标1"], "actions": ["操作1"], "commands": ["具体命令"]}], "expected_results": ["预期结果"], "risk_mitigation": ["风险缓解"]},
+        "manual_verification_checklist": [{"priority": 1, "vuln": "漏洞名", "command": "curl命令", "expected": "预期"}],
+        "defense_recommendations": ["建议1"]
+      }
+      ```
+      
+      只输出 JSON，不要其他内容。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+      - preset: http_get
+      - preset: http_request
+      - preset: bash
+      - preset: save_content
+    exports:
+      unified_analysis: "{{agent_content}}"
+
+  - name: validate-analysis-output
+    type: function
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    functions:
+      - 'log_info("Unified AI analysis completed")'
+
+  - name: save-unified-output
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      echo '{{unified_analysis}}' > {{unifiedOutputJson}} 2>/dev/null || echo '{"error": "no data"}' > {{unifiedOutputJson}}
+
+      if jq empty {{unifiedOutputJson}} 2>/dev/null; then
+        echo "[Unified] JSON saved and valid"
+        RISK_LEVEL=$(jq -r '.summary.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
+        CRITICAL_COUNT=$(jq -r '.summary.total_critical // 0' {{unifiedOutputJson}} 2>/dev/null)
+        echo "[Unified] Risk: $RISK_LEVEL, Critical: $CRITICAL_COUNT"
+      else
+        echo "[Unified] JSON invalid"
+      fi
+
+  - name: generate-markdown-report
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+      
+      cat > {{unifiedOutputMd}} << 'EOF'
+      # AI 综合安全分析报告
+      
+      ## 扫描目标
+      - **目标**: TARGET_PLACEHOLDER
+      - **时间**: TIMESTAMP_PLACEHOLDER
+      - **分析类型**: 漏洞验证 + 攻击链 + 攻击路径规划
+      
+      ---
+      
+      EOF
+      
+      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" {{unifiedOutputMd}}
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$TIMESTAMP|g" {{unifiedOutputMd}}
+
+      echo "## 分析总结" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      jq -r '.summary | "- 风险等级: \(.risk_level // "中")\n- Critical: \(.total_critical // 0)\n- High: \(.total_high // 0)\n- 总体评估: \(.overall_assessment // "无")"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+      echo "" >> {{unifiedOutputMd}}
+
+      echo "---" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      echo "## 漏洞验证结果" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      jq -r '.vulnerability_validation.critical_findings[] | "### \(.finding)\n- URL: \(.url)\n- 验证状态: \(.verification_status)\n- 置信度: \(.confidence)\n- 修复建议: \(.remediation)\n\n**手动验证:**\n```bash\n\(.manual_verification.command // "N/A")\n```\n\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+
+      echo "---" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      echo "## 攻击链分析" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      jq -r '.attack_chain.chains[] | "### \(.name)\n- 入口点: \(.entry_point)\n- 难度: \(.difficulty)\n- 影响: \(.impact)\n\n**攻击步骤:**\n" + (.steps | .[] | "- 步骤 \(.step): \(.action) -> \(.result)\n") + "\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+
+      echo "---" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      echo "## 防御建议" >> {{unifiedOutputMd}}
+      echo "" >> {{unifiedOutputMd}}
+      jq -r '.defense_recommendations[] | "- \(.)"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+
+      cat >> {{unifiedOutputMd}} << 'EOF'
+      
+      ---
+      
+      *此报告由 AI 统一分析模块自动生成*
+      *仅供授权的安全评估和防御改进使用*
+      EOF
+      
+      echo "[Unified Analysis] Markdown report saved"
+
+  - name: extract-verification-commands
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation
+
+      jq -r '.manual_verification_checklist[] | "# \(.priority). \(.vuln)\n\(.command)\n# Expected: \(.expected)\n"' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/validation/manual-commands.sh || true
+      jq -r '.attack_chain.chains[] | "## \(.name)\nEntry: \(.entry_point)\n" + (.steps | .[] | "- \(.step): \(.action)\n")' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/attack-chains.txt || true
+      jq -r '.attack_chain.critical_paths[]' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/critical-paths.txt || true
+      chmod +x {{Output}}/ai-analysis/validation/manual-commands.sh 2>/dev/null || true
+
+      echo "[Unified] Extraction complete"
+
+  - name: save-memory-context
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}} && {{enableMemory}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      RISK=$(jq -r '.summary.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
+      TOTAL=$(jq -r '[.vulnerability_validation.critical_findings[], .vulnerability_validation.high_findings[]] | length' {{unifiedOutputJson}} 2>/dev/null || echo 0)
+
+      cat > {{memoryOutput}} << EOF
+      {
+        "target": "{{Target}}",
+        "timestamp": "$(date -Iseconds)",
+        "phase": "unified-analysis",
+        "analysis_type": "vuln-validation-attack-chain-path-planning",
+        "risk_level": "$RISK",
+        "total_findings": $TOTAL,
+        "next_phases": ["report"]
+      }
+      EOF
+
+      echo "[AI Memory] Context saved"
+
+  - name: log-unified-complete
+    type: function
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    functions:
+      - 'log_info("Unified AI analysis completed for {{Target}}")'

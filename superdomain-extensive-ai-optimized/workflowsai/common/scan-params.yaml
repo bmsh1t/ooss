@@ -1,0 +1,209 @@
+# =============================================================================
+# Module Workflow: Parameter Discovery with Arjun
+# =============================================================================
+# Input sources: Spider URLs + Archive URLs (Wayback/CommonCrawl)
+# This matches reconFTW's approach where param discovery runs on crawled URLs
+# =============================================================================
+
+kind: module
+name: scan-params
+description: Discover hidden parameters using Arjun fuzzing on spidered and archived URLs
+tags: parameter, discovery, arjun, security
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+ # Input files from spider and archive modules
+ - name: spiderUrlFile
+   default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+
+ - name: archiveUrlFile
+   default: "{{Output}}/archive/archive-interesting-urls-{{TargetSpace}}.txt"
+
+ # Combined input for arjun
+ - name: combinedUrlFile
+   default: "{{Output}}/params/combined-urls-{{TargetSpace}}.txt"
+
+ # Output files
+ - name: arjunOutput
+   default: "{{Output}}/params/params-{{TargetSpace}}.txt"
+
+ - name: paramsDiscoveredFile
+   default: "{{Output}}/params/params-discovered-{{TargetSpace}}.txt"
+
+ - name: parameterizedUrlFile
+   default: "{{Output}}/params/parameterized-urls-{{TargetSpace}}.txt"
+
+ - name: arjunReport
+   default: "{{Output}}/params/params-report-{{TargetSpace}}.md"
+
+ # Arjun configuration
+ - name: arjunWordlist
+   default: "params.txt"
+
+ - name: arjunThreads
+   default: "10"
+
+ - name: arjunMethod
+   default: "GET,POST,JSON,HEADER"
+
+ - name: arjunTimeout
+   default: "30"
+
+ - name: TargetSpace
+   default: "{{.Values.TargetSpace | default 'default'}}"
+
+ - name: Output
+   default: "{{.Values.Output | default '/tmp/output'}}"
+
+ - name: defaultUA
+   default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+
+ - name: paramsLimit
+   default: "5000"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+ commands:
+  - arjun
+  - jq
+
+ variables:
+  - name: Target
+    type: string
+    required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+ - name: params-raw-output
+   path: "{{arjunOutput}}"
+   type: text
+   description: Arjun parameter discovery raw output
+
+ - name: params-discovered
+   path: "{{paramsDiscoveredFile}}"
+   type: text
+   description: List of discovered parameters
+
+ - name: parameterized-urls
+   path: "{{parameterizedUrlFile}}"
+   type: text
+   description: URLs with discovered parameters
+
+ - name: params-markdown-report
+   path: "{{arjunReport}}"
+   type: markdown
+   description: Parameter discovery results report
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+ # ---------------------------------------------------------------------------
+ # Setup: Create output folders
+ # ---------------------------------------------------------------------------
+ - name: create-output-folders
+   type: function
+   log: "Creating output folders"
+   functions:
+    - 'create_folder("{{Output}}/params")'
+
+ # ---------------------------------------------------------------------------
+ # Combine URLs from spider and archive sources
+ # ---------------------------------------------------------------------------
+ - name: combine-input-urls
+   type: bash
+   log: "Combining spider and archive URLs for parameter discovery"
+   command: |
+     : > "{{combinedUrlFile}}"
+     if [ -f "{{spiderUrlFile}}" ]; then
+       cat "{{spiderUrlFile}}" >> "{{combinedUrlFile}}"
+     fi
+     if [ -f "{{archiveUrlFile}}" ]; then
+       cat "{{archiveUrlFile}}" >> "{{combinedUrlFile}}"
+     fi
+     sort -u "{{combinedUrlFile}}" -o "{{combinedUrlFile}}"
+     wc -l < "{{combinedUrlFile}}"
+
+ # ---------------------------------------------------------------------------
+ # Check input file exists and limit
+ # ---------------------------------------------------------------------------
+ - name: check-input-file
+   type: function
+   log: "Checking combined input file"
+   pre_condition: 'file_length("{{combinedUrlFile}}") > {{paramsLimit}}'
+   functions:
+    - 'log_error("Got {{file_length(combinedUrlFile)}} lines in input file, which is greater than {{paramsLimit}} lines")'
+    - 'skip()'
+
+ # ---------------------------------------------------------------------------
+ # Arjun parameter discovery scan
+ # ---------------------------------------------------------------------------
+ - name: arjun-scan
+   type: bash
+   log: "Running Arjun parameter discovery on spidered/archived URLs"
+   pre_condition: 'file_exists("{{combinedUrlFile}}") && file_length("{{combinedUrlFile}}") > 0'
+   command: 'arjun -i "{{combinedUrlFile}}" -m "{{arjunMethod}}" -t {{arjunThreads}} -H "{{defaultUA}}" -o "{{arjunOutput}}"'
+
+ # ---------------------------------------------------------------------------
+ # Parse and extract discovered parameters (matches reconFTW approach)
+ # ---------------------------------------------------------------------------
+ - name: parse-arjun-results
+   type: bash
+   log: "Parsing Arjun results with static asset filtering"
+   pre_condition: 'file_exists("{{arjunOutput}}")'
+   command: |
+     # Extract URLs with parameters and filter static assets (matches reconFTW web.sh:1300-1307)
+     grep -aEo 'https?://[^ ]+' "{{arjunOutput}}" 2>/dev/null  | sed -E 's/[[:space:]]+$//' | sed -E 's/[),;]$//' | sed 's/"$//' | sed "s/'$//" | grep -a '=' | grep -aEiv "\.(eot|jpg|jpeg|gif|css|tif|tiff|png|ttf|otf|woff|woff2|ico|pdf|svg)$" > "{{parameterizedUrlFile}}" || true
+     
+     # Extract parameter names
+     grep -aE 'Parameters found:[[:space:]]*' "{{arjunOutput}}" 2>/dev/null  | sed -E 's/^.*Parameters found:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort -u > "{{paramsDiscoveredFile}}" || true
+     
+     # Also extract params from URL patterns
+     grep -aEo '([?&][A-Za-z0-9_.-]+)=' "{{arjunOutput}}" 2>/dev/null  | sed -E 's/^[?&]//; s/=.*$//' | sed '/^$/d' | sort -u >> "{{paramsDiscoveredFile}}" || true
+     
+     # Dedupe params file
+     sort -u "{{paramsDiscoveredFile}}" -o "{{paramsDiscoveredFile}}" 2>/dev/null || true
+
+ # ---------------------------------------------------------------------------
+ # Process and filter results
+ # ---------------------------------------------------------------------------
+ - name: process-arjun-results
+   type: function
+   log: "Processing Arjun results"
+   pre_condition: 'file_exists("{{arjunOutput}}")'
+   functions:
+    - 'uniq("{{arjunOutput}}")'
+    - 'sort_unix("{{arjunOutput}}")'
+
+ # ---------------------------------------------------------------------------
+ # Generate markdown report
+ # ---------------------------------------------------------------------------
+ - name: generate-params-report
+   type: function
+   log: "Generating parameter discovery report"
+   pre_condition: 'file_exists("{{arjunOutput}}")'
+   functions:
+    - 'register_artifact("{{arjunOutput}}", "txt")'
+    - 'register_artifact("{{paramsDiscoveredFile}}", "txt")'
+    - 'register_artifact("{{parameterizedUrlFile}}", "txt")'
+    - 'register_artifact("{{arjunReport}}", "md")'
+    - 'send_telegram_file("{{arjunReport}}", "Parameter Discovery Results")'
+   on_error:
+    - action: continue
+
+ # ---------------------------------------------------------------------------
+ # Log summary
+ # ---------------------------------------------------------------------------
+ - name: log-summary
+   type: function
+   log: "Parameter discovery completed"
+   pre_condition: 'file_exists("{{arjunOutput}}")'
+   functions:
+    - 'log_info("Found {{file_length(paramsDiscoveredFile)}} unique parameters")'
+    - 'log_info("Found {{file_length(parameterizedUrlFile)}} parameterized URLs")'

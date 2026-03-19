@@ -1,0 +1,93 @@
+# =============================================================================
+# Module Workflow: IIS Shortname Scanner
+# =============================================================================
+# Detect IIS shortname vulnerabilities using shortscan
+# =============================================================================
+
+kind: module
+name: iis-shortname
+description: Detect IIS shortname vulnerabilities using shortscan
+tags: iis, shortname, vulnerability, windows
+
+params:
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  
+  # 从 fingerprint 结果中提取 IIS URLs
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  
+  - name: outputDir
+    default: "{{Output}}/vulns/iis-shortname"
+
+  - name: shortscanThreads
+    default: 10
+  - name: shortscanTimeout
+    default: "10m"
+
+dependencies:
+  commands:
+    - shortscan
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: iis-shortname-results
+    path: "{{outputDir}}/iis-shortname-{{TargetSpace}}.txt"
+    type: text
+    description: IIS shortname findings
+
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating iis-shortname output folder"
+    functions:
+      - 'create_folder("{{outputDir}}")'
+
+  - name: check-input
+    type: function
+    pre_condition: '!file_exists("{{httpFile}}")'
+    functions:
+      - 'log_warn("No HTTP file found, skipping IIS shortname scan")'
+      - 'skip()'
+
+  - name: filter-iis-targets
+    type: bash
+    log: "Filtering IIS/ASP.NET targets from fingerprint results"
+    command: |
+      # 从 fingerprint JSONL 中提取 IIS/ASP.NET 技术栈的 URLs
+      if [ -f "{{fingerprintFile}}" ]; then
+        jq -r 'select(.tech | tostring | test("(?i)(iis|asp|asp\\.net|microsoft)")) | .url' {{fingerprintFile}} 2>/dev/null | head -n 100 >> {{outputDir}}/iis-targets.txt || true
+        # 备用: 从 webserver 字段提取 IIS
+        jq -r 'select(.webserver | tostring | test("(?i)(iis|microsoft)")) | .url' {{fingerprintFile}} 2>/dev/null | head -n 100 >> {{outputDir}}/iis-targets.txt || true
+      fi
+      # 备用: 简单字符串匹配
+      if [ -f "{{httpFile}}" ]; then
+        grep -iE "(iis|asp|aspx|\.net)" {{httpFile}} 2>/dev/null | head -n 100 >> {{outputDir}}/iis-targets.txt || true
+      fi
+      # 去重
+      sort -u {{outputDir}}/iis-targets.txt -o {{outputDir}}/iis-targets.txt 2>/dev/null || true
+
+  - name: shortscan-scan
+    type: foreach
+    log: "Running shortscan IIS shortname detection"
+    pre_condition: 'file_exists("{{outputDir}}/iis-targets.txt")'
+    input: "{{outputDir}}/iis-targets.txt"
+    variable: url
+    threads: 5
+    step:
+      name: shortscan-single
+      type: bash
+      command: >
+        shortscan [[url]] -F -s -p 1 
+        2>/dev/null >> {{outputDir}}/iis-shortname-{{TargetSpace}}.txt
+
+  - name: summary
+    type: function
+    log: "IIS shortname scan summary"
+    pre_condition: 'file_exists("{{outputDir}}/iis-shortname-{{TargetSpace}}.txt")'
+    functions:
+      - 'db_total_assets("{{outputDir}}/iis-shortname-{{TargetSpace}}.txt")'

@@ -1,0 +1,244 @@
+# =============================================================================
+# Module Workflow: Directory Scanning
+# =============================================================================
+
+kind: module
+name: scan-content
+description: Bruteforce directories and files with ffuf
+tags: directory, bruteforce, content-discovery
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+
+  - name: dirbLimit
+    default: "10000"
+
+  # speed tuning params
+  - name: deparosMaxtime
+    default: "30m"
+  - name: deparosParallel
+    default: "10"
+  - name: deparosThreads
+    default: "40"
+  - name: deparosTimeout
+    default: "30m"
+  - name: deparosSessionName
+    default: "{{Today}}" # 2026-01-30
+
+  ## ffuf params
+  - name: ffufTimeout
+    default: "30m"
+  - name: ffufParallel
+    default: "10"
+  - name: ffThreads
+    default: "25"
+
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+
+  - name: contentDiscoverFile
+    default: "{{Output}}/content-discovery/ffuf-{{TargetSpace}}.jsonl"
+  - name: contentDiscoverFilteredFile
+    default: "{{Output}}/content-discovery/filtered-{{TargetSpace}}.jsonl"
+
+  - name: deparosDBDir
+    default: "{{Output}}/content-discovery/deparos-dbs"
+  - name: deparosConfig
+    default: "{{ExternalConfigs}}/deparosConfig-config.yaml"
+
+  # output reports
+  - name: deparosHTMLReport
+    default: "{{Output}}/content-discovery/deparos-{{TargetSpace}}.html"
+  - name: contentDiscoveryJsonlFile
+    default: "{{Output}}/content-discovery/deparos-{{TargetSpace}}.jsonl"
+  - name: contentDiscoveryCleanJsonlFile
+    default: "{{Output}}/content-discovery/deparos-clean-{{TargetSpace}}.jsonl"
+  - name: contentDiscoverMarkdownFile
+    default: "{{Output}}/content-discovery/content-discovery-report-{{TargetSpace}}.md"
+
+  # ffuf output files
+  - name: ffufJsonlFile
+    default: "{{Output}}/content-discovery/ffuf-{{TargetSpace}}.jsonl"
+  - name: ffufFilteredFile
+    default: "{{Output}}/content-discovery/ffuf-filtered-{{TargetSpace}}.jsonl"
+  - name: ffufMarkdownFile
+    default: "{{Output}}/content-discovery/ffuf-report-{{TargetSpace}}.md"
+    
+  # for doing http fingerprinting on discovered urls
+  - name: httpThreads
+    default: "{{ threads * 2 }}"
+  - name: httpTimeout
+    default: "15"
+  - name: contentDiscoverUrlsFile
+    default: "{{Output}}/content-discovery/content-discovery-url-{{TargetSpace}}.txt"
+  - name: httpFingerprintJsonFile
+    default: "{{Output}}/content-discovery/content-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpInterestingFilteredJsonFile
+    default: "{{Output}}/content-discovery/content-fingerprint-filtered-{{TargetSpace}}.jsonl"
+
+
+  # wordlists
+  - name: shortFileWordlist
+    default: "{{Data}}/wordlists/content/file-short.txt"
+  - name: longFileWordlist
+    default: "{{Data}}/wordlists/content/file-long.txt"
+  - name: shortDirWordlist
+    default: "{{Data}}/wordlists/content/dir-short.txt"
+  - name: longDirWordlist
+    default: "{{Data}}/wordlists/content/dir-long.txt"
+  - name: contentDiscoverWordlist
+    default: "{{Data}}/wordlists/content/dicc.txt"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - ffuf
+    - jq
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: beautify-content-discovery-results
+    path: "{{deparosHTMLReport}}"
+    type: html
+    description: Beautified content discovery results
+
+  - name: content-discovery-markdown-report
+    path: "{{contentDiscoverMarkdownFile}}"
+    type: md
+    description: Markdown report of interesting content discovery results
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Setup: Create output folder
+  # ---------------------------------------------------------------------------
+  - name: create-output-folder
+    type: function
+    log: "Creating content-discovery output folder"
+    functions:
+      - 'create_folder("{{Output}}/content-discovery")'
+      - 'create_folder("{{deparosDBDir}}")'
+  # ---------------------------------------------------------------------------
+  # Check input file size limit
+  # ---------------------------------------------------------------------------
+  - name: check-input-limit
+    type: function
+    log: "Checking input file size"
+    pre_condition: 'file_length("{{httpFile}}") > {{dirbLimit}}'
+    functions:
+      - 'log_error("Filter", "Got input file greater than {{dirbLimit}} line")'
+      - 'skip()'
+
+
+  # ---------------------------------------------------------------------------
+  # Directory bruteforce with ffuf
+  # ---------------------------------------------------------------------------
+  - name: directory-bruteforce
+    type: foreach
+    log: "Running directory bruteforce with deparos"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    input: "{{httpFile}}"
+    variable: line # this is the variable name for each line in the input file [[line]]
+    threads: "{{deparosParallel}}"
+    step:
+      name: deparos-single-target
+      type: bash
+      command: "timeout -k 1m {{deparosTimeout}} deparos discover --silent --threads {{deparosThreads}} -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name {{deparosSessionName}} --max-duration {{deparosMaxtime}}"
+      # with custom wordlists
+      # command: "timeout -k 1m {{deparosTimeout}} deparos discover -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name {{deparosSessionName}} --max-duration {{deparosMaxtime}} -short-file-wordlist='{{shortFileWordlist}}' -short-dir-wordlist='{{shortDirWordlist}}' -long-dir-wordlist='{{longDirWordlist}}' -long-file-wordlist='{{longFileWordlist}}'"
+
+  - name: "generate-deparos-reports"
+    type: bash
+    log: "Generate deparos HTML report for session {{deparosSessionName}}" 
+    pre_condition: 'file_exists("{{deparosDBDir}}/deparos_{{TargetSpace}}.db")'
+    commands:
+      - "deparos export --silent --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --all -f html -o {{deparosHTMLReport}}"
+      - "deparos export --silent --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --all -f jsonl -o {{contentDiscoveryJsonlFile}}"
+      # just to save space, remove the deparos db after report generation
+      # - "rm -rf {{deparosDBDir}}/deparos_{{TargetSpace}}.db"
+
+  - name: deparos-beautify-interesting-content-results
+    type: function
+    log: "Beautifying interesting content results"
+    pre_condition: 'file_exists("{{contentDiscoveryJsonlFile}}")'
+    functions:
+      - jsonl_filter("{{contentDiscoveryJsonlFile}}", "{{contentDiscoveryCleanJsonlFile}}", "url,status_code,words,webserver,content_length,content_type,location")
+      - sort_unix("{{contentDiscoveryCleanJsonlFile}}")
+      - 'convert_jsonl_to_markdown("{{contentDiscoveryCleanJsonlFile}}", "{{contentDiscoverMarkdownFile}}")'
+
+  # Load data into DB and send report via Telegram
+  - name: process-dirb-data-in-db
+    type: function
+    log: "Processing dirb-data in db"
+    pre_condition: 'file_exists("{{contentDiscoveryJsonlFile}}")'
+    functions:
+      - 'db_total_content("{{contentDiscoveryJsonlFile}}")'
+      - 'db_import_custom_asset("{{TargetSpace}}", "{{contentDiscoveryJsonlFile}}", "content-discovery", "deparos")'
+      - 'send_telegram_file("{{deparosHTMLReport}}", "HTML Content Discovery Results")'
+    on_error: 
+      - action: continue # in case of error, continue the workflow
+
+
+  ### Fallback ffuf method if the deparos method having error ###
+  - name: directory-bruteforce-with-ffuf
+    type: foreach
+    log: "Running directory bruteforce with ffuf"
+    pre_condition: '!file_exists("{{contentDiscoveryJsonlFile}}") && file_exists("{{httpFile}}")'
+    input: "{{httpFile}}"
+    variable: line
+    threads: "{{ffufParallel}}"
+    step:
+      name: ffuf-single-target
+      type: bash
+      command: 'timeout -k 1m {{ffufTimeout}} ffuf -s -t {{ffThreads}} -noninteractive -ac -acs advanced -timeout 15 -se -D -fc "429,404,400" -e "aspx,aspx~,php,php~,bak,bkp,cache,cgi,conf,inc,js,json,jsp,jsp~,log,old,txt" -json -H "{{defaultUA}}" -ac -s -fc "429,404,400" -json -u "[[line]]/FUZZ" -w {{contentDiscoverWordlist}}:FUZZ > {{Output}}/content-discovery/ffuf-raw-[[_id_]].json 2>/dev/null'
+
+  # ---------------------------------------------------------------------------
+  # Process and beautify results
+  # ---------------------------------------------------------------------------
+  - name: process-ffuf-results
+    type: function
+    log: "Processing and beautifying ffuf scan results"
+    pre_condition: 'dir_length("{{Output}}/content-discovery/") > 0'
+    functions:
+      - exec_cmd("cat {{Output}}/content-discovery/ffuf-raw-*.json > {{ffufJsonlFile}}")
+      - exec_cmd("rm -rf {{Output}}/content-discovery/ffuf-raw-*.json")
+      - jsonl_filter("{{ffufJsonlFile}}", "{{ffufFilteredFile}}", "url,status_code,words,content_length,content_type,location")
+      - sort_unix("{{ffufFilteredFile}}")
+      - convert_jsonl_to_markdown("{{ffufFilteredFile}}", "{{ffufMarkdownFile}}")
+      - exec_cmd("jq -r '.url' {{ffufFilteredFile}} > {{contentDiscoverUrlsFile}}")
+
+  # ---------------------------------------------------------------------------
+  # HTTP fingerprinting with httpx
+  # ---------------------------------------------------------------------------
+  - name: http-fingerprint-on-discovered-urls
+    type: bash
+    log: "Fingerprinting discovered URLs with httpx"
+    pre_condition: 'file_exists("{{contentDiscoverUrlsFile}}")'
+    commands:
+      - 'cat {{contentDiscoverUrlsFile}} | httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpFingerprintJsonFile}}'
+  - name: process-content-discovery-fingerprint-in-db
+    type: function
+    log: "Processing content discovery fingerprint in db"
+    pre_condition: 'file_exists("{{httpFingerprintJsonFile}}")'
+    functions:
+      - jsonl_filter("{{httpFingerprintJsonFile}}", "{{httpInterestingFilteredJsonFile}}", "url,title,status_code,content_length,lines,webserver,tech,cdn")
+      - 'db_total_urls("{{httpInterestingFilteredJsonFile}}")'
+      - 'db_total_assets("{{httpInterestingFilteredJsonFile}}")'
+      - 'db_import_asset_from_file("{{TargetSpace}}", "{{httpInterestingFilteredJsonFile}}")'
+    on_error: 
+      - action: continue # in case of error, continue the workflow

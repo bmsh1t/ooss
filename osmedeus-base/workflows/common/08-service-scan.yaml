@@ -1,0 +1,174 @@
+# =============================================================================
+# Module Workflow: Service Scanning
+# =============================================================================
+# 合并: service-fingerprint.yaml + grpc-reflection.yaml + iis-shortname.yaml
+# 功能: 服务指纹、gRPC 反射、IIS 短文件名扫描
+# =============================================================================
+
+kind: module
+name: service-scan
+description: Service scanning - fingerprint, gRPC reflection, IIS shortname
+tags: service, fingerprint, grpc, iis, nerva, shortscan
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 功能开关
+  - name: enableServiceFingerprint
+    type: bool
+    default: true
+  - name: enableGrpcReflection
+    type: bool
+    default: true
+  - name: enableIisShortname
+    type: bool
+    default: true
+
+  # 输入文件
+  - name: ipFile
+    default: "{{Output}}/ipspace/ip-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+
+  # 工具参数
+  - name: grpcPorts
+    default: "50051,50052,8080,9090,443,8443"
+
+  # 输出目录
+  - name: outputDir
+    default: "{{Output}}/service-scan"
+
+  # 输出文件
+  - name: nervaOutputFile
+    default: "{{outputDir}}/nerva-{{TargetSpace}}.jsonl"
+  - name: grpcOutputFile
+    default: "{{outputDir}}/grpc-services-{{TargetSpace}}.txt"
+  - name: iisOutputFile
+    default: "{{outputDir}}/iis-shortname-{{TargetSpace}}.txt"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - nerva
+    - grpcurl
+    - shortscan
+    - nuclei
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: service-fingerprint-results
+    path: "{{nervaOutputFile}}"
+    type: jsonl
+    description: Service fingerprint results
+
+  - name: grpc-services
+    path: "{{grpcOutputFile}}"
+    type: text
+    description: Discovered gRPC services
+
+  - name: iis-shortname-results
+    path: "{{iisOutputFile}}"
+    type: text
+    description: IIS shortname findings
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating service scan output folders"
+    functions:
+      - 'create_folder("{{outputDir}}")'
+
+  # ===========================================================================
+  # Phase 1: Service Fingerprinting (nerva)
+  # ===========================================================================
+  - name: nerva-scan
+    type: function
+    pre_condition: '{{enableServiceFingerprint}} && file_exists("{{ipFile}}")'
+    log: "Running nerva service fingerprinting"
+    functions:
+      - 'exec_cmd("nerva -l {{ipFile}} --json -o {{nervaOutputFile}} 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: gRPC Reflection
+  # ===========================================================================
+  - name: grpc-port-scan
+    type: foreach
+    pre_condition: '{{enableGrpcReflection}} && file_exists("{{ipFile}}")'
+    log: "Scanning for gRPC services"
+    input: "{{ipFile}}"
+    variable: ip
+    threads: 20
+    step:
+      name: grpcurl-probe
+      type: bash
+      command: 'for port in $(echo {{grpcPorts}} | tr "," " "); do grpcurl -plaintext -max-msg-sz 10485760 -d {} [[ip]]:$port list 2>/dev/null >> {{outputDir}}/grpc-[[ip]]-$port.txt || true; done'
+    on_error:
+      - action: continue
+
+  - name: grpc-merge-results
+    type: function
+    pre_condition: '{{enableGrpcReflection}}'
+    log: "Merging gRPC results"
+    functions:
+      - 'exec_cmd("cat {{outputDir}}/grpc-*.txt 2>/dev/null > {{grpcOutputFile}} || echo \"No gRPC services found\" > {{grpcOutputFile}}")'
+      - 'sort_unix("{{grpcOutputFile}}")'
+      - 'exec_cmd("rm -rf {{outputDir}}/grpc-*.txt 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: IIS Shortname Detection
+  # ===========================================================================
+  - name: filter-iis-targets
+    type: function
+    pre_condition: '{{enableIisShortname}}'
+    log: "Filtering IIS/ASP.NET targets"
+    functions:
+      - 'exec_cmd("if [ -f \"{{fingerprintFile}}\" ]; then jq -r \"select(.tech | tostring | test(\\\"(?i)(iis|asp|asp\\\\.net|microsoft)\\\")) | .url\" {{fingerprintFile}} 2>/dev/null | head -n 100 >> {{outputDir}}/iis-targets.txt || true; fi")'
+      - 'exec_cmd("if [ -f \"{{httpFile}}\" ]; then grep -iE \"(iis|asp|aspx|\\.net)\" {{httpFile}} 2>/dev/null | head -n 100 >> {{outputDir}}/iis-targets.txt || true; fi")'
+      - 'sort_unix("{{outputDir}}/iis-targets.txt")'
+    on_error:
+      - action: continue
+
+  - name: shortscan-scan
+    type: foreach
+    pre_condition: '{{enableIisShortname}} && file_exists("{{outputDir}}/iis-targets.txt")'
+    log: "Running shortscan IIS shortname detection"
+    input: "{{outputDir}}/iis-targets.txt"
+    variable: url
+    threads: 5
+    step:
+      name: shortscan-single
+      type: bash
+      command: 'shortscan [[url]] -F -s -p 1 2>/dev/null >> {{iisOutputFile}} || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Summary
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "Service scan summary"
+    functions:
+      - 'db_total_assets("{{nervaOutputFile}}")'

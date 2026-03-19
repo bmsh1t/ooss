@@ -1,0 +1,199 @@
+# =============================================================================
+# AI 实时 WAF 规避模块
+# =============================================================================
+# 功能：
+# - 实时分析 WAF 响应特征
+# - 动态调整扫描参数
+# - 生成个性化规避策略
+# - 实时 WAF 检测和规避
+# =============================================================================
+
+kind: module
+name: ai-waf-bypass
+description: AI-powered real-time WAF detection and bypass
+
+params:
+  - name: wafBypassOutput
+    default: "{{Output}}/ai-analysis/waf-bypass-{{TargetSpace}}.json"
+  - name: wafConfigOutput
+    default: "{{Output}}/ai-analysis/waf-bypass-config.yaml"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  - name: enableWafBypass
+    type: bool
+    default: true
+  - name: testSampleSize
+    type: integer
+    default: 20
+    description: "Number of samples to test for WAF bypass"
+
+steps:
+  - name: prepare-waf-bypass
+    type: function
+    pre_condition: "{{enableWafBypass}}"
+    log: "Preparing WAF bypass analysis"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI WAF bypass analysis for {{Target}}")'
+
+  - name: collect-waf-samples
+    type: bash
+    pre_condition: "{{enableWafBypass}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/waf-test 2>/dev/null || true
+      
+      # 收集 WAF 保护的样本
+      if [ -f "{{wafFile}}" ]; then
+        head -{{testSampleSize}} {{wafFile}} > {{Output}}/ai-analysis/waf-test/waf-samples.txt || true
+      fi
+      
+      # 收集 HTTP 样本进行测试
+      if [ -f "{{httpFile}}" ]; then
+        head -{{testSampleSize}} {{httpFile}} > {{Output}}/ai-analysis/waf-test/http-samples.txt || true
+      fi
+      
+      SAMPLE_COUNT=$(wc -l < {{Output}}/ai-analysis/waf-test/http-samples.txt 2>/dev/null || echo 0)
+      WAF_COUNT=$(wc -l < {{Output}}/ai-analysis/waf-test/waf-samples.txt 2>/dev/null || echo 0)
+      
+      echo "[WAF Bypass] Collected: $SAMPLE_COUNT HTTP samples, $WAF_COUNT WAF samples"
+
+  - name: ai-waf-analysis
+    type: agent
+    pre_condition: "{{enableWafBypass}}"
+    max_iterations: 8
+    system_prompt: |
+      你是一个 WAF 规避专家。
+      你的任务是分析目标网站的 WAF 特征，并生成个性化的规避策略。
+      
+      分析要点：
+      1. 识别 WAF 类型和版本
+      2. 分析触发拦截的请求特征
+      3. 生成有效的规避技术
+      4. 推荐具体的请求修改方案
+      
+      重要：
+      - 所有数值必须是有效 JSON 数字
+      - 返回完整 JSON 对象
+    query: |
+      请分析以下 WAF 样本，生成规避策略：
+      
+      ## WAF 检测结果
+      {% if file_exists("{{Output}}/ai-analysis/waf-test/waf-samples.txt") %}
+      {{read_lines("{{Output}}/ai-analysis/waf-test/waf-samples.txt")[:15]}}
+      {% else %}无 WAF 样本{% endif %}
+      
+      ## HTTP 样本（用于测试规避）
+      {% if file_exists("{{Output}}/ai-analysis/waf-test/http-samples.txt") %}
+      {{read_lines("{{Output}}/ai-analysis/waf-test/http-samples.txt")[:10]}}
+      {% endif %}
+      
+      请输出完整的 JSON 格式规避策略：
+      ```json
+      {
+        "waf_detected": true,
+        "waf_type": "Cloudflare/Akamai/etc",
+        "detection_indicators": ["indicator1"],
+        "bypass_techniques": [
+          {
+            "technique": "技术名称",
+            "description": "技术描述",
+            "implementation": "具体实现方式",
+            "success_rate": 0.8
+          }
+        ],
+        "recommended_headers": {
+          "User-Agent": "推荐User-Agent",
+          "X-Forwarded-For": "IP",
+          "其他Header": "值"
+        },
+        "recommended_delay": "1s",
+        "rate_limit": 10,
+        "testing_commands": ["测试命令1"]
+      }
+      ```
+      
+      只输出 JSON。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: http_request
+      - preset: bash
+      - preset: save_content
+    exports:
+      waf_bypass_json: "{{agent_content}}"
+
+  - name: save-waf-bypass-result
+    type: bash
+    pre_condition: "{{enableWafBypass}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      echo '{{waf_bypass_json}}' > {{wafBypassOutput}} 2>/dev/null || echo '{}' > {{wafBypassOutput}}
+      
+      if jq empty {{wafBypassOutput}} 2>/dev/null; then
+        WAF_TYPE=$(jq -r '.waf_type // "Unknown"' {{wafBypassOutput}} 2>/dev/null)
+        TECH_COUNT=$(jq -r '.bypass_techniques | length' {{wafBypassOutput}} 2>/dev/null || echo 0)
+        echo "[WAF Bypass] Detected: $WAF_TYPE, Techniques: $TECH_COUNT"
+      else
+        echo "[WAF Bypass] Invalid JSON"
+      fi
+
+  - name: generate-waf-bypass-config
+    type: bash
+    pre_condition: "{{enableWafBypass}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 提取配置参数
+      WAF_DETECTED=$(jq -r '.waf_detected // false' {{wafBypassOutput}} 2>/dev/null || echo "false")
+      WAF_TYPE=$(jq -r '.waf_type // "none"' {{wafBypassOutput}} 2>/dev/null || echo "none")
+      DELAY=$(jq -r '.recommended_delay // "1s"' {{wafBypassOutput}} 2>/dev/null || echo "1s")
+      RATE_LIMIT=$(jq -r '.rate_limit // 10' {{wafBypassOutput}} 2>/dev/null || echo 10)
+      
+      # 提取 header
+      USER_AGENT=$(jq -r '.recommended_headers.User-Agent // ""' {{wafBypassOutput}} 2>/dev/null || echo "")
+      
+      # 生成 WAF 规避配置
+      cat > {{wafConfigOutput}} << EOF
+      # AI WAF Bypass Configuration
+      # Generated by ai-waf-bypass module
+      # Target: {{Target}}
+      # Generated: $(date)
+      
+      # WAF Detection
+      waf_detected: $WAF_DETECTED
+      waf_type: "$WAF_TYPE"
+      
+      # Rate Limiting
+      waf_rate_limit: $RATE_LIMIT
+      waf_request_delay: "$DELAY"
+      
+      # Headers
+      waf_user_agent: "$USER_AGENT"
+      
+      # Bypass Techniques
+      bypass_techniques: $(jq -r '.bypass_techniques[].technique | join(", ")' {{wafBypassOutput}} 2>/dev/null || echo "")
+      
+      # Testing Commands
+      testing_commands: $(jq -r '.testing_commands | join("; ")' {{wafBypassOutput}} 2>/dev/null || echo "")
+      EOF
+      
+      # 生成环境变量
+      cat > {{Output}}/ai-analysis/waf-bypass-env.sh << EOF
+      # WAF Bypass Environment Variables
+      export AI_WAF_DETECTED=$WAF_DETECTED
+      export AI_WAF_TYPE="$WAF_TYPE"
+      export AI_WAF_DELAY="$DELAY"
+      export AI_WAF_RATE_LIMIT=$RATE_LIMIT
+      export AI_WAF_USER_AGENT="$USER_AGENT"
+      EOF
+      
+      echo "[WAF Bypass] Config saved"
+
+  - name: log-waf-complete
+    type: function
+    pre_condition: "{{enableWafBypass}}"
+    functions:
+      - 'log_info("AI WAF bypass analysis completed for {{Target}}")'

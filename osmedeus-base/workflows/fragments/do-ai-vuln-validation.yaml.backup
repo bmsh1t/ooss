@@ -1,0 +1,157 @@
+# =============================================================================
+# AI漏洞验证模块 - 自动验证发现的漏洞
+# =============================================================================
+# 功能：
+# - 读取漏洞扫描结果
+# - 使用AI验证漏洞真实性
+# - 过滤假阳性
+# - 提供修复建议
+# =============================================================================
+
+kind: module
+name: ai-vuln-validation
+description: AI-powered vulnerability validation and false positive filtering
+
+params:
+  - name: vulnValidationOutput
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.md"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: ssrfFile
+    default: "{{Output}}/vuln-scan-suite/ssrf-callback-{{TargetSpace}}.txt"
+  - name: sstiFile
+    default: "{{Output}}/vuln-scan-suite/ssti-{{TargetSpace}}.txt"
+  - name: sqliFile
+    default: "{{Output}}/vuln-scan-suite/sqli-{{TargetSpace}}.txt"
+  - name: secretsFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: takeoverFile
+    default: "{{Output}}/vuln-scan-suite/takeover-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: enableVulnValidation
+    type: bool
+    default: true
+    description: "Enable AI vulnerability validation"
+
+steps:
+  - name: validate-critical-vulns
+    type: agent
+    pre_condition: "{{enableVulnValidation}} && file_exists('{{nucleiCriticalFile}}')"
+    max_iterations: 5
+    system_prompt: |
+      你是一个专业的漏洞验证专家。
+      你的任务是验证发现的漏洞是否真实可利用，并提供详细的验证报告。
+    query: |
+      请验证以下发现的Critical和High级别漏洞：
+      
+      Critical漏洞:
+      {{readFile("{{nucleiCriticalFile}}") if file_exists("{{nucleiCriticalFile}}") else "无"}}
+      
+      High漏洞:
+      {{readFile("{{nucleiHighFile}}") if file_exists("{{nucleiHighFile}}") else "无"}}
+      
+      目标技术栈:
+      {{readFile("{{fingerprintFile}}") if file_exists("{{fingerprintFile}}") else "无"}}
+      
+      请对每个漏洞进行验证分析：
+      1. 漏洞真实性评估 (真实/假阳性/需要手动验证)
+      2. 利用条件和难度
+      3. 潜在影响
+      4. 修复优先级建议
+      
+      输出格式为详细的验证报告Markdown。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+      - preset: http_get
+      - preset: save_content
+    exports:
+      vuln_validation: "{{agent_content}}"
+
+  - name: validate-special-vulns
+    type: agent
+    pre_condition: "{{enableVulnValidation}}"
+    max_iterations: 3
+    system_prompt: |
+      你是一个专业的漏洞验证专家。
+      验证特殊漏洞类型（SSRF、SSTI、SQLi、Secret、Takeover）
+    query: |
+      请验证以下特殊类型漏洞：
+      
+      SSRF:
+      {{readFile("{{ssrfFile}}") if file_exists("{{ssrfFile}}") else "无"}}
+      
+      SSTI:
+      {{readFile("{{sstiFile}}") if file_exists("{{sstiFile}}") else "无"}}
+      
+      SQLi:
+      {{readFile("{{sqliFile}}") if file_exists("{{sqliFile}}") else "无"}}
+      
+      Secrets:
+      {{readFile("{{secretsFile}}") if file_exists("{{secretsFile}}") else "无"}}
+      
+      Takeover:
+      {{readFile("{{takeoverFile}}") if file_exists("{{takeoverFile}}") else "无"}}
+      
+      请验证这些漏洞的真实性并提供详细报告。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: http_request
+      - preset: save_content
+    exports:
+      special_vuln_validation: "{{agent_content}}"
+
+  - name: save-validation-report
+    type: bash
+    pre_condition: "{{enableVulnValidation}} && (defined('vuln_validation') || defined('special_vuln_validation'))"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      cat > {{vulnValidationOutput}} << 'EOF'
+      # AI 漏洞验证报告
+      ## 扫描目标: {{Target}}
+      ## 验证时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+      ---
+
+      ## Critical/High 漏洞验证
+
+      {% if defined('vuln_validation') %}
+      {{vuln_validation}}
+      {% else %}
+      无Critical/High漏洞数据
+      {% endif %}
+
+      ---
+
+      ## 特殊漏洞验证 (SSRF/SSTI/SQLi/Secrets/Takeover)
+
+      {% if defined('special_vuln_validation') %}
+      {{special_vuln_validation}}
+      {% else %}
+      无特殊漏洞数据
+      {% endif %}
+
+      ---
+
+      *此报告由AI漏洞验证模块自动生成*
+      EOF
+      
+      echo "[AI Vuln Validation] Report saved to {{vulnValidationOutput}}"
+
+  - name: log-validation-summary
+    type: function
+    pre_condition: "{{enableVulnValidation}}"
+    functions:
+      - 'log_info("AI Vuln Validation completed for {{Target}}")'

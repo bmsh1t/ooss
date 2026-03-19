@@ -1,0 +1,15 @@
+kind: flow
+name: domain-extensive
+description: Exhaustive recon - full port range with DNS bruteforce and permutations
+tags: recon, domain, extensive
+extends: domain-standard
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f domain-extensive -t example.com
+
+override:
+  params:
+    enableDnsBruteFocing: true
+    enablePermutation: true
+    commonHttpsPort: "1-65535"
+    commonHttpPorts: "1-65535"

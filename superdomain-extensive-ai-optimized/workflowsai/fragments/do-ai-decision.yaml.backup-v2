@@ -1,0 +1,196 @@
+# =============================================================================
+# AI智能决策模块 - 根据扫描结果动态选择下一步
+# =============================================================================
+# 功能：
+# - 分析当前扫描结果
+# - 动态调整扫描策略
+# - 生成动态配置影响后续扫描
+# - 输出决策建议供后续模块使用
+# =============================================================================
+
+kind: module
+name: ai-intelligent-decision
+description: AI-powered intelligent decision making for scan strategy
+
+params:
+  - name: decisionOutput
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: dynamicConfigOutput
+    default: "{{Output}}/ai-analysis/dynamic-config.yaml"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: paramsFile
+    default: "{{Output}}/content-analysis/params-{{TargetSpace}}.json"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  - name: enableAiDecision
+    type: bool
+    default: true
+    description: "Enable AI intelligent decision making"
+  - name: enableDynamicConfig
+    type: bool
+    default: true
+    description: "Enable dynamic config generation"
+
+steps:
+  - name: collect-decision-data
+    type: bash
+    pre_condition: "{{enableAiDecision}}"
+    log: "Collecting data for AI decision making"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      # 收集关键统计
+      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      HTTP_COUNT=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      JS_ENDPOINTS=$(wc -l < {{jsEndpointsFile}} 2>/dev/null || echo 0)
+      PARAMS=$(jq '. | length' {{paramsFile}} 2>/dev/null || echo 0)
+      EMAILS=$(wc -l < {{osintFile}} 2>/dev/null || echo 0)
+      WAF_COUNT=$(wc -l < {{wafFile}} 2>/dev/null || echo 0)
+      
+      echo "SUBDOMAINS=$SUBDOMAINS" > {{Output}}/ai-analysis/decision-stats.txt
+      echo "RESOLVED=$RESOLVED" >> {{Output}}/ai-analysis/decision-stats.txt
+      echo "HTTP_COUNT=$HTTP_COUNT" >> {{Output}}/ai-analysis/decision-stats.txt
+      echo "JS_ENDPOINTS=$JS_ENDPOINTS" >> {{Output}}/ai-analysis/decision-stats.txt
+      echo "PARAMS=$PARAMS" >> {{Output}}/ai-analysis/decision-stats.txt
+      echo "EMAILS=$EMAILS" >> {{Output}}/ai-analysis/decision-stats.txt
+      echo "WAF_COUNT=$WAF_COUNT" >> {{Output}}/ai-analysis/decision-stats.txt
+      
+      echo "[Decision Data] Collected: Subdomains=$SUBDOMAINS, HTTP=$HTTP_COUNT, WAF=$WAF_COUNT"
+
+  - name: ai-strategy-decision
+    type: agent
+    pre_condition: "{{enableAiDecision}}"
+    max_iterations: 3
+    system_prompt: |
+      你是一个智能安全扫描策略分析师。
+      你的任务是根据当前的扫描结果，分析目标的安全态势，并生成JSON格式的决策建议。
+      
+      根据输入数据评估：
+      - 资产规模（子域名数量、HTTP服务数量）
+      - 安全防护水平（WAF、CDN）
+      - 攻击面（JS端点、参数、邮箱）
+      - 建议的扫描深度和范围
+      
+      重要：你生成的配置将直接影响后续扫描，必须具体可执行。
+    query: |
+      分析以下扫描结果数据，为漏洞扫描提供智能决策建议：
+      
+      ## 资产统计
+      - 发现的子域名: {{file_length("{{subdomainFile}}") if file_exists("{{subdomainFile}}") else 0}}
+      - 解析成功的域名: {{file_length("{{resolvedFile}}") if file_exists("{{resolvedFile}}") else 0}}
+      - 存活的HTTP服务: {{file_length("{{httpFile}}") if file_exists("{{httpFile}}") else 0}}
+      - WAF保护数量: {{file_length("{{wafFile}}") if file_exists("{{wafFile}}") else 0}}
+      
+      ## 攻击面分析
+      - JS端点数量: {{file_length("{{jsEndpointsFile}}") if file_exists("{{jsEndpointsFile}}") else 0}}
+      - 参数数量: {{file_length("{{paramsFile}}") if file_exists("{{paramsFile}}") else 0}}
+      - 邮箱收集: {{file_length("{{osintFile}}") if file_exists("{{osintFile}}") else 0}}
+      
+      ## 技术指纹 (前20条)
+      {% if file_exists("{{fingerprintFile}}") %}
+      {{read_lines("{{fingerprintFile}}")[:20]}}
+      {% endif %}
+      
+      请提供JSON格式的决策建议：
+      ```json
+      {
+        "priority": "高/中/低",
+        "risk_level": "高/中/低",
+        "nuclei_severity": "critical,high,medium 或 critical,high 或 only-critical",
+        "suggested_threads": 5-50的数字,
+        "suggested_rate_limit": 10-100的数字,
+        "enable_additional_scans": {
+          "ssrf": true/false,
+          "ssti": true/false,
+          "sqli": true/false,
+          "lfi": true/false,
+          "takeover": true/false
+        },
+        "focus_areas": ["重点方向1", "方向2"],
+        "waf_bypass_needed": true/false,
+        "recommended_timeout": "如 4h, 6h, 8h",
+        "reasoning": "决策理由"
+      }
+      ```
+      
+      只输出JSON，不要其他内容。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+    exports:
+      decision_json: "{{agent_content}}"
+
+  - name: generate-dynamic-config
+    type: function
+    pre_condition: "{{enableAiDecision}} && {{enableDynamicConfig}} && defined('decision_json')"
+    functions:
+      - 'log_info("AI Decision: " + "{{decision_json}}"[:300])'
+
+  - name: save-decision-result
+    type: bash
+    pre_condition: "{{enableAiDecision}}"
+    command: |
+      # 保存原始决策结果
+      echo "{{decision_json}}" > {{decisionOutput}} 2>/dev/null || echo '{}' > {{decisionOutput}}
+      
+      # 提取关键参数用于后续模块
+      echo "{{decision_json}}" | jq -r '.nuclei_severity // "critical,high"' > {{Output}}/ai-analysis/recommended-severity.txt 2>/dev/null || true
+      echo "{{decision_json}}" | jq -r '.focus_areas[] // ""' > {{Output}}/ai-analysis/focus-areas.txt 2>/dev/null || true
+      
+      # 生成动态配置供后续模块使用
+      SEVERITY=$(echo "{{decision_json}}" | jq -r '.nuclei_severity // "critical,high"' 2>/dev/null)
+      THREADS=$(echo "{{decision_json}}" | jq -r '.suggested_threads // 10' 2>/dev/null)
+      RATE_LIMIT=$(echo "{{decision_json}}" | jq -r '.suggested_rate_limit // 30' 2>/dev/null)
+      TIMEOUT=$(echo "{{decision_json}}" | jq -r '.recommended_timeout // "6h"' 2>/dev/null)
+      WAF_BYPASS=$(echo "{{decision_json}}" | jq -r '.waf_bypass_needed // false' 2>/dev/null)
+      
+      cat > {{dynamicConfigOutput}} << EOF
+      # AI Generated Dynamic Configuration
+      # Generated by ai-intelligent-decision module
+      # Target: {{Target}}
+      
+      # Nuclei Configuration
+      nucleiSeverity: "$SEVERITY"
+      nucleiThreads: $THREADS
+      nucleiRateLimit: $RATE_LIMIT
+      nucleiTimeout: "$TIMEOUT"
+      
+      # Additional Scans
+      {% if defined('decision_json') %}
+      {% set scans = decision_json.get('enable_additional_scans', {}) %}
+      enableSsrfScan: ${scans.get('ssrf', true)}
+      enableSstiScan: ${scans.get('ssti', true)}
+      enableSqliScan: ${scans.get('sqli', true)}
+      enableLfiScan: ${scans.get('lfi', true)}
+      enableTakeoverScan: ${scans.get('takeover', true)}
+      {% else %}
+      enableSsrfScan: true
+      enableSstiScan: true
+      enableSqliScan: true
+      enableLfiScan: true
+      enableTakeoverScan: true
+      {% endif %}
+      
+      # WAF Bypass
+      enableWafAwareScan: $WAF_BYPASS
+      
+      # Reasoning
+      # {{decision_json[:500] if defined('decision_json') else 'No decision data'}}
+      EOF
+      
+      echo "[AI Decision] Dynamic config saved to {{dynamicConfigOutput}}"
+      echo "[AI Decision] Severity: $SEVERITY, Threads: $THREADS"

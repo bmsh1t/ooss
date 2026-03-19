@@ -1,0 +1,172 @@
+# =============================================================================
+# Module Workflow: WAF/CDN Detection
+# =============================================================================
+# Deep detection of Web Application Firewalls and Content Delivery Networks
+# Uses wafw00f for WAF detection and cdncheck for CDN identification
+# =============================================================================
+
+kind: module
+name: recon-waf
+description: WAF/CDN deep detection using wafw00f and cdncheck
+tags: waf, cdn, fingerprint, security, detection
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  
+  - name: wafOutput
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  
+  - name: cdnJsonOutput
+    default: "{{Output}}/cdn/cdn-{{TargetSpace}}.jsonl"
+  
+  - name: cdnIpsOutput
+    default: "{{Output}}/cdn/cdn-ips-{{TargetSpace}}.txt"
+  
+  - name: nonCdnIpsOutput
+    default: "{{Output}}/cdn/non-cdn-ips-{{TargetSpace}}.txt"
+  
+  - name: wafThreads
+    default: "{{threads}}"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - wafw00f
+    - cdncheck
+    - httpx
+    - jq
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: waf-detection
+    path: "{{wafOutput}}"
+    type: text
+    description: Detected WAF protections
+
+  - name: cdn-detection
+    path: "{{cdnJsonOutput}}"
+    type: jsonl
+    description: CDN detection results
+
+  - name: cdn-ips
+    path: "{{cdnIpsOutput}}"
+    type: text
+    description: IP addresses behind CDN
+
+  - name: non-cdn-ips
+    path: "{{nonCdnIpsOutput}}"
+    type: text
+    description: IP addresses not behind CDN (direct origin)
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Setup: Create output folders
+  # ---------------------------------------------------------------------------
+  - name: create-output-folders
+    type: function
+    log: "Creating WAF/CDN output folders"
+    functions:
+      - 'create_folder("{{Output}}/waf")'
+      - 'create_folder("{{Output}}/cdn")'
+
+  # ---------------------------------------------------------------------------
+  # WAF Detection with wafw00f
+  # ---------------------------------------------------------------------------
+  - name: waf-detection
+    type: bash
+    log: "Detecting Web Application Firewalls"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    command: |
+      # Run wafw00f on all HTTP endpoints
+      wafw00f -i {{httpFile}} -o {{wafOutput}} 2>/dev/null || true
+      
+      # Also create a summary of detected WAFs
+      if [ -f "{{wafOutput}}" ]; then
+        echo "=== WAF Detection Summary ===" > {{wafOutput}}.summary
+        grep -E "is protected by|Firewall|WAF" {{wafOutput}} >> {{wafOutput}}.summary 2>/dev/null || true
+        mv {{wafOutput}}.summary {{wafOutput}}
+      fi
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # CDN Detection with cdncheck
+  # ---------------------------------------------------------------------------
+  - name: cdn-detection
+    type: bash
+    log: "Detecting CDN providers"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    command: |
+      # Extract IPs from HTTP file for CDN checking
+      # Use httpx with -l flag for file input (correct syntax)
+      if [ -s "{{httpFile}}" ]; then
+        httpx -l {{httpFile}} -silent -json -t {{wafThreads}} 2>/dev/null | jq -r 'select(.host_ip != null) | .host_ip' | sort -u > {{Output}}/cdn/ips-to-check-{{TargetSpace}}.txt || true
+      fi
+      
+      # Run cdncheck on extracted IPs
+      if [ -s "{{Output}}/cdn/ips-to-check-{{TargetSpace}}.txt" ]; then
+        cdncheck -i {{Output}}/cdn/ips-to-check-{{TargetSpace}}.txt -jsonl > {{cdnJsonOutput}} 2>/dev/null || true
+      else
+        echo "No IPs extracted for CDN checking" > {{cdnJsonOutput}}
+      fi
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Filter CDN and Non-CDN IPs
+  # ---------------------------------------------------------------------------
+  - name: filter-cdn-ips
+    type: function
+    log: "Filtering CDN and non-CDN IPs"
+    pre_condition: 'file_exists("{{cdnJsonOutput}}")'
+    functions:
+      - 'exec_cmd("cat {{cdnJsonOutput}} | jq -r \"select(.cdn == true) | .ip\" | sort -u > {{cdnIpsOutput}}")'
+      - 'exec_cmd("cat {{cdnJsonOutput}} | jq -r \"select(.cdn == false) | .ip\" | sort -u > {{nonCdnIpsOutput}}")'
+      - 'exec_cmd("rm -f {{Output}}/cdn/ips-to-check-{{TargetSpace}}.txt")'
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # CDN Provider Summary
+  # ---------------------------------------------------------------------------
+  - name: cdn-provider-summary
+    type: bash
+    log: "Generating CDN provider summary"
+    pre_condition: 'file_exists("{{cdnJsonOutput}}")'
+    command: |
+      echo "=== CDN Detection Summary ===" > {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+      echo "" >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+      echo "CDN Providers Detected:" >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+      cat {{cdnJsonOutput}} | jq -r 'select(.cdn == true) | "\(.ip) - \(.cdn_name // \"Unknown\")"' | sort -u >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt 2>/dev/null || true
+      echo "" >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+      echo "Total CDN IPs: $(wc -l < {{cdnIpsOutput}} 2>/dev/null || echo 0)" >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+      echo "Total Non-CDN IPs: $(wc -l < {{nonCdnIpsOutput}} 2>/dev/null || echo 0)" >> {{Output}}/cdn/cdn-summary-{{TargetSpace}}.txt
+    on_error:
+      - action: continue
+
+  # ---------------------------------------------------------------------------
+  # Import to Database
+  # ---------------------------------------------------------------------------
+  - name: import-waf-cdn-db
+    type: function
+    log: "Importing WAF/CDN data to database"
+    pre_condition: 'file_exists("{{cdnJsonOutput}}")'
+    functions:
+      - 'db_import_custom_asset("{{TargetSpace}}", "{{cdnJsonOutput}}", "cdn", "cdncheck")'
+    on_error:
+      - action: continue

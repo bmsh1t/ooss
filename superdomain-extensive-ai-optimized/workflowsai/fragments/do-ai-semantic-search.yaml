@@ -1,0 +1,290 @@
+# =============================================================================
+# AI 语义搜索模块 - 支持向量化和 API 调用
+# =============================================================================
+# 功能：
+# - 调用外部 embeddings API (如 jina.ai) 进行向量化
+# - 基于向量相似度搜索
+# - 跨目标知识共享
+# - 支持自然语言查询
+# =============================================================================
+
+kind: module
+name: ai-semantic-search
+description: AI-powered semantic search with vector embeddings support
+
+params:
+  - name: semanticIndexDir
+    default: "{{Output}}/ai-analysis/semantic-index"
+  - name: searchResultsOutput
+    default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
+  - name: embeddingsOutput
+    default: "{{Output}}/ai-analysis/semantic-embeddings-{{TargetSpace}}.json"
+
+  # Embeddings API 配置
+  - name: enableSemanticSearch
+    type: bool
+    default: true
+  - name: useVectorSearch
+    type: bool
+    default: true
+    description: "Use vector embeddings for semantic search (requires API key)"
+  - name: embeddingApiUrl
+    type: string
+    default: "https://api.jina.ai/v1/embeddings"
+    description: "Embeddings API endpoint"
+  - name: embeddingModel
+    type: string
+    default: "jina-embeddings-v3"
+    description: "Embedding model to use"
+  - name: jinaApiKey
+    type: string
+    default: "{{JINA_API_KEY}}"
+    description: "Jina AI API key for embeddings"
+  - name: indexExistingData
+    type: bool
+    default: true
+    description: "Index existing scan data for semantic search"
+  - name: maxSearchResults
+    type: integer
+    default: 10
+  - name: searchQuery
+    type: string
+    default: "SQL injection vulnerabilities"
+    description: "Semantic search query (supports natural language)"
+
+steps:
+  - name: prepare-semantic-index
+    type: function
+    pre_condition: "{{enableSemanticSearch}}"
+    log: "Preparing semantic search index"
+    functions:
+      - 'create_folder("{{semanticIndexDir}}")'
+      - 'log_info("Starting semantic search for {{Target}}")'
+
+  - name: index-scan-data
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{indexExistingData}}"
+    command: |
+      mkdir -p {{semanticIndexDir}}
+      
+      # 索引漏洞数据
+      echo "=== Indexing vulnerabilities ===" > {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/vulns-index.txt
+      for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt 2>/dev/null; do
+        if [ -f "$f" ]; then
+          echo "Indexing: $f" >> {{semanticIndexDir}}/index.log
+          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt
+        fi
+      done
+      
+      # 索引技术栈数据
+      echo "=== Indexing tech stack ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/tech-index.txt
+      if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
+        cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt
+      fi
+      
+      # 索引 JS 端点
+      echo "=== Indexing JS endpoints ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/endpoints-index.txt
+      if [ -f "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" ]; then
+        cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt
+      fi
+      
+      # 索引子域名
+      echo "=== Indexing subdomains ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/subdomains-index.txt
+      if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
+        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt
+      fi
+      
+      # 创建索引元数据
+      cat > {{semanticIndexDir}}/metadata.json << EOF
+      {
+        "target": "{{Target}}",
+        "indexed_at": "$(date -Iseconds)",
+        "vulns_count": $(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0),
+        "tech_count": $(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0),
+        "endpoints_count": $(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0),
+        "subdomains_count": $(wc -l < {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || echo 0)
+      }
+      EOF
+      
+      echo "[Semantic] Index created successfully"
+
+  - name: generate-data-embeddings
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{semanticIndexDir}}/vulns-index.txt')"
+    timeout: 300s
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 检查 API key
+      if [ -z "{{jinaApiKey}}" ] || [ "{{jinaApiKey}}" = "{{JINA_API_KEY}}" ]; then
+        echo "[Semantic] JINA_API_KEY not set, skipping vector embeddings"
+        exit 0
+      fi
+      
+      # 准备数据 - 每行作为一个 embedding 单位
+      DATA=$(cat {{semanticIndexDir}}/vulns-index.txt 2>/dev/null | head -100 | jq -R -s -c 'split("\n") | map(select(length > 0))')
+      
+      if [ -z "$DATA" ] || [ "$DATA" = "[]" ]; then
+        echo "[Semantic] No data to embed"
+        exit 0
+      fi
+      
+      # 调用 Jina API 生成 embeddings
+      RESPONSE=$(curl -s -X POST "{{embeddingApiUrl}}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer {{jinaApiKey}}" \
+        -d "{
+          \"model\": \"{{embeddingModel}}\",
+          \"input\": $DATA
+        }" 2>/dev/null)
+      
+      if echo "$RESPONSE" | jq empty 2>/dev/null; then
+        echo "$RESPONSE" > {{embeddingsOutput}}
+        EMBEDDING_COUNT=$(echo "$RESPONSE" | jq '.data | length' 2>/dev/null || echo 0)
+        echo "[Semantic] Generated $EMBEDDING_COUNT embeddings"
+      else
+        echo "[Semantic] Failed to generate embeddings"
+        echo '{"error": "api_error", "data": []}' > {{embeddingsOutput}}
+      fi
+
+  - name: generate-query-embedding
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}}"
+    timeout: 30s
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 检查 API key
+      if [ -z "{{jinaApiKey}}" ] || [ "{{jinaApiKey}}" = "{{JINA_API_KEY}}" ]; then
+        echo "[Semantic] JINA_API_KEY not set, will use LLM-based search"
+        exit 0
+      fi
+      
+      # 调用 Jina API 生成查询向量
+      RESPONSE=$(curl -s -X POST "{{embeddingApiUrl}}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer {{jinaApiKey}}" \
+        -d "{
+          \"model\": \"{{embeddingModel}}\",
+          \"input\": [\"{{searchQuery}}\"]
+        }" 2>/dev/null)
+      
+      if echo "$RESPONSE" | jq empty 2>/dev/null; then
+        echo "$RESPONSE" > {{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json
+        echo "[Semantic] Query embedding generated"
+      else
+        echo "[Semantic] Failed to generate query embedding"
+      fi
+
+  - name: semantic-search-agent
+    type: agent
+    pre_condition: "{{enableSemanticSearch}}"
+    max_iterations: 5
+    system_prompt: |
+      你是一个语义搜索专家。
+      你的任务是在已有的扫描数据中进行语义搜索，找到与查询相关的内容。
+      
+      功能：
+      1. 理解自然语言查询的语义
+      2. 在索引数据中找到相关内容
+      3. 按相关性排序返回结果
+      4. 提供洞察和分析
+      
+      重要：返回结构化的 JSON 结果。
+    query: |
+      请在以下索引数据中搜索与 "{{searchQuery}}" 相关的内容：
+
+      ## 搜索查询
+      {{searchQuery}}
+
+      ## 漏洞索引数据
+      {% if file_exists("{{semanticIndexDir}}/vulns-index.txt") %}
+      {{read_lines("{{semanticIndexDir}}/vulns-index.txt")[:50]}}
+      {% else %}暂无漏洞数据{% endif %}
+
+      ## 技术栈索引
+      {% if file_exists("{{semanticIndexDir}}/tech-index.txt") %}
+      {{read_lines("{{semanticIndexDir}}/tech-index.txt")[:20]}}
+      {% else %}暂无技术栈数据{% endif %}
+
+      ## 子域名索引
+      {% if file_exists("{{semanticIndexDir}}/subdomains-index.txt") %}
+      {{read_lines("{{semanticIndexDir}}/subdomains-index.txt")[:20]}}
+      {% else %}暂无子域名数据{% endif %}
+
+      请输出 JSON 格式的搜索结果：
+      ```json
+      {
+        "query": "{{searchQuery}}",
+        "total_results": 0,
+        "results": [
+          {
+            "type": "vuln/tech/endpoint/subdomain",
+            "content": "相关内容",
+            "relevance_score": 0.95,
+            "source": "来源文件"
+          }
+        ],
+        "insights": ["关键发现1", "发现2"],
+        "recommendations": ["建议1"]
+      }
+      ```
+
+      只输出 JSON。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: save_content
+    exports:
+      search_results: "{{agent_content}}"
+
+  - name: save-search-results
+    type: bash
+    pre_condition: "{{enableSemanticSearch}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 构建完整结果
+      cat > {{searchResultsOutput}} << 'EOF'
+      {
+        "query": "SEARCH_QUERY_PLACEHOLDER",
+        "timestamp": "TIMESTAMP_PLACEHOLDER",
+        "source": "llm_agent",
+        "vector_search_used": VECTOR_SEARCH_PLACEHOLDER,
+        "results": [],
+        "insights": [],
+        "recommendations": []
+      }
+      EOF
+      
+      sed -i "s|SEARCH_QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" {{searchResultsOutput}}
+      
+      if [ "{{useVectorSearch}}" = "true" ] && [ -n "{{jinaApiKey}}" ] && [ "{{jinaApiKey}}" != "{{JINA_API_KEY}}" ]; then
+        sed -i "s|VECTOR_SEARCH_PLACEHOLDER|true|g" {{searchResultsOutput}}
+      else
+        sed -i "s|VECTOR_SEARCH_PLACEHOLDER|false|g" {{searchResultsOutput}}
+      fi
+      
+      # 如果 LLM agent 返回了结果，合并
+      if [ -n "{{search_results}}" ]; then
+        echo '{{search_results}}' | jq -s '.[0] * .[1]' {{searchResultsOutput}} - 2>/dev/null >> {{searchResultsOutput}} || echo '{{search_results}}' >> {{searchResultsOutput}}
+      fi
+      
+      if jq empty {{searchResultsOutput}} 2>/dev/null; then
+        RESULT_COUNT=$(jq -r '.total_results // 0' {{searchResultsOutput}} 2>/dev/null)
+        echo "[Semantic Search] Found $RESULT_COUNT results"
+      else
+        echo "[Semantic Search] Results saved with warnings"
+      fi
+
+  - name: log-semantic-complete
+    type: function
+    pre_condition: "{{enableSemanticSearch}}"
+    functions:
+      - 'log_info("AI Semantic search completed for {{Target}}")'

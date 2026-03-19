@@ -1,0 +1,414 @@
+# =============================================================================
+# AI 智能分析协调器模块
+# =============================================================================
+# 功能：
+# - 读取三个子模块的执行结果
+# - 聚合并分析结果
+# - 生成统一的 AI 决策配置供 vuln-suite 使用
+# - 生成综合分析报告
+# =============================================================================
+
+kind: module
+name: ai-intelligent-analysis
+description: AI analysis coordinator - aggregates results from vuln validation, attack chain, and path planning
+
+params:
+  # 文件路径
+  - name: analysisOutputJson
+    default: "{{Output}}/ai-analysis/intelligent-analysis-{{TargetSpace}}.json"
+  - name: analysisOutputMd
+    default: "{{Output}}/ai-analysis/intelligent-analysis-{{TargetSpace}}.md"
+  - name: memoryOutput
+    default: "{{Output}}/ai-analysis/ai-memory-{{TargetSpace}}.json"
+  
+  # AI 决策配置 - 必须与 vuln-suite.yaml 中的读取路径一致
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: aiVarsFile
+    default: "{{Output}}/ai-analysis/ai-vars.yaml"
+
+  # 输入文件 - 子模块输出
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: pathPlanningFile
+    default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
+  - name: semanticHighlightsFile
+    default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
+
+  # 输入文件 - 扫描数据
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  - name: priorityTargetsFile
+    default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enableIntelligentAnalysis
+    type: bool
+    default: true
+  - name: enableMemory
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-analysis
+    type: function
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    log: "Preparing intelligent AI analysis coordinator"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'create_folder("{{Output}}/ai-analysis/validation")'
+      - 'log_info("Starting AI analysis coordination for {{Target}}")'
+
+  - name: collect-analysis-data
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation 2>/dev/null || true
+
+      # 统计各项数据
+      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      HTTP_COUNT=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      CRITICAL=$(wc -l < {{nucleiCriticalFile}} 2>/dev/null || echo 0)
+      HIGH=$(wc -l < {{nucleiHighFile}} 2>/dev/null || echo 0)
+      PRIORITY_COUNT=$(wc -l < {{priorityTargetsFile}} 2>/dev/null || echo 0)
+
+      # 提取技术栈
+      TECH_STACK=""
+      if [ -f "{{fingerprintFile}}" ]; then
+        TECH_STACK=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[]' 2>/dev/null | head -20 | tr '\n' ',' | sed 's/,$//')
+      fi
+
+      # 统计 WAF
+      WAF_COUNT=$(wc -l < {{wafFile}} 2>/dev/null || echo 0)
+      WAF_TYPES=""
+      if [ -f "{{wafFile}}" ]; then
+        WAF_TYPES=$(cut -d',' -f2 {{wafFile}} 2>/dev/null | sort -u | head -5 | tr '\n' ',' | sed 's/,$//')
+      fi
+
+      cat > {{Output}}/ai-analysis/intelligent-stats.json << EOF
+      {
+        "subdomains": $SUBDOMAINS,
+        "http_count": $HTTP_COUNT,
+        "resolved": $RESOLVED,
+        "critical": $CRITICAL,
+        "high": $HIGH,
+        "priority_targets": $PRIORITY_COUNT,
+        "waf_count": $WAF_COUNT,
+        "waf_types": "$WAF_TYPES",
+        "tech_stack": "$TECH_STACK"
+      }
+      EOF
+
+      echo "[AI Coordinator] Stats: Critical=$CRITICAL, High=$HIGH, WAF=$WAF_COUNT"
+
+  - name: aggregate-submodule-results
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 汇总文件路径
+      VULN_FILE="{{vulnValidationFile}}"
+      CHAIN_FILE="{{attackChainFile}}"
+      PLAN_FILE="{{pathPlanningFile}}"
+      SEMANTIC_FILE="{{semanticSearchFile}}"
+
+      echo "[AI Coordinator] Checking submodule results..."
+
+      # 聚合漏洞验证结果
+      VULN_STATUS="not_available"
+      CONFIRMED_VULNS=0
+      FALSE_POSITIVES=0
+      if [ -f "$VULN_FILE" ] && jq empty "$VULN_FILE" 2>/dev/null; then
+        VULN_STATUS="available"
+        CONFIRMED_VULNS=$(jq -r '.validation_summary.confirmed_real // 0' "$VULN_FILE" 2>/dev/null || echo 0)
+        FALSE_POSITIVES=$(jq -r '.validation_summary.false_positives // 0' "$VULN_FILE" 2>/dev/null || echo 0)
+        echo "[AI Coordinator] Vuln validation: $CONFIRMED_VULNS confirmed, $FALSE_POSITIVES false positives"
+      else
+        echo "[AI Coordinator] Vuln validation results not available"
+      fi
+
+      # 聚合攻击链结果
+      CHAIN_STATUS="not_available"
+      TOTAL_CHAINS=0
+      CRITICAL_CHAINS=0
+      if [ -f "$CHAIN_FILE" ] && jq empty "$CHAIN_FILE" 2>/dev/null; then
+        CHAIN_STATUS="available"
+        TOTAL_CHAINS=$(jq -r '.attack_chain_summary.total_chains // 0' "$CHAIN_FILE" 2>/dev/null || echo 0)
+        CRITICAL_CHAINS=$(jq -r '.attack_chain_summary.critical_chains // 0' "$CHAIN_FILE" 2>/dev/null || echo 0)
+        echo "[AI Coordinator] Attack chains: $TOTAL_CHAINS total, $CRITICAL_CHAINS critical"
+      else
+        echo "[AI Coordinator] Attack chain results not available"
+      fi
+
+      # 聚合路径规划结果
+      PLAN_STATUS="not_available"
+      TOTAL_PHASES=0
+      if [ -f "$PLAN_FILE" ] && jq empty "$PLAN_FILE" 2>/dev/null; then
+        PLAN_STATUS="available"
+        TOTAL_PHASES=$(jq -r '.plan_summary.total_phases // 0' "$PLAN_FILE" 2>/dev/null || echo 0)
+        echo "[AI Coordinator] Path planning: $TOTAL_PHASES phases"
+      else
+        echo "[AI Coordinator] Path planning results not available"
+      fi
+
+      # 聚合语义搜索结果
+      SEMANTIC_STATUS="not_available"
+      SEMANTIC_RESULTS=0
+      if [ -f "$SEMANTIC_FILE" ] && jq empty "$SEMANTIC_FILE" 2>/dev/null; then
+        SEMANTIC_STATUS="available"
+        SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
+        echo "[AI Coordinator] Semantic search: $SEMANTIC_RESULTS results"
+      else
+        echo "[AI Coordinator] Semantic search results not available"
+      fi
+
+      # 创建聚合结果文件
+      cat > {{Output}}/ai-analysis/aggregated-results.json << EOF
+      {
+        "aggregation_timestamp": "$(date -Iseconds)",
+        "components": {
+          "vuln_validation": {
+            "status": "$VULN_STATUS",
+            "confirmed_vulns": $CONFIRMED_VULNS,
+            "false_positives": $FALSE_POSITIVES
+          },
+          "attack_chain": {
+            "status": "$CHAIN_STATUS",
+            "total_chains": $TOTAL_CHAINS,
+            "critical_chains": $CRITICAL_CHAINS
+          },
+          "path_planning": {
+            "status": "$PLAN_STATUS",
+            "total_phases": $TOTAL_PHASES
+          },
+          "semantic_search": {
+            "status": "$SEMANTIC_STATUS",
+            "results": $SEMANTIC_RESULTS
+          }
+        }
+      }
+      EOF
+
+      echo "[AI Coordinator] Results aggregation complete"
+
+  - name: generate-unified-config
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 基于聚合结果生成 AI 决策配置
+      STATS_FILE="{{Output}}/ai-analysis/intelligent-stats.json"
+      VULN_FILE="{{vulnValidationFile}}"
+      AGG_FILE="{{Output}}/ai-analysis/aggregated-results.json"
+
+      # 默认值
+      SEVERITY="critical,high"
+      THREADS=10
+      RATE_LIMIT=30
+      TIMEOUT="6h"
+      WAF_NEEDED="false"
+      WAF_TECH=""
+      WAF_DELAY="1s"
+      REASONING="AI-generated from coordinator"
+
+      # 从 stats 文件获取基础信息
+      if [ -f "$STATS_FILE" ]; then
+        WAF_TYPES=$(jq -r '.waf_types // ""' "$STATS_FILE" 2>/dev/null || echo "")
+        if [ -n "$WAF_TYPES" ]; then
+          WAF_NEEDED="true"
+          WAF_TECH="$WAF_TYPES"
+        fi
+      fi
+
+      # 从漏洞验证结果中提取配置
+      if [ -f "$VULN_FILE" ] && jq empty "$VULN_FILE" 2>/dev/null; then
+        RISK=$(jq -r '.validation_summary.risk_level // "中"' "$VULN_FILE" 2>/dev/null)
+        CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' "$VULN_FILE" 2>/dev/null)
+
+        # 根据确认漏洞数量调整配置
+        if [ "$CONFIRMED" -gt 10 ]; then
+          SEVERITY="critical,high,medium"
+          THREADS=15
+          RATE_LIMIT=50
+          TIMEOUT="8h"
+          REASONING="High confirmed findings ($CONFIRMED), aggressive scan"
+        elif [ "$CONFIRMED" -gt 5 ]; then
+          SEVERITY="critical,high"
+          THREADS=12
+          RATE_LIMIT=40
+          REASONING="Moderate confirmed findings ($CONFIRMED), balanced scan"
+        else
+          REASONING="Low confirmed findings ($CONFIRMED), focused scan"
+        fi
+      fi
+
+      # 从语义搜索结果获取高优先级发现
+      SEMANTIC_FILE="{{semanticSearchFile}}"
+      if [ -f "$SEMANTIC_FILE" ] && jq empty "$SEMANTIC_FILE" 2>/dev/null; then
+        SEMANTIC_CRITICAL=$(jq -r '.highlights.critical_findings | length // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
+        if [ "$SEMANTIC_CRITICAL" -gt 0 ]; then
+          REASONING="$REASONING + $SEMANTIC_CRITICAL semantic highlights"
+        fi
+      fi
+
+      # 生成 AI 决策 JSON 文件 - 与 vuln-suite.yaml 读取路径一致
+      cat > {{aiDecisionFile}} << EOF
+      {
+        "nuclei_severity": "$SEVERITY",
+        "suggested_threads": $THREADS,
+        "suggested_rate_limit": $RATE_LIMIT,
+        "recommended_timeout": "$TIMEOUT",
+        "waf_bypass_needed": $WAF_NEEDED,
+        "waf_bypass_techniques": "$WAF_TECH",
+        "waf_recommended_delay": "$WAF_DELAY",
+        "enable_ssrf_scan": true,
+        "enable_ssti_scan": true,
+        "enable_sqli_scan": true,
+        "enable_lfi_scan": true,
+        "enable_takeover_scan": true,
+        "reasoning": "$REASONING"
+      }
+      EOF
+
+      # 生成 AI 变量 YAML 文件
+      cat > {{aiVarsFile}} << EOF
+      # AI Decision Variables
+      # Generated by ai-intelligent-analysis coordinator
+      # Target: {{Target}}
+      # Generated: $(date)
+
+      nucleiSeverity: "$SEVERITY"
+      nucleiThreads: $THREADS
+      nucleiRateLimit: $RATE_LIMIT
+      nucleiTimeout: "$TIMEOUT"
+      enableWafAwareScan: $WAF_NEEDED
+      wafBypassTechniques: "$WAF_TECH"
+      wafRecommendedDelay: "$WAF_DELAY"
+      enableSsrfScan: true
+      enableSstiScan: true
+      enableSqliScan: true
+      enableLfiScan: true
+      enableTakeoverScan: true
+      EOF
+
+      echo "[AI Decision] Config saved to {{aiDecisionFile}}"
+      echo "[AI Decision] Variables saved to {{aiVarsFile}}"
+      echo "[AI Decision] severity=$SEVERITY, threads=$THREADS, rate_limit=$RATE_LIMIT, waf_bypass=$WAF_NEEDED"
+
+  - name: generate-comprehensive-report
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+      AGG_FILE="{{Output}}/ai-analysis/aggregated-results.json"
+
+      # 构建报告
+      cat > {{analysisOutputMd}} << 'EOF'
+      # AI 智能安全分析报告
+
+      ## 扫描目标
+      - **目标**: TARGET_PLACEHOLDER
+      - **时间**: TIMESTAMP_PLACEHOLDER
+      - **分析类型**: 漏洞验证 + 攻击链分析 + 路径规划 + 语义搜索
+
+      ---
+
+      ## 分析组件状态
+      EOF
+
+      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" {{analysisOutputMd}}
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$TIMESTAMP|g" {{analysisOutputMd}}
+
+      # 添加各组件状态
+      if [ -f "$AGG_FILE" ]; then
+        jq -r '.components | "### 漏洞验证\n- 状态: \(.vuln_validation.status)\n- 确认漏洞: \(.vuln_validation.confirmed_vulns)\n- 假阳性: \(.vuln_validation.false_positives)\n\n### 攻击链分析\n- 状态: \(.attack_chain.status)\n- 总攻击链: \(.attack_chain.total_chains)\n- 关键攻击链: \(.attack_chain.critical_chains)\n\n### 路径规划\n- 状态: \(.path_planning.status)\n- 规划阶段: \(.path_planning.total_phases)\n\n### 语义搜索\n- 状态: \(.semantic_search.status)\n- 搜索结果: \(.semantic_search.results)\n"' "$AGG_FILE" 2>/dev/null >> {{analysisOutputMd}} || true
+      fi
+
+      # 添加 AI 决策配置
+      echo "" >> {{analysisOutputMd}}
+      echo "---" >> {{analysisOutputMd}}
+      echo "" >> {{analysisOutputMd}}
+      echo "## AI 决策配置" >> {{analysisOutputMd}}
+      echo "" >> {{analysisOutputMd}}
+      echo "本次分析生成的 AI 决策配置已保存至 \`ai-decision-{{TargetSpace}}.json\`，漏洞扫描模块将自动加载并应用此配置。" >> {{analysisOutputMd}}
+
+      echo "" >> {{analysisOutputMd}}
+      echo "---" >> {{analysisOutputMd}}
+      echo "" >> {{analysisOutputMd}}
+      echo "*此报告由 AI 智能分析协调器模块自动生成*" >> {{analysisOutputMd}}
+
+      echo "[AI Coordinator] Comprehensive report saved"
+
+  - name: save-memory-context
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}} && {{enableMemory}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      STATS_FILE="{{Output}}/ai-analysis/intelligent-stats.json"
+      AGG_FILE="{{Output}}/ai-analysis/aggregated-results.json"
+      RISK="中"
+      TOTAL=0
+
+      if [ -f "$STATS_FILE" ]; then
+        CRITICAL=$(jq -r '.critical // 0' "$STATS_FILE" 2>/dev/null || echo 0)
+        HIGH=$(jq -r '.high // 0' "$STATS_FILE" 2>/dev/null || echo 0)
+        TOTAL=$((CRITICAL + HIGH))
+        if [ "$CRITICAL" -gt 5 ]; then
+          RISK="高"
+        elif [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -lt 5 ]; then
+          RISK="低"
+        fi
+      fi
+
+      # 从聚合结果获取更多信息
+      CONFIRMED=0
+      CHAINS=0
+      if [ -f "$AGG_FILE" ]; then
+        CONFIRMED=$(jq -r '.components.vuln_validation.confirmed_vulns // 0' "$AGG_FILE" 2>/dev/null || echo 0)
+        CHAINS=$(jq -r '.components.attack_chain.total_chains // 0' "$AGG_FILE" 2>/dev/null || echo 0)
+      fi
+
+      cat > {{memoryOutput}} << EOF
+      {
+        "target": "{{Target}}",
+        "timestamp": "$(date -Iseconds)",
+        "phase": "intelligent-analysis",
+        "analysis_type": "coordinator-aggregated",
+        "risk_level": "$RISK",
+        "total_findings": $TOTAL,
+        "confirmed_findings": $CONFIRMED,
+        "attack_chains": $CHAINS,
+        "components_completed": ["vuln_validation", "attack_chain", "path_planning", "semantic_search"],
+        "next_phases": ["vuln-suite", "code-review", "report"]
+      }
+      EOF
+
+      echo "[AI Memory] Context saved to {{memoryOutput}}"
+
+  - name: log-analysis-complete
+    type: function
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    functions:
+      - 'log_info("AI Intelligent analysis coordination completed for {{Target}}")'

@@ -1,0 +1,326 @@
+# =============================================================================
+# AI智能决策模块 - 优化版 v2
+# =============================================================================
+# 优化内容:
+# - 单一 Agent 调用完成所有分析 (减少 API 消耗)
+# - 添加 Memory 持久化支持上下文共享
+# - 标准化 JSON 输出格式
+# - 添加错误处理和降级机制
+# - 真正影响后续扫描参数
+# =============================================================================
+
+kind: module
+name: ai-intelligent-decision
+description: AI-powered intelligent decision making - optimized with memory support
+
+params:
+  - name: decisionOutput
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: dynamicConfigOutput
+    default: "{{Output}}/ai-analysis/dynamic-config.yaml"
+  - name: memoryOutput
+    default: "{{Output}}/ai-analysis/ai-memory-{{TargetSpace}}.json"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: paramsFile
+    default: "{{Output}}/content-analysis/params-{{TargetSpace}}.json"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+  - name: enableAiDecision
+    type: bool
+    default: true
+  - name: enableDynamicConfig
+    type: bool
+    default: true
+  - name: enableMemory
+    type: bool
+    default: true
+    description: "Enable memory persistence for context sharing"
+
+steps:
+  - name: prepare-decision-data
+    type: function
+    pre_condition: "{{enableAiDecision}}"
+    log: "Preparing data for AI decision making"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI decision analysis for {{Target}}")'
+
+  - name: collect-decision-data
+    type: bash
+    pre_condition: "{{enableAiDecision}}"
+    log: "Collecting scan statistics"
+    command: |
+      mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
+      
+      # 收集关键统计
+      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
+      HTTP_COUNT=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      JS_ENDPOINTS=$(wc -l < {{jsEndpointsFile}} 2>/dev/null || echo 0)
+      PARAMS=$(jq '. | length' {{paramsFile}} 2>/dev/null || echo 0)
+      EMAILS=$(wc -l < {{osintFile}} 2>/dev/null || echo 0)
+      WAF_COUNT=$(wc -l < {{wafFile}} 2>/dev/null || echo 0)
+      
+      # 提取技术栈
+      TECH_STACK=""
+      if [ -f "{{fingerprintFile}}" ]; then
+        TECH_STACK=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[]' 2>/dev/null | head -20 | tr '\n' ',' | sed 's/,$//')
+      fi
+      
+      cat > {{Output}}/ai-analysis/decision-stats.json << EOF
+      {
+        "subdomains": $SUBDOMAINS,
+        "resolved": $RESOLVED,
+        "http_count": $HTTP_COUNT,
+        "js_endpoints": $JS_ENDPOINTS,
+        "params": $PARAMS,
+        "emails": $EMAILS,
+        "waf_count": $WAF_COUNT,
+        "tech_stack": "$TECH_STACK"
+      }
+      EOF
+      
+      echo "[Decision Data] Collected: Subdomains=$SUBDOMAINS, HTTP=$HTTP_COUNT, WAF=$WAF_COUNT"
+
+  - name: ai-strategy-decision-unified
+    type: agent
+    pre_condition: "{{enableAiDecision}}"
+    max_iterations: 5
+    system_prompt: |
+      你是一个智能安全扫描策略分析师。
+      你的任务是根据当前的扫描结果，分析目标的安全态势，并生成结构化的决策建议。
+      
+      分析要点：
+      1. 资产规模评估 - 子域名数量、HTTP服务数量
+      2. 安全防护水平 - WAF、CDN 类型和覆盖范围
+      3. 攻击面分析 - JS端点、参数、API端点
+      4. 风险等级判定 - 基于资产价值和防护水平
+      
+      重要：
+      - 生成的配置必须具体可执行
+      - 所有数值必须是有效的 JSON 数字或字符串
+      - 必须返回完整的 JSON 对象，不能有缺失字段
+    query: |
+      分析以下扫描结果数据，为漏洞扫描提供智能决策建议：
+      
+      ## 资产统计 (JSON)
+      {{readFile("{{Output}}/ai-analysis/decision-stats.json")}}
+      
+      ## 技术指纹 (前15条)
+      {% if file_exists("{{fingerprintFile}}") %}
+      {{read_lines("{{fingerprintFile}}")[:15]}}
+      {% endif %}
+      
+      请提供完整的JSON格式决策建议：
+      ```json
+      {
+        "priority": "高/中/低",
+        "risk_level": "高/中/低",
+        "nuclei_severity": "critical,high,medium",
+        "suggested_threads": 10,
+        "suggested_rate_limit": 30,
+        "recommended_timeout": "6h",
+        "enable_additional_scans": {
+          "ssrf": true,
+          "ssti": true,
+          "sqli": true,
+          "lfi": true,
+          "takeover": true,
+          "smuggling": true,
+          "webcache": true
+        },
+        "focus_areas": ["重点方向1", "方向2"],
+        "waf_bypass_needed": false,
+        "asset_prioritization": true,
+        "smart_template_selection": true,
+        "reasoning": "决策理由"
+      }
+      ```
+      
+      只输出JSON，不要其他内容。确保JSON格式完全正确。
+    agent_tools:
+      - preset: read_file
+      - preset: read_lines
+      - preset: file_exists
+      - preset: file_length
+    exports:
+      decision_json: "{{agent_content}}"
+
+  - name: validate-decision-output
+    type: function
+    pre_condition: "{{enableAiDecision}}"
+    log: "Validating AI decision output"
+    functions:
+      - 'log_info("AI Decision: " + "{{decision_json}}"[:200])'
+
+  - name: save-decision-result
+    type: bash
+    pre_condition: "{{enableAiDecision}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 保存原始决策结果 (带错误处理)
+      echo '{{decision_json}}' > {{decisionOutput}} 2>/dev/null || echo '{}' > {{decisionOutput}}
+
+      # 验证 JSON 有效性并提取关键参数
+      if jq empty {{decisionOutput}} 2>/dev/null; then
+        echo "[Decision] JSON valid"
+
+        # 提取关键参数
+        SEVERITY=$(jq -r '.nuclei_severity // "critical,high"' {{decisionOutput}} 2>/dev/null)
+        THREADS=$(jq -r '.suggested_threads // 10' {{decisionOutput}} 2>/dev/null)
+        RATE_LIMIT=$(jq -r '.suggested_rate_limit // 30' {{decisionOutput}} 2>/dev/null)
+        TIMEOUT=$(jq -r '.recommended_timeout // "6h"' {{decisionOutput}} 2>/dev/null)
+        WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' {{decisionOutput}} 2>/dev/null)
+        ASSET_PRI=$(jq -r '.asset_prioritization // true' {{decisionOutput}} 2>/dev/null)
+        TEMPLATE_SEL=$(jq -r '.smart_template_selection // true' {{decisionOutput}} 2>/dev/null)
+
+        # 提取数组字段
+        jq -r '.focus_areas[] // ""' {{decisionOutput}} 2>/dev/null > {{Output}}/ai-analysis/focus-areas.txt || true
+        jq -r '.enable_additional_scans | to_entries | .[] | "\(.key)=\(.value)"' {{decisionOutput}} 2>/dev/null > {{Output}}/ai-analysis/enabled-scans.txt || true
+      else
+        echo "[Decision] JSON invalid, using defaults"
+        SEVERITY="critical,high"
+        THREADS=10
+        RATE_LIMIT=30
+        TIMEOUT="6h"
+        WAF_BYPASS=false
+        ASSET_PRI=true
+        TEMPLATE_SEL=true
+      fi
+
+      echo "SEVERITY=$SEVERITY"
+      echo "THREADS=$THREADS"
+      echo "RATE_LIMIT=$RATE_LIMIT"
+
+  - name: generate-dynamic-config
+    type: bash
+    pre_condition: "{{enableAiDecision}} && {{enableDynamicConfig}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 读取决策参数
+      SEVERITY=$(jq -r '.nuclei_severity // "critical,high"' {{decisionOutput}} 2>/dev/null || echo "critical,high")
+      THREADS=$(jq -r '.suggested_threads // 10' {{decisionOutput}} 2>/dev/null || echo 10)
+      RATE_LIMIT=$(jq -r '.suggested_rate_limit // 30' {{decisionOutput}} 2>/dev/null || echo 30)
+      TIMEOUT=$(jq -r '.recommended_timeout // "6h"' {{decisionOutput}} 2>/dev/null || echo "6h")
+      WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' {{decisionOutput}} 2>/dev/null || echo "false")
+      ASSET_PRI=$(jq -r '.asset_prioritization // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      TEMPLATE_SEL=$(jq -r '.smart_template_selection // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      
+      # 读取额外扫描配置
+      SSRF=$(jq -r '.enable_additional_scans.ssrf // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      SSTI=$(jq -r '.enable_additional_scans.ssti // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      SQLI=$(jq -r '.enable_additional_scans.sqli // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      LFI=$(jq -r '.enable_additional_scans.lfi // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      TAKEOVER=$(jq -r '.enable_additional_scans.takeover // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      SMUGGLING=$(jq -r '.enable_additional_scans.smuggling // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      WEBCACHE=$(jq -r '.enable_additional_scans.webcache // true' {{decisionOutput}} 2>/dev/null || echo "true")
+      
+      # 生成动态配置文件
+      cat > {{dynamicConfigOutput}} << EOF
+      # AI Generated Dynamic Configuration
+      # Generated by ai-intelligent-decision module
+      # Target: {{Target}}
+      # Generated: $(date)
+      
+      # Nuclei Configuration
+      nucleiSeverity: "$SEVERITY"
+      nucleiThreads: $THREADS
+      nucleiRateLimit: $RATE_LIMIT
+      nucleiTimeout: "$TIMEOUT"
+      
+      # Asset Prioritization
+      enableAssetPrioritization: $ASSET_PRI
+      enableSmartTemplateSelection: $TEMPLATE_SEL
+      
+      # WAF Bypass
+      enableWafAwareScan: $WAF_BYPASS
+      
+      # Additional Scans
+      enableSsrfScan: $SSRF
+      enableSstiScan: $SSTI
+      enableSqliScan: $SQLI
+      enableLfiScan: $LFI
+      enableTakeoverScan: $TAKEOVER
+      enableSmugglingScan: $SMUGGLING
+      enableWebcacheScan: $WEBCACHE
+      
+      # Reasoning
+      reasoning: $(jq -r '.reasoning // "AI-generated configuration"' {{decisionOutput}} 2>/dev/null || echo "AI-generated")
+      EOF
+      
+      # 生成环境变量文件 (供后续模块 source)
+      cat > {{Output}}/ai-analysis/scan-env.sh << EOF
+      # AI Decision Scan Environment Variables
+      export AI_NUCLEI_SEVERITY="$SEVERITY"
+      export AI_NUCLEI_THREADS=$THREADS
+      export AI_NUCLEI_RATE_LIMIT=$RATE_LIMIT
+      export AI_NUCLEI_TIMEOUT="$TIMEOUT"
+      export AI_WAF_BYPASS=$WAF_BYPASS
+      export AI_ASSET_PRIORITIZATION=$ASSET_PRI
+      export AI_SMART_TEMPLATE=$TEMPLATE_SEL
+      EOF
+      
+      # 导出为 Osmedeus 变量格式
+      cat > {{Output}}/ai-analysis/ai-vars.yaml << EOF
+      # AI Decision Variables - Import this in subsequent modules
+      ai_nuclei_severity: "$SEVERITY"
+      ai_nuclei_threads: $THREADS
+      ai_nuclei_rate_limit: $RATE_LIMIT
+      ai_nuclei_timeout: "$TIMEOUT"
+      ai_waf_bypass_needed: $WAF_BYPASS
+      ai_asset_prioritization: $ASSET_PRI
+      ai_smart_template_selection: $TEMPLATE_SEL
+      ai_additional_scans:
+        ssrf: $SSRF
+        ssti: $SSTI
+        sqli: $SQLI
+        lfi: $LFI
+        takeover: $TAKEOVER
+        smuggling: $SMUGGLING
+        webcache: $WEBCACHE
+      ai_reasoning: "$(jq -r '.reasoning // ""' {{decisionOutput}} 2>/dev/null)"
+      ai_priority: "$(jq -r '.priority // "中"' {{decisionOutput}} 2>/dev/null)"
+      ai_risk_level: "$(jq -r '.risk_level // "中"' {{decisionOutput}} 2>/dev/null)"
+      EOF
+      
+      echo "[AI Decision] Dynamic config saved: severity=$SEVERITY, threads=$THREADS"
+      echo "[AI Decision] Environment vars saved to {{Output}}/ai-analysis/scan-env.sh"
+      echo "[AI Decision] Variables saved to {{Output}}/ai-analysis/ai-vars.yaml"
+
+  - name: save-memory-context
+    type: bash
+    pre_condition: "{{enableAiDecision}} && {{enableMemory}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      # 保存决策上下文供后续模块使用
+      cat > {{memoryOutput}} << EOF
+      {
+        "target": "{{Target}}",
+        "timestamp": "$(date -Iseconds)",
+        "phase": "decision",
+        "decision": $(cat {{decisionOutput}} 2>/dev/null || echo "{}"),
+        "next_phases": ["vuln-scan", "attack-path", "validation"]
+      }
+      EOF
+      
+      echo "[AI Memory] Context saved to {{memoryOutput}}"
+
+  - name: log-decision-complete
+    type: function
+    pre_condition: "{{enableAiDecision}}"
+    functions:
+      - 'log_info("AI Decision completed for {{Target}}")'

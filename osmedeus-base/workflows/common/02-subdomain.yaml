@@ -1,0 +1,400 @@
+# =============================================================================
+# Module Workflow: Subdomain Enumeration
+# =============================================================================
+# 合并: enum-subdomain.yaml + enum-subdomain-enhanced.yaml
+# 功能: 被动枚举 + 主动枚举 + crt.sh + TLS 枚举
+# =============================================================================
+
+kind: module
+name: subdomain
+description: Subdomain enumeration - passive, active, crt.sh, TLS
+tags: subdomain, enumeration, discovery, dns, crtsh, tls
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 功能开关
+  - name: enableAmass
+    type: bool
+    default: false
+  - name: enableCrtSearch
+    type: bool
+    default: true
+  - name: enableTlsEnum
+    type: bool
+    default: false
+  - name: enableTlsEnumEnhanced
+    type: bool
+    default: false
+    description: "Use tlsx for enhanced TLS certificate enumeration"
+  - name: enableNoerror
+    type: bool
+    default: true
+    description: "Enable DNS NOERROR response testing"
+  - name: enableRecursivePassive
+    type: bool
+    default: true
+    description: "Enable recursive passive subdomain enumeration"
+  - name: enableGithubSubs
+    type: bool
+    default: true
+    description: "Enable GitHub subdomain enumeration"
+  - name: enableGitlabSubs
+    type: bool
+    default: true
+    description: "Enable GitLab subdomain enumeration"
+
+  # 工具参数
+  - name: subfinderThreads
+    default: "{{threads * 6}}"
+  - name: subfinderConfig
+    default: "{{ExternalConfigs}}/subfinder-provider-config.yaml"
+  - name: crtLimit
+    default: 10000
+  - name: tlsPorts
+    default: "443,993,995,465,8443"
+  - name: tlsxThreads
+    default: 100
+    description: "Threads for tlsx scanning"
+  - name: noerrorWordlist
+    default: "{{ExternalData}}/wordlists/dns/subdomains.txt"
+    description: "Wordlist for NOERROR testing"
+  - name: noerrorThreads
+    default: 100
+  - name: recursivePassiveTop
+    default: 20
+    description: "Top N subdomains for recursive passive"
+  - name: deepLimit
+    default: 500
+  - name: githubTokensFile
+    default: "{{ExternalConfigs}}/github_tokens.txt"
+  - name: gitlabTokensFile
+    default: "{{ExternalConfigs}}/gitlab_tokens.txt"
+
+  # 输出文件
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: crtshFile
+    default: "{{Output}}/subdomain/{{TargetSpace}}-crtsh.txt"
+  - name: tlsFile
+    default: "{{Output}}/subdomain/{{TargetSpace}}-tls.txt"
+  - name: noerrorFile
+    default: "{{Output}}/subdomain/noerror-{{TargetSpace}}.txt"
+  - name: recursivePassiveFile
+    default: "{{Output}}/subdomain/recursive-passive-{{TargetSpace}}.txt"
+  - name: githubSubsFile
+    default: "{{Output}}/subdomain/github-subs-{{TargetSpace}}.txt"
+  - name: gitlabSubsFile
+    default: "{{Output}}/subdomain/gitlab-subs-{{TargetSpace}}.txt"
+
+  # LLM 子域名价值分析配置
+  - name: enableLlmSubdomainAnalysis
+    type: bool
+    default: true
+    description: "Enable LLM-powered subdomain value analysis"
+  - name: llmSubdomainReport
+    default: "{{Output}}/subdomain/llm-subdomain-analysis-{{TargetSpace}}.md"
+    description: "LLM subdomain value analysis report"
+  - name: highValueSubsFile
+    default: "{{Output}}/subdomain/high-value-subs-{{TargetSpace}}.txt"
+    description: "High-value subdomains identified by LLM"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - subfinder
+    - findomain
+    - curl
+    - jq
+    - github-subdomains
+    - gitlab-subdomains
+    - dnsx
+    - tlsx
+    - unfurl
+    - anew
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: final-subdomains
+    path: "{{subdomainFile}}"
+    type: text
+    description: Final list of subdomains
+
+  - name: crtsh-subdomains
+    path: "{{crtshFile}}"
+    type: text
+    description: Subdomains from crt.sh
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup
+  # ===========================================================================
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/subdomain/")'
+
+  # ===========================================================================
+  # Phase 1: Passive Subdomain Enumeration
+  # ===========================================================================
+  - name: subfinder-enum
+    type: function
+    log: "Running subfinder subdomain enumeration"
+    functions:
+      - 'exec_cmd("subfinder -all -d {{Target}} -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt >/dev/null 2>&1")'
+    on_error:
+      - action: continue
+
+  - name: amass-enum
+    type: function
+    pre_condition: "{{enableAmass}}"
+    log: "Running amass subdomain enumeration (This may take a while)"
+    functions:
+      - 'exec_cmd("amass enum -active -d {{Target}} -o {{Output}}/subdomain/{{TargetSpace}}-amass.txt >/dev/null 2>&1")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: Additional Sources
+  # ===========================================================================
+  - name: additional-sources
+    type: function
+    log: "Running assetfinder and findomain"
+    functions:
+      - 'exec_cmd("findomain -u {{Output}}/subdomain/{{TargetSpace}}-findomain.txt -t {{Target}} > /dev/null 2>&1")'
+      - 'exec_cmd("assetfinder -subs-only {{Target}} > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: GitHub Subdomain Enumeration
+  # ===========================================================================
+  - name: github-subdomains-enum
+    type: bash
+    pre_condition: '{{enableGithubSubs}} && file_exists("{{githubTokensFile}}")'
+    log: "Enumerating subdomains from GitHub code search"
+    command: 'github-subdomains -d {{Target}} -k -q -t "{{githubTokensFile}}" -o {{githubSubsFile}} 2>/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: GitLab Subdomain Enumeration
+  # ===========================================================================
+  - name: gitlab-subdomains-enum
+    type: bash
+    pre_condition: '{{enableGitlabSubs}} && file_exists("{{gitlabTokensFile}}")'
+    log: "Enumerating subdomains from GitLab"
+    command: 'gitlab-subdomains -d {{Target}} -t "{{gitlabTokensFile}}" 2>/dev/null | tee {{gitlabSubsFile}} >/dev/null || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: crt.sh Certificate Transparency
+  # ===========================================================================
+  - name: crtsh-enum
+    type: bash
+    pre_condition: '{{enableCrtSearch}}'
+    log: "Enumerating subdomains via crt.sh certificate transparency"
+    command: 'curl -s -m 30 "https://crt.sh/?q={{Target}}&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sed "s/\\n/\n/g" | grep -v "^\*" | sort -u | head -n {{crtLimit}} > {{crtshFile}} || true'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: Initial Merge (优化: 使用 cat 一次性合并)
+  # ===========================================================================
+  - name: merge-subdomains-initial
+    type: function
+    log: "Merging passive subdomain sources"
+    functions:
+      - 'append_file("{{subdomainFile}}", "{{Output}}/subdomain/{{TargetSpace}}-subfinder.txt")'
+      - 'append_file("{{subdomainFile}}", "{{Output}}/subdomain/{{TargetSpace}}-amass.txt")'
+      - 'append_file("{{subdomainFile}}", "{{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+      - 'append_file("{{subdomainFile}}", "{{Output}}/subdomain/{{TargetSpace}}-findomain.txt")'
+      - 'append_file("{{subdomainFile}}", "{{crtshFile}}")'
+      - 'append_file("{{subdomainFile}}", "{{githubSubsFile}}")'
+      - 'append_file("{{subdomainFile}}", "{{gitlabSubsFile}}")'
+      - 'clean_sub("{{subdomainFile}}", "{{Target}}")'
+      - 'sort_unix("{{subdomainFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 7: TLS Certificate Enumeration (Enhanced with tlsx)
+  # ===========================================================================
+  - name: tls-enum-enhanced
+    type: bash
+    pre_condition: '{{enableTlsEnumEnhanced}} && file_exists("{{subdomainFile}}")'
+    log: "Enumerating subdomains via TLS certificate scanning (tlsx)"
+    command: |
+      : > {{tlsFile}}
+      cat {{subdomainFile}} | tlsx -san -cn -silent -ro -c {{tlsxThreads}} -p {{tlsPorts}} 2>/dev/null > {{Output}}/subdomain/tlsx_raw.txt || true
+      if [ -s "{{Output}}/subdomain/tlsx_raw.txt" ]; then
+        grep -aEo '[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}' {{Output}}/subdomain/tlsx_raw.txt | sort -u > {{tlsFile}} || true
+        rm -f {{Output}}/subdomain/tlsx_raw.txt
+      elif [ "{{enableTlsEnum}}" == "true" ]; then
+        for domain in $(cat {{subdomainFile}} 2>/dev/null | head -100); do
+          echo | openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null | openssl x509 -noout -text 2>/dev/null | grep -i "DNS:" | sed "s/DNS:/\n/g" | tr -d ","
+        done | sort -u > {{tlsFile}} || true
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 8: DNS NOERROR Testing (sub_noerror equivalent)
+  # ===========================================================================
+  - name: noerror-scan
+    type: bash
+    pre_condition: '{{enableNoerror}}'
+    log: "Testing DNS NOERROR responses for subdomain discovery"
+    command: |
+      : > {{noerrorFile}}
+      random_subdomain="${RANDOM}thistotallynotexist${RANDOM}.{{Target}}"
+      dns_response=$(echo "$random_subdomain" | dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
+      if [ "$dns_response" == "[NXDOMAIN]" ]; then
+        if [ -s "{{noerrorWordlist}}" ]; then
+          dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+        else
+          echo -e "www\nmail\nftp\ntest\nadmin\ndev\nstaging\napi\napp\nportal\nvpn\nremote\nblog\nshop\nstore\nsecure\nlogin\ndashboard\ncdn\nstatic\nassets" > {{Output}}/subdomain/noerror_wordlist.txt
+          dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{Output}}/subdomain/noerror_wordlist.txt -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+          rm -f {{Output}}/subdomain/noerror_wordlist.txt 2>/dev/null || true
+        fi
+        if [ -s "{{noerrorFile}}" ]; then
+          grep -E "\.{{Target}}$" {{noerrorFile}} | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' > {{noerrorFile}}.filtered || true
+          mv {{noerrorFile}}.filtered {{noerrorFile}} 2>/dev/null || true
+        fi
+      else
+        echo "DNSSEC black lies detected, skipping NOERROR testing" > {{noerrorFile}}
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 9: Final Merge (merge TLS and NOERROR results)
+  # ===========================================================================
+  - name: merge-subdomains-final
+    type: function
+    log: "Merging TLS and NOERROR results"
+    functions:
+      - 'append_file("{{subdomainFile}}", "{{tlsFile}}")'
+      - 'append_file("{{subdomainFile}}", "{{noerrorFile}}")'
+      - 'exec_cmd("rm -rf {{Output}}/subdomain/{{TargetSpace}}-*.txt")'
+      - 'clean_sub("{{subdomainFile}}", "{{Target}}")'
+      - 'sort_unix("{{subdomainFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 10: Recursive Passive Subdomain Enumeration
+  # ===========================================================================
+  - name: recursive-passive-enum
+    type: bash
+    pre_condition: '{{enableRecursivePassive}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") <= {{deepLimit}}'
+    log: "Running recursive passive subdomain enumeration"
+    command: |
+      dsieve -if {{subdomainFile}} -f 3 -top {{recursivePassiveTop}} > {{Output}}/subdomain/recursive_top.txt 2>/dev/null || head -n {{recursivePassiveTop}} {{subdomainFile}} > {{Output}}/subdomain/recursive_top.txt
+      if [ -s "{{Output}}/subdomain/recursive_top.txt" ]; then
+        subfinder -dL {{Output}}/subdomain/recursive_top.txt -silent -o {{Output}}/subdomain/recursive_passive_tmp.txt 2>/dev/null || true
+        if [ -s "{{Output}}/subdomain/recursive_passive_tmp.txt" ]; then
+          grep -E "{{Target}}$" {{Output}}/subdomain/recursive_passive_tmp.txt > {{recursivePassiveFile}} 2>/dev/null || true
+          cat {{recursivePassiveFile}} >> {{subdomainFile}} 2>/dev/null || true
+          sort -u {{subdomainFile}} -o {{subdomainFile}} 2>/dev/null || true
+        fi
+      fi
+      rm -f {{Output}}/subdomain/recursive_top.txt {{Output}}/subdomain/recursive_passive_tmp.txt 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: LLM Subdomain Value Analysis (P0)
+  # ===========================================================================
+  - name: llm-subdomain-analysis
+    type: llm
+    pre_condition: '{{enableLlmSubdomainAnalysis}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") > 0'
+    log: "Analyzing subdomain values with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior penetration tester specializing in attack surface analysis.
+          Analyze the discovered subdomains and identify:
+          
+          1. **High-Value Targets**: Subdomains likely containing sensitive functionality
+             - Login portals (login, auth, signin, sso, idp)
+             - Admin panels (admin, cpanel, manage, console, dashboard)
+             - API endpoints (api, apiv1, rest, graphql)
+             - Development/Testing (dev, test, staging, uat, beta)
+             - Internal systems (internal, intranet, vpn, portal)
+             - Database/Service (db, mysql, mongo, redis, es, elastic)
+             - CI/CD (jenkins, gitlab, git, ci, cd, pipeline)
+             - Monitoring (monitor, grafana, kibana, prometheus)
+          
+          2. **Potential Vulnerabilities**: Based on naming patterns
+             - Misconfiguration risks (dev, test, staging)
+             - Information disclosure (backup, old, archive)
+             - Access control issues (public, external, open)
+          
+          3. **Priority Ranking**: Score each subdomain 1-10 for attack priority
+          
+          4. **Recommended Actions**: Specific tests for each category
+          
+          Output a prioritized list with reasoning. Format in Markdown.
+      - role: user
+        content: |
+          Analyze these discovered subdomains for {{Target}}:
+          
+          {{readFile("{{subdomainFile}}")}}
+          
+          Provide:
+          1. Top 10 high-value targets with reasoning
+          2. Risk assessment for each category
+          3. Recommended testing approach
+    exports:
+      subdomain_analysis: "{{llm_subdomain_analysis_content}}"
+
+  - name: save-llm-subdomain-report
+    type: bash
+    pre_condition: "{{enableLlmSubdomainAnalysis}}"
+    log: "Saving LLM subdomain analysis report"
+    command: |
+      mkdir -p {{Output}}/subdomain 2>/dev/null || true
+      echo "# Subdomain Value Analysis - {{Target}}" > {{llmSubdomainReport}}
+      echo "" >> {{llmSubdomainReport}}
+      echo "**Generated:** $(date)" >> {{llmSubdomainReport}}
+      echo "" >> {{llmSubdomainReport}}
+      echo "{{subdomain_analysis}}" >> {{llmSubdomainReport}}
+      grep -E '^(login|admin|api|dev|test|staging|internal|db|jenkins|git|monitor|portal|auth|sso|dashboard|console|manage|cpanel|vpn|intranet)' {{subdomainFile}} 2>/dev/null | sort -u > {{highValueSubsFile}} || true
+      echo "[LLM-Subdomain] Identified $(wc -l < {{highValueSubsFile}} 2>/dev/null || echo 0) high-value subdomains"
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Summary & Database Import (优化: 添加数据库导入)
+  # ===========================================================================
+  - name: summary
+    type: function
+    log: "Subdomain enumeration summary"
+    functions:
+      - 'db_total_subdomains("{{subdomainFile}}")'
+      - 'db_total_assets("{{subdomainFile}}")'
+
+  - name: import-to-database
+    type: function
+    pre_condition: 'file_exists("{{subdomainFile}}")'
+    log: "Importing subdomains to database"
+    functions:
+      - 'db_partial_import_asset_file("{{Workspace}}", "subdomain", "{{subdomainFile}}")'
+      - 'generate_event_from_file("{{Workspace}}", "discovery", "subdomain-enum", "domain", "{{subdomainFile}}")'
+    on_error:
+      - action: continue'

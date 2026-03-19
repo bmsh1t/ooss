@@ -1,0 +1,1193 @@
+# =============================================================================
+# Module Workflow: Comprehensive Vulnerability Scanning
+# =============================================================================
+# 合并: scan-vuln-suite.yaml + scan-takeover.yaml + secret-detection.yaml
+# 功能: SSRF, SSTI, CRLF, Comm, LFI, SQLi, Takeover, Secret Detection
+# =============================================================================
+
+kind: module
+name: vuln-suite
+description: Comprehensive vulnerability scanning - SSRF, SSTI, CRLF, SQLi, LFI, Takeover, Secrets
+tags: vuln, ssrf, ssti, crlf, sqli, lfi, takeover, secret, scanning
+
+# -----------------------------------------------------------------------------
+# PARAMS SECTION
+# -----------------------------------------------------------------------------
+params:
+  # 功能开关
+  - name: enableNucleiScan
+    type: bool
+    default: true
+    description: "Enable Nuclei general vulnerability scanning"
+  - name: enableDeepScan
+    type: bool
+    default: false
+    description: "Enable deep scanning (include low/info severity templates)"
+  - name: enableSsrfScan
+    type: bool
+    default: true
+  - name: enableSstiScan
+    type: bool
+    default: true
+  - name: enableCrlfScan
+    type: bool
+    default: true
+  - name: enableCommScan
+    type: bool
+    default: true
+  - name: enableSqliScan
+    type: bool
+    default: true
+  - name: enableLfiScan
+    type: bool
+    default: true
+  - name: enableTakeoverScan
+    type: bool
+    default: true
+  - name: enableSecretScan
+    type: bool
+    default: true
+  - name: enableSmugglingScan
+    type: bool
+    default: true
+    description: "Enable HTTP Request Smuggling checks"
+  - name: enableWebcacheScan
+    type: bool
+    default: true
+    description: "Enable Web Cache Poisoning checks"
+  - name: enable4xxBypassScan
+    type: bool
+    default: true
+    description: "Enable 403/4xx bypass checks"
+  - name: enableFrayScan
+    type: bool
+    default: true
+    description: "Enable Fray WAF-aware payload testing"
+  - name: enableNucleiDast
+    type: bool
+    default: true
+    description: "Enable Nuclei DAST API fuzzing"
+  - name: enableCommandInjection
+    type: bool
+    default: true
+    description: "Enable command injection detection"
+  - name: enableTestSSL
+    type: bool
+    default: true
+    description: "Enable SSL/TLS security testing with testssl.sh"
+  - name: enableSpraying
+    type: bool
+    default: true
+    description: "Enable password spraying on discovered services"
+  - name: sprayingEngine
+    default: "brutespray"
+    description: "Spraying engine: brutespray or brutus"
+
+  # LLM 漏洞分析配置
+  - name: enableLlmAnalysis
+    type: bool
+    default: true
+    description: "Enable LLM-powered vulnerability analysis and false positive filtering"
+  - name: llmAnalysisOutput
+    default: "{{vulnSuiteDir}}/llm-analysis-{{TargetSpace}}.md"
+    description: "LLM vulnerability analysis report"
+  - name: llmFalsePositiveFilter
+    type: bool
+    default: true
+    description: "Use LLM to filter false positives from scan results"
+  - name: llmFilteredOutput
+    default: "{{vulnSuiteDir}}/nuclei-filtered-{{TargetSpace}}.jsonl"
+    description: "Nuclei results after LLM false positive filtering"
+  - name: llmRiskPrioritization
+    type: bool
+    default: true
+    description: "Use LLM to prioritize vulnerabilities by business risk"
+
+  # Nuclei 扫描配置
+  - name: nucleiOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCleanOutputJsonl
+    default: "{{Output}}/vulnscan/clean-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiMarkdownReport
+    default: "{{Output}}/vulnscan/nuclei-overview-report-{{TargetSpace}}.md"
+  - name: nucleiTemplateConfig
+    default: "~/nuclei-templates/"
+  - name: nucleiThreads
+    default: "{{ threads * 10 }}"
+  - name: nucleiRatelimit
+    default: "150"
+    description: "Nuclei rate limit (requests per second)"
+  - name: nucleiTimeout
+    default: "8h"
+  - name: nucleiSeverity
+    default: "critical,high,medium"
+  - name: extraNuclei
+    default: " "
+
+  # 输入文件
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: subdomainFile
+    default: "{{Output}}/probing/nonwild-{{TargetSpace}}.txt"
+  - name: jsUrlsFile
+    default: "{{Output}}/content-analysis/js-urls-{{TargetSpace}}.txt"
+  - name: urlExtractFile
+    default: "{{Output}}/links/url-extract-{{TargetSpace}}.txt"
+    description: "Extracted URLs from web crawling (from 06-web-crawl)"
+
+  # GF Pattern 文件
+  - name: gfSstiFile
+    default: "{{Output}}/gf/ssti-{{TargetSpace}}.txt"
+  - name: gfSqliFile
+    default: "{{Output}}/gf/sqli-{{TargetSpace}}.txt"
+  - name: gfRceFile
+    default: "{{Output}}/gf/rce-{{TargetSpace}}.txt"
+  - name: gfSsrfFile
+    default: "{{Output}}/gf/ssrf-{{TargetSpace}}.txt"
+  - name: gfLfiFile
+    default: "{{Output}}/gf/lfi-{{TargetSpace}}.txt"
+
+  # 实战优化参数 (由主工作流传入)
+  - name: enableWafAwareScan
+    type: bool
+    default: true
+    description: "Enable WAF-aware scanning with rate adjustment"
+  - name: wafRateLimit
+    type: integer
+    default: 20
+    description: "Rate limit when WAF is detected"
+  - name: wafRequestDelay
+    type: string
+    default: "2s"
+    description: "Delay between requests when WAF detected"
+  - name: wafDetectionFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+    description: "WAF detection results file (from recon-waf.yaml)"
+  - name: enableJitter
+    type: bool
+    default: true
+    description: "Enable jitter for evasion"
+  - name: enableAssetPrioritization
+    type: bool
+    default: true
+    description: "Enable asset prioritization for critical targets"
+  - name: priorityKeywords
+    type: string
+    default: "login,admin,api,dashboard,panel,console,manage,portal,auth,signin,cpanel"
+    description: "Keywords for high-priority asset identification"
+  - name: enableSmartTemplateSelection
+    type: bool
+    default: true
+    description: "Enable smart Nuclei template selection based on tech stack"
+  - name: enableOsintFeedback
+    type: bool
+    default: true
+    description: "Enable OSINT feedback integration"
+  - name: osintSecretsFile
+    default: "{{Output}}/osint/secrets-{{TargetSpace}}.txt"
+    description: "OSINT secrets file for feedback"
+  - name: nucleiThreads
+    type: integer
+    default: 10
+    description: "Nuclei scan threads"
+  - name: nucleiRateLimit
+    type: integer
+    default: 30
+    description: "Nuclei rate limit per second"
+  - name: enableUserAgentRotation
+    type: bool
+    default: true
+    description: "Enable random User-Agent rotation"
+  - name: enableProxyRotation
+    type: bool
+    default: false
+    description: "Enable proxy rotation for evasion"
+  - name: proxyListFile
+    type: string
+    default: ""
+    description: "Path to proxy list file (one proxy per line, e.g., http://127.0.0.1:8080)"
+
+  # LLM WAF 绕过策略配置
+  - name: enableLlmWafBypass
+    type: bool
+    default: true
+    description: "Enable LLM-powered WAF bypass strategy suggestions"
+  - name: llmWafBypassReport
+    default: "{{vulnSuiteDir}}/llm-waf-bypass-{{TargetSpace}}.md"
+    description: "LLM WAF bypass strategy report"
+
+  # 工具参数
+  - name: ffufThreads
+    default: 40
+  - name: ffufRatelimit
+    default: 150
+  - name: secretThreads
+    default: 20
+  - name: frayCategories
+    default: "xss,sqli,ssti,rce,lfi"
+    description: "Fray test categories (comma-separated)"
+  - name: frayMaxPayloads
+    default: 20
+    description: "Maximum payloads per category"
+  - name: frayTimeout
+    default: 10
+    description: "Fray request timeout in seconds"
+  - name: frayDelay
+    default: "0.5"
+    description: "Delay between requests"
+  - name: frayUrlLimit
+    default: 500
+    description: "Maximum URLs to test with Fray"
+  - name: toolsDir
+    default: "/root/Tools"
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+
+  # URL 限制
+  - name: ssrfDeepScan
+    type: bool
+    default: false
+  - name: ssrfUrlLimit
+    default: 5000
+  - name: smugglingUrlLimit
+    default: 5000
+  - name: webcacheUrlLimit
+    default: 5000
+  - name: bypassUrlLimit
+    default: 5000
+
+  # 超时参数 (新增)
+  - name: smugglingTimeout
+    default: "30m"
+  - name: webcacheTimeout
+    default: "30m"
+  - name: bypassTimeout
+    default: "20m"
+  - name: sprayingTimeout
+    default: "1h"
+
+  # Spraying 参数
+  - name: brutesprayConcurrency
+    default: 10
+    description: "BruteSpray concurrency level"
+  - name: brutusUsernames
+    default: ""
+    description: "Path to usernames file for Brutus"
+  - name: brutusPasswords
+    default: ""
+    description: "Path to passwords file for Brutus"
+  - name: portscanGnmapFile
+    default: "{{Output}}/ipspace/portscan_active.gnmap"
+
+  # 输出目录
+  - name: vulnSuiteDir
+    default: "{{Output}}/vuln-scan-suite"
+
+  # 输出文件
+  - name: ssrfOutputFile
+    default: "{{vulnSuiteDir}}/ssrf-{{TargetSpace}}.txt"
+  - name: ssrfCallbackFile
+    default: "{{vulnSuiteDir}}/ssrf-callback-{{TargetSpace}}.txt"
+  - name: ssrfCallbackWait
+    default: "30"
+    description: "Time to wait for SSRF callbacks (seconds)"
+  - name: sstiOutputFile
+    default: "{{vulnSuiteDir}}/ssti-{{TargetSpace}}.txt"
+  - name: crlfOutputFile
+    default: "{{vulnSuiteDir}}/crlf-{{TargetSpace}}.txt"
+  - name: commOutputFile
+    default: "{{vulnSuiteDir}}/comm-{{TargetSpace}}.txt"
+  - name: sqliOutputFile
+    default: "{{vulnSuiteDir}}/sqli-{{TargetSpace}}.txt"
+  - name: lfiOutputFile
+    default: "{{vulnSuiteDir}}/lfi-{{TargetSpace}}.txt"
+  - name: takeoverOutputFile
+    default: "{{vulnSuiteDir}}/takeover-{{TargetSpace}}.txt"
+  - name: secretsOutputFile
+    default: "{{vulnSuiteDir}}/secrets-{{TargetSpace}}.txt"
+  - name: smugglingOutputFile
+    default: "{{vulnSuiteDir}}/smuggling-{{TargetSpace}}.txt"
+  - name: webcacheOutputFile
+    default: "{{vulnSuiteDir}}/webcache-{{TargetSpace}}.txt"
+  - name: bypass4xxOutputFile
+    default: "{{vulnSuiteDir}}/4xx-bypass-{{TargetSpace}}.txt"
+  - name: sprayingOutputDir
+    default: "{{vulnSuiteDir}}/spraying"
+  - name: sprayingOutputFile
+    default: "{{vulnSuiteDir}}/spraying-{{TargetSpace}}.txt"
+  - name: brutusOutputFile
+    default: "{{vulnSuiteDir}}/brutus-{{TargetSpace}}.jsonl"
+  - name: frayOutputDir
+    default: "{{vulnSuiteDir}}/fray"
+  - name: nucleiDastOutput
+    default: "{{vulnSuiteDir}}/nuclei-dast-{{TargetSpace}}.txt"
+  - name: nucleiDastJsonOutput
+    default: "{{vulnSuiteDir}}/nuclei-dast-{{TargetSpace}}.jsonl"
+  - name: commandInjectionOutput
+    default: "{{vulnSuiteDir}}/command-injection-{{TargetSpace}}.txt"
+
+  # LFI 参数
+  - name: lfiPayloadsFile
+    default: "{{ExternalData}}/wordlists/lfi_wordlist.txt"
+  - name: lfiMatchRegex
+    default: "root:|etc/passwd|boot.ini|win.ini"
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES SECTION
+# -----------------------------------------------------------------------------
+dependencies:
+  commands:
+    - ffuf
+    - nuclei
+    - interactsh-client
+    - qsreplace
+    - anew
+    - TInjA
+    - crlfuzz
+    - commix
+    - jq
+    - titus
+    - trufflehog
+    - fray
+    - interlace
+    - brutespray
+    - brutus
+    - nerva
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+# -----------------------------------------------------------------------------
+# REPORTS SECTION
+# -----------------------------------------------------------------------------
+reports:
+  - name: nuclei-results
+    path: "{{nucleiOutputJsonl}}"
+    type: jsonl
+    description: Nuclei vulnerability scan results
+
+  - name: nuclei-report
+    path: "{{nucleiMarkdownReport}}"
+    type: markdown
+    description: Nuclei scan markdown report
+
+  - name: ssrf-callbacks
+    path: "{{ssrfCallbackFile}}"
+    type: text
+    description: SSRF OOB callbacks received
+
+  - name: ssti-results
+    path: "{{sstiOutputFile}}"
+    type: text
+    description: SSTI vulnerability findings
+
+  - name: crlf-results
+    path: "{{crlfOutputFile}}"
+    type: text
+    description: CRLF vulnerability findings
+
+  - name: sqli-results
+    path: "{{sqliOutputFile}}"
+    type: text
+    description: SQL injection findings
+
+  - name: lfi-results
+    path: "{{lfiOutputFile}}"
+    type: text
+    description: LFI vulnerability findings
+
+  - name: takeover-results
+    path: "{{takeoverOutputFile}}"
+    type: text
+    description: Subdomain takeover findings
+
+  - name: secrets-found
+    path: "{{secretsOutputFile}}"
+    type: text
+    description: Discovered secrets and credentials
+
+  - name: fray-results
+    path: "{{frayOutputDir}}"
+    type: folder
+    description: Fray WAF bypass test results
+
+# -----------------------------------------------------------------------------
+# STEPS SECTION
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Setup
+  # ===========================================================================
+  - name: create-output-folder
+    type: function
+    log: "Creating vulnerability scan suite output folder"
+    functions:
+      - 'create_folder("{{vulnSuiteDir}}")'
+      - 'create_folder("{{vulnSuiteDir}}/sqlmap")'
+      - 'create_folder("{{vulnSuiteDir}}/commix")'
+      - 'create_folder("{{Output}}/vulnscan")'
+
+  # ===========================================================================
+  # Phase 0a: WAF-Aware Scan Adjustment (实战优化)
+  # ===========================================================================
+  - name: waf-aware-adjustment
+    type: bash
+    pre_condition: '{{enableWafAwareScan}} && file_exists("{{wafDetectionFile}}")'
+    log: "Adjusting scan parameters based on WAF detection"
+    command: |
+      # 检测 WAF 并调整策略
+      if grep -qiE "cloudflare|akamai|incapsula|imperva|barracuda|f5|fortinet|sucuri" {{wafDetectionFile}} 2>/dev/null; then
+        echo "[WAF-AWARE] WAF detected, applying stealth configuration"
+        export ADJUSTED_THREADS=5
+        export ADJUSTED_RATELIMIT={{wafRateLimit}}
+        export ADJUSTED_DELAY="{{wafRequestDelay}}"
+      else
+        echo "[WAF-AWARE] No WAF detected, using standard configuration"
+        export ADJUSTED_THREADS={{nucleiThreads}}
+        export ADJUSTED_RATELIMIT={{nucleiRateLimit}}
+        export ADJUSTED_DELAY="0s"
+      fi
+      
+      # 保存调整后的配置
+      echo "THREADS=$ADJUSTED_THREADS" > {{vulnSuiteDir}}/waf-adjusted-config.txt
+      echo "RATELIMIT=$ADJUSTED_RATELIMIT" >> {{vulnSuiteDir}}/waf-adjusted-config.txt
+      echo "DELAY=$ADJUSTED_DELAY" >> {{vulnSuiteDir}}/waf-adjusted-config.txt
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 0b: Asset Prioritization (实战优化)
+  # ===========================================================================
+  - name: prioritize-assets
+    type: bash
+    pre_condition: '{{enableAssetPrioritization}} && file_exists("{{httpFile}}")'
+    log: "Prioritizing assets for vulnerability scanning"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      
+      # 提取高优先级资产
+      grep -iE "{{priorityKeywords}}" {{httpFile}} 2>/dev/null  | sort -u > {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt || true
+      
+      # 剩余资产
+      if [ -s "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
+        comm -23 <(sort -u {{httpFile}}) <(sort {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt)  > {{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt || true
+        
+        hp_count=$(wc -l < {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt 2>/dev/null || echo 0)
+        echo "[PRIORITY] Found $hp_count high-priority assets"
+      else
+        cp {{httpFile}} {{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt 2>/dev/null || true
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 0c: Smart Template Selection (实战优化)
+  # ===========================================================================
+  - name: smart-template-selection
+    type: bash
+    pre_condition: '{{enableSmartTemplateSelection}} && file_exists("{{fingerprintFile}}")'
+    log: "Selecting Nuclei templates based on tech stack"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      
+      # 从指纹结果提取技术栈
+      tech_stack=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+      
+      # 根据技术栈选择模板
+      SELECTED_TEMPLATES=""
+      
+      if echo "$tech_stack" | grep -qi "php"; then
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/configs/php"
+      fi
+      if echo "$tech_stack" | grep -qi "java\|spring"; then
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,cves/java,springboot"
+      fi
+      if echo "$tech_stack" | grep -qi "node\|express"; then
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/apis/nodejs"
+      fi
+      if echo "$tech_stack" | grep -qi "wordpress\|wp"; then
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,technologies/wordpress,cms/wordpress"
+      fi
+      if echo "$tech_stack" | grep -qi "api\|rest"; then
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/apis"
+      fi
+      
+      # 默认模板
+      if [ -z "$SELECTED_TEMPLATES" ]; then
+        SELECTED_TEMPLATES="cves,vulnerabilities,exposures"
+      fi
+      
+      SELECTED_TEMPLATES=$(echo "$SELECTED_TEMPLATES" | sed 's/^,//')
+      echo "SELECTED_TEMPLATES=$SELECTED_TEMPLATES" > {{vulnSuiteDir}}/smart-templates.txt
+      echo "[SMART-TEMPLATES] Selected: $SELECTED_TEMPLATES"
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 0d: OSINT Feedback Integration (实战优化)
+  # ===========================================================================
+  - name: osint-feedback-integration
+    type: bash
+    pre_condition: '{{enableOsintFeedback}} && file_exists("{{osintSecretsFile}}")'
+    log: "Integrating OSINT secrets into vulnerability scanning"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      
+      # 从 OSINT 提取可能的敏感端点
+      if [ -s "{{osintSecretsFile}}" ]; then
+        # 提取 API 端点
+        grep -oE 'https?://[^ ]+' {{osintSecretsFile}} 2>/dev/null  | grep -iE "api|endpoint|v[0-9]|graphql" | sort -u > {{vulnSuiteDir}}/osint-api-endpoints.txt || true
+        
+        # 提取可能的凭证相关 URL
+        grep -oE 'https?://[^ ]+' {{osintSecretsFile}} 2>/dev/null  | grep -iE "login|auth|signin|password|credential|token" | sort -u > {{vulnSuiteDir}}/osint-auth-endpoints.txt || true
+        
+        echo "[OSINT-FEEDBACK] Extracted $(wc -l < {{vulnSuiteDir}}/osint-api-endpoints.txt 2>/dev/null || echo 0) API endpoints"
+        echo "[OSINT-FEEDBACK] Extracted $(wc -l < {{vulnSuiteDir}}/osint-auth-endpoints.txt 2>/dev/null || echo 0) auth endpoints"
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 0: Nuclei General Vulnerability Scan (支持实战优化)
+  # ===========================================================================
+  - name: nuclei-scan
+    type: bash
+    log: "Running Nuclei general vulnerability scan"
+    pre_condition: '{{enableNucleiScan}} && file_exists("{{httpFile}}")'
+    command: |
+      # ========================================
+      # AI 决策配置加载 (新增 - 真正影响扫描)
+      # ========================================
+      AI_DECISION_FILE="{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+      AI_VARS_FILE="{{Output}}/ai-analysis/ai-vars.yaml"
+
+      if [ -f "$AI_DECISION_FILE" ]; then
+        echo "[NUCLEI] Loading AI decision config from $AI_DECISION_FILE"
+        AI_SEVERITY=$(jq -r '.nuclei_severity // empty' "$AI_DECISION_FILE" 2>/dev/null)
+        AI_THREADS=$(jq -r '.suggested_threads // empty' "$AI_DECISION_FILE" 2>/dev/null)
+        AI_RATE_LIMIT=$(jq -r '.suggested_rate_limit // empty' "$AI_DECISION_FILE" 2>/dev/null)
+        AI_TIMEOUT=$(jq -r '.recommended_timeout // empty' "$AI_DECISION_FILE" 2>/dev/null)
+        AI_WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' "$AI_DECISION_FILE" 2>/dev/null)
+        AI_REASONING=$(jq -r '.reasoning // "none"' "$AI_DECISION_FILE" 2>/dev/null)
+
+        [ -n "$AI_SEVERITY" ] && echo "[NUCLEI] AI Decision: severity=$AI_SEVERITY"
+        [ -n "$AI_THREADS" ] && echo "[NUCLEI] AI Decision: threads=$AI_THREADS"
+        [ -n "$AI_RATE_LIMIT" ] && echo "[NUCLEI] AI Decision: rate_limit=$AI_RATE_LIMIT"
+        [ -n "$AI_TIMEOUT" ] && echo "[NUCLEI] AI Decision: timeout=$AI_TIMEOUT"
+        [ -n "$AI_WAF_BYPASS" ] && echo "[NUCLEI] AI Decision: waf_bypass=$AI_WAF_BYPASS"
+        echo "[NUCLEI] AI Reasoning: $AI_REASONING"
+      else
+        echo "[NUCLEI] No AI decision file found, using default config"
+      fi
+      
+      # 严重性配置 (AI 决策优先)
+      if [ "{{enableDeepScan}}" = "true" ]; then
+        SEVERITY="critical,high,medium,low,info"
+      elif [ -n "$AI_SEVERITY" ]; then
+        SEVERITY="$AI_SEVERITY"
+      else
+        SEVERITY="{{nucleiSeverity}}"
+      fi
+      
+      # WAF 感知配置加载
+      if [ "{{enableWafAwareScan}}" = "true" ] && [ -f "{{vulnSuiteDir}}/waf-adjusted-config.txt" ]; then
+        source {{vulnSuiteDir}}/waf-adjusted-config.txt
+        THREADS=${THREADS:-{{nucleiThreads}}}
+        RATELIMIT=${RATELIMIT:-{{nucleiRateLimit}}}
+        # AI 决策覆盖
+        [ -n "$AI_THREADS" ] && THREADS=$AI_THREADS
+        [ -n "$AI_RATE_LIMIT" ] && RATELIMIT=$AI_RATE_LIMIT
+        echo "[NUCLEI] Using WAF-adjusted+AI config: threads=$THREADS, rate=$RATELIMIT"
+      else
+        THREADS={{nucleiThreads}}
+        RATELIMIT={{nucleiRateLimit}}
+        # AI 决策覆盖
+        [ -n "$AI_THREADS" ] && THREADS=$AI_THREADS
+        [ -n "$AI_RATE_LIMIT" ] && RATELIMIT=$AI_RATE_LIMIT
+        [ -n "$AI_THREADS" ] || [ -n "$AI_RATE_LIMIT" ] && echo "[NUCLEI] Using AI config: threads=$THREADS, rate=$RATELIMIT"
+      fi
+      
+      # 智能模板选择
+      if [ "{{enableSmartTemplateSelection}}" = "true" ] && [ -f "{{vulnSuiteDir}}/smart-templates.txt" ]; then
+        source {{vulnSuiteDir}}/smart-templates.txt
+        TEMPLATES="${SELECTED_TEMPLATES:-{{nucleiTemplateConfig}}}"
+        echo "[NUCLEI] Using smart templates: $TEMPLATES"
+      else
+        TEMPLATES="{{nucleiTemplateConfig}}"
+      fi
+      
+      # User-Agent 轮换配置
+      UA_OPTS=""
+      if [ "{{enableUserAgentRotation}}" = "true" ]; then
+        # Nuclei 内置随机 UA
+        UA_OPTS="-rc"
+        echo "[NUCLEI] User-Agent rotation enabled"
+      fi
+      
+      # 代理轮换配置
+      PROXY_OPTS=""
+      if [ "{{enableProxyRotation}}" = "true" ] && [ -n "{{proxyListFile}}" ] && [ -f "{{proxyListFile}}" ]; then
+        # 使用代理列表文件
+        PROXY_OPTS="-http-proxy {{proxyListFile}}"
+        echo "[NUCLEI] Proxy rotation enabled using {{proxyListFile}}"
+      fi
+      
+      # 资产优先级扫描
+      SCAN_FILE="{{httpFile}}"
+      if [ "{{enableAssetPrioritization}}" = "true" ] && [ -f "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
+        # 先扫描高优先级资产
+        echo "[NUCLEI] Scanning high-priority assets first..."
+        timeout -k 1m {{nucleiTimeout}} nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1 || true
+        SCAN_FILE="{{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt"
+        echo "[NUCLEI] Now scanning remaining assets..."
+      fi
+      
+      # Jitter 配置
+      JITTER_OPTS=""
+      if [ "{{enableJitter}}" = "true" ]; then
+        JITTER_OPTS="-sjc -sjt $(shuf -i 1-5 -n 1)d -rsh"
+      fi
+      
+      # 执行扫描
+      timeout -k 1m {{nucleiTimeout}} nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1
+      
+      # 合并结果
+      if [ -f "{{nucleiOutputJsonl}}.priority" ]; then
+        cat {{nucleiOutputJsonl}}.priority >> {{nucleiOutputJsonl}} 2>/dev/null || true
+        rm -f {{nucleiOutputJsonl}}.priority
+      fi
+    on_error:
+      - action: continue
+
+  - name: nuclei-report-processing
+    type: function
+    log: "Processing Nuclei report"
+    pre_condition: '{{enableNucleiScan}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    functions:
+      - jsonl_filter("{{nucleiOutputJsonl}}", "{{nucleiCleanOutputJsonl}}", "template-id,info.name,info.severity,matched-at,matched-name")
+      - sort_unix("{{nucleiCleanOutputJsonl}}")
+      - 'convert_jsonl_to_markdown("{{nucleiCleanOutputJsonl}}", "{{nucleiMarkdownReport}}")'
+      - db_total_vulns("{{nucleiCleanOutputJsonl}}")
+      - db_import_vuln_from_file("{{TargetSpace}}", "{{nucleiOutputJsonl}}")
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 1: SSRF Scanning (ffuf + interactsh)
+  # ===========================================================================
+  - name: ssrf-scan
+    type: function
+    pre_condition: '{{enableSsrfScan}} && file_exists("{{gfSsrfFile}}") && ({{ssrfDeepScan}} || file_length("{{gfSsrfFile}}") <= {{ssrfUrlLimit}})'
+    log: "Running SSRF scan with ffuf + interactsh"
+    functions:
+      - 'exec_cmd(": > {{ssrfOutputFile}} && : > {{ssrfCallbackFile}}")'
+      - 'exec_cmd("interactsh-client > {{vulnSuiteDir}}/interactsh-raw.txt 2>&1 &")'
+      - 'exec_cmd("sleep 8")'
+      - 'exec_cmd("COLLAB_SERVER_FIX=\"FFUFHASH.$(tail -n1 {{vulnSuiteDir}}/interactsh-raw.txt | cut -c 16-)\" && echo \"[SSRF] Callback: $COLLAB_SERVER_FIX\" >> {{ssrfOutputFile}} && qsreplace \"$COLLAB_SERVER_FIX\" < \"{{gfSsrfFile}}\" | anew -q {{vulnSuiteDir}}/tmp_ssrf.txt 2>/dev/null || true")'
+      - 'exec_cmd("ffuf -v -H \"{{defaultUA}}\" -t {{ffufThreads}} -rate {{ffufRatelimit}} -w \"{{vulnSuiteDir}}/tmp_ssrf.txt\" -u \"FUZZ\" 2>/dev/null | anew -q {{vulnSuiteDir}}/ssrf-requested-{{TargetSpace}}.txt || true")'
+      - 'exec_cmd("sleep {{ssrfCallbackWait}}")'
+      - 'exec_cmd("tail -n +11 {{vulnSuiteDir}}/interactsh-raw.txt | anew -q {{ssrfCallbackFile}} 2>/dev/null || true")'
+      - 'exec_cmd("pkill -f interactsh-client 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 2: SSTI Scanning (TInjA)
+  # ===========================================================================
+  - name: ssti-scan
+    type: function
+    log: "Running SSTI scan with TInjA"
+    pre_condition: '{{enableSstiScan}} && file_exists("{{gfSstiFile}}")'
+    functions:
+      - 'exec_cmd("mkdir -p {{vulnSuiteDir}}/TInjA 2>/dev/null || true")'
+      - 'exec_cmd(": > {{sstiOutputFile}}")'
+      - 'exec_cmd("qsreplace FUZZ < \"{{gfSstiFile}}\" 2>/dev/null | sed \"/FUZZ/!d\" > {{vulnSuiteDir}}/tmp_ssti.txt || true")'
+      - 'exec_cmd("CMD=\"TInjA url --reportpath {{vulnSuiteDir}}/TInjA/ --ratelimit 0 --timeout 15 --verbosity 0\"; while IFS= read -r u; do [ -n \"$u\" ] && CMD=\"$CMD --url \\\"$u\\\"\"; done < \"{{vulnSuiteDir}}/tmp_ssti.txt\"; $CMD 2>/dev/null || true")'
+      - 'exec_cmd("report_file=$(ls -1t {{vulnSuiteDir}}/TInjA/*.jsonl 2>/dev/null | head -n 1); if [ -n \"$report_file\" ] && [ -s \"$report_file\" ]; then jq -r \"select((.isWebpageVulnerable == true) or any(.parameters[]?; .isParameterVulnerable == true)) | (.url // empty) + \\\" [certainty:\\\" + (.certainty // \\\"unknown\\\") + \\\"]\\\"\" \"$report_file\" 2>/dev/null | sed \"/^\\s*$/d\" > {{sstiOutputFile}}; fi")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 3: CRLF Scanning (crlfuzz)
+  # ===========================================================================
+  - name: crlf-scan
+    type: function
+    pre_condition: '{{enableCrlfScan}} && file_exists("{{httpFile}}")'
+    log: "Running CRLF scan with crlfuzz"
+    functions:
+      - 'exec_cmd("crlfuzz -l {{httpFile}} -s -o {{crlfOutputFile}} 2>/dev/null")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4: Command Injection Scanning (commix)
+  # ===========================================================================
+  - name: comm-scan
+    type: function
+    pre_condition: '{{enableCommScan}} && file_exists("{{gfRceFile}}")'
+    log: "Running Command Injection scan with commix"
+    functions:
+      - 'exec_cmd(": > {{commOutputFile}}")'
+      - 'exec_cmd("commix --batch -m {{gfRceFile}} --output {{vulnSuiteDir}}/commix/ 2>/dev/null || true")'
+      - 'exec_cmd("find {{vulnSuiteDir}}/commix/ -name \"*.txt\" -exec cat {} \\; 2>/dev/null >> {{commOutputFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 5: SQL Injection Scanning (sqlmap)
+  # ===========================================================================
+  - name: sqli-scan
+    type: function
+    pre_condition: '{{enableSqliScan}} && file_exists("{{gfSqliFile}}")'
+    log: "Running SQLMap for SQLi checks"
+    functions:
+      - 'exec_cmd(": > {{sqliOutputFile}}")'
+      - 'exec_cmd("qsreplace FUZZ < \"{{gfSqliFile}}\" | sed \"/FUZZ/!d\" | anew -q {{vulnSuiteDir}}/tmp_sqli.txt 2>/dev/null || true")'
+      - 'exec_cmd("SQLMAP_CMD=$(command -v sqlmap 2>/dev/null || echo \"python3 {{toolsDir}}/sqlmap/sqlmap.py\") && [ -s \"{{vulnSuiteDir}}/tmp_sqli.txt\" ] && $SQLMAP_CMD -m {{vulnSuiteDir}}/tmp_sqli.txt -b -o --smart --batch --disable-coloring --random-agent --output-dir={{vulnSuiteDir}}/sqlmap/ 2>/dev/null || true && find {{vulnSuiteDir}}/sqlmap/ -name \"*.txt\" -exec cat {} \\; 2>/dev/null >> {{sqliOutputFile} || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 6: LFI Scanning (ffuf + interlace)
+  # ===========================================================================
+  - name: lfi-scan
+    type: function
+    pre_condition: '{{enableLfiScan}} && file_exists("{{gfLfiFile}}")'
+    log: "Running ffuf LFI scan with interlace"
+    functions:
+      - 'exec_cmd(": > {{lfiOutputFile}}")'
+      - 'exec_cmd("mkdir -p \"$(dirname {{lfiPayloadsFile}})\" 2>/dev/null || true && if [ ! -f \"{{lfiPayloadsFile}}\" ]; then echo -e \"/etc/passwd\\n/etc/shadow\\n/etc/hosts\\n/proc/self/environ\" > {{lfiPayloadsFile}}; fi")'
+      - 'exec_cmd("qsreplace FUZZ < \"{{gfLfiFile}}\" 2>/dev/null | sed \"/FUZZ/!d\" | anew -q {{vulnSuiteDir}}/tmp_lfi.txt || true")'
+      - 'exec_cmd("if [ -s \"{{vulnSuiteDir}}/tmp_lfi.txt\" ]; then interlace -tL {{vulnSuiteDir}}/tmp_lfi.txt -threads 10 -c \"ffuf -v -r -t {{ffufThreads}} -rate {{ffufRatelimit}} -H \\\"{{defaultUA}}\\\" -w {{lfiPayloadsFile}} -u _target_ -mr \\\"{{lfiMatchRegex}}\\\"\" 2>/dev/null | grep \"URL\" | sed \"s/| URL | //\" | anew -q {{lfiOutputFile}} || true; fi && echo \"[LFI] Scan completed\" >> {{lfiOutputFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 7: Subdomain Takeover Detection
+  # ===========================================================================
+  - name: takeover-scan
+    type: function
+    pre_condition: '{{enableTakeoverScan}} && file_exists("{{subdomainFile}}")'
+    log: "Running subdomain takeover detection"
+    functions:
+      - 'exec_cmd("nuclei -l {{subdomainFile}} -t ~/nuclei-templates/http/takeovers/ -silent -c 10 -o {{takeoverOutputFile}} 2>/dev/null || true")'
+      - 'exec_cmd("cat {{subdomainFile}} | dnstake -s -o {{vulnSuiteDir}}/dnstake-{{TargetSpace}}.txt 2>/dev/null || true && cat {{vulnSuiteDir}}/dnstake-{{TargetSpace}}.txt >> {{takeoverOutputFile}} 2>/dev/null || true")'
+      - 'sort_unix("{{takeoverOutputFile}}")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 8: Secret Detection (与 reconftw 对齐)
+  # ===========================================================================
+  - name: secret-http-scan
+    type: bash
+    pre_condition: '{{enableSecretScan}} && file_exists("{{httpFile}}")'
+    log: "Running secret detection on HTTP responses"
+    command: |
+      : > {{secretsOutputFile}}
+      mkdir -p {{vulnSuiteDir}}/http-content
+      # 并行下载 HTTP 内容 (提高效率)
+      cat {{httpFile}} | head -200 | xargs -P {{secretThreads}} -I URL sh -c 'filename=$(echo "URL" | md5sum | cut -d" " -f1); curl -s -m 10 "URL" 2>/dev/null > "{{vulnSuiteDir}}/http-content/$filename.txt" || true'
+      # 使用 trufflehog 扫描目录 (与 reconftw 一致)
+      if [ "$(ls -A {{vulnSuiteDir}}/http-content 2>/dev/null)" ]; then
+        trufflehog filesystem {{vulnSuiteDir}}/http-content -j 2>/dev/null | jq -c 2>/dev/null >> {{secretsOutputFile}} || true
+      fi
+      # 清理
+      rm -rf {{vulnSuiteDir}}/http-content 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: secret-js-scan
+    type: bash
+    pre_condition: '{{enableSecretScan}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    log: "Scanning JavaScript files for secrets (trufflehog)"
+    command: |
+      mkdir -p {{vulnSuiteDir}}/js-content
+      # 并行下载 JS 文件 (提高效率)
+      cat {{jsUrlsFile}} | head -100 | xargs -P {{secretThreads}} -I JSURL sh -c 'filename=$(echo "JSURL" | md5sum | cut -d" " -f1); curl -s -m 10 "JSURL" 2>/dev/null > "{{vulnSuiteDir}}/js-content/$filename.js" || true'
+      # 使用 trufflehog 扫描目录
+      if [ "$(ls -A {{vulnSuiteDir}}/js-content 2>/dev/null)" ]; then
+        trufflehog filesystem {{vulnSuiteDir}}/js-content -j 2>/dev/null | jq -c 2>/dev/null >> {{secretsOutputFile}} || true
+      fi
+      # 清理
+      rm -rf {{vulnSuiteDir}}/js-content 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 9: HTTP Request Smuggling
+  # ===========================================================================
+  - name: smuggling-scan
+    type: function
+    pre_condition: '{{enableSmugglingScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{smugglingUrlLimit}}'
+    log: "Running HTTP Request Smuggling checks"
+    functions:
+      - 'exec_cmd(": > {{smugglingOutputFile}}")'
+      - 'exec_cmd("timeout -k 1m {{smugglingTimeout}} cat {{httpFile}} | smugglex -f plain 2>/dev/null | jq -c 2>/dev/null >> {{smugglingOutputFile}} || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 10: Web Cache Poisoning
+  # ===========================================================================
+  - name: webcache-scan
+    type: function
+    pre_condition: '{{enableWebcacheScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{webcacheUrlLimit}}'
+    log: "Running Web Cache Poisoning checks"
+    functions:
+      - 'exec_cmd(": > {{webcacheOutputFile}}")'
+      - 'exec_cmd("timeout -k 1m {{webcacheTimeout}} sh -c \"cd {{toolsDir}}/Web-Cache-Vulnerability-Scanner && Web-Cache-Vulnerability-Scanner -u file:{{httpFile}} -v 0\" 2>/dev/null | anew -q {{webcacheOutputFile}} || true")'
+      - 'exec_cmd("timeout -k 1m {{webcacheTimeout}} toxicache -i {{httpFile}} -o {{vulnSuiteDir}}/webcache_toxicache.txt -t 70 2>/dev/null || true")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 11: 403/4xx Bypass
+  # ===========================================================================
+  - name: 4xx-bypass-scan
+    type: function
+    pre_condition: '{{enable4xxBypassScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{bypassUrlLimit}}'
+    log: "Running 403/4xx bypass checks"
+    functions:
+      - 'exec_cmd(": > {{bypass4xxOutputFile}}")'
+      - 'exec_cmd("if [ -d \"{{toolsDir}}/nomore403\" ]; then timeout -k 1m {{bypassTimeout}} sh -c \"cd {{toolsDir}}/nomore403 && ./nomore403 < {{httpFile}}\" 2>/dev/null >> {{bypass4xxOutputFile}} || true; fi")'
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 12: Fray WAF-aware Payload Testing
+  # ===========================================================================
+  - name: fray-scan
+    type: bash
+    pre_condition: '{{enableFrayScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{frayUrlLimit}}'
+    log: "Running Fray WAF-aware payload testing"
+    command: |
+      mkdir -p {{frayOutputDir}} 2>/dev/null || true
+
+      targets="{{httpFile}}"
+      url_count=$(wc -l < "$targets" 2>/dev/null || echo 0)
+      if [ "$url_count" -gt {{frayUrlLimit}} ]; then
+        head -n {{frayUrlLimit}} "$targets" > .tmp/fray_targets.txt
+        targets=".tmp/fray_targets.txt"
+      fi
+
+      IFS=',' read -ra categories <<< "{{frayCategories}}"
+      for category in "${categories[@]}"; do
+        echo "Testing category: $category"
+        cat "$targets" | fray test -c "$category"  --max {{frayMaxPayloads}} -t {{frayTimeout}} -d {{frayDelay}} --json 2>/dev/null | grep '^{' > ".tmp/fray_${category}.json" || true
+
+        if [ -s ".tmp/fray_${category}.json" ]; then
+          jq -r 'select(.bypassed != null and .bypassed > 0) |
+            "\(.target) [bypass_rate:\(.bypass_rate)] \(.bypassed)/\(.total) payloads bypassed WAF"'  ".tmp/fray_${category}.json" > "{{frayOutputDir}}/${category}.txt" 2>/dev/null || true
+        fi
+      done
+
+      rm -f .tmp/fray_*.json 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 13: Nuclei DAST API Fuzzing
+  # ===========================================================================
+  - name: nuclei-dast-scan
+    type: bash
+    pre_condition: '{{enableNucleiDast}} && file_exists("{{urlExtractFile}}")'
+    log: "Running Nuclei DAST API fuzzing"
+    command: |
+      : > {{nucleiDastOutput}}
+      : > {{nucleiDastJsonOutput}}
+      
+      # 收集目标 URL
+      targets="{{urlExtractFile}}"
+      if [ ! -s "$targets" ]; then
+        # 尝试从其他来源获取
+        if [ -s "{{Output}}/links/links-{{TargetSpace}}.txt" ]; then
+          targets="{{Output}}/links/links-{{TargetSpace}}.txt"
+        elif [ -s "{{httpFile}}" ]; then
+          targets="{{httpFile}}"
+        fi
+      fi
+      
+      if [ -s "$targets" ]; then
+        url_count=$(wc -l < "$targets")
+        if [ "$url_count" -le 1500 ]; then
+          # 运行 Nuclei DAST
+          nuclei -l "$targets" -dast -nh -rl {{nucleiRatelimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
+          
+          if [ -s "{{nucleiDastJsonOutput}}" ]; then
+            jq -r '["[" + .["template-id"] + "] [" + .info.severity + "] " + (.["matched-at"] // .host)] | join(" ")'  {{nucleiDastJsonOutput}} 2>/dev/null > {{nucleiDastOutput}} || true
+          fi
+        else
+          echo "[nuclei-dast] Too many targets ($url_count), limiting to 1500"
+          head -n 1500 "$targets" | nuclei -dast -nh -rl {{nucleiRatelimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 14: Command Injection Detection
+  # ===========================================================================
+  - name: command-injection-scan
+    type: bash
+    pre_condition: '{{enableCommandInjection}} && file_exists("{{gfRceFile}}")'
+    log: "Running command injection detection"
+    command: |
+      : > {{commandInjectionOutput}}
+
+      if [ -s "{{gfRceFile}}" ]; then
+        qsreplace "FUZZ" < {{gfRceFile}} 2>/dev/null | grep "FUZZ" > .tmp/cmdi_targets.txt || true
+
+        if [ -s ".tmp/cmdi_targets.txt" ]; then
+          url_count=$(wc -l < .tmp/cmdi_targets.txt)
+          mkdir -p {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
+
+          if [ "$url_count" -le 500 ]; then
+            commix --batch -m .tmp/cmdi_targets.txt --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
+            if ls {{vulnSuiteDir}}/command-injection-results/*/log.txt 1>/dev/null 2>&1; then
+              grep -r "vulnerable\|injection" {{vulnSuiteDir}}/command-injection-results/ 2>/dev/null > {{commandInjectionOutput}} || true
+            fi
+          else
+            echo "[command-injection] Too many targets ($url_count), limiting to 500"
+            head -n 500 .tmp/cmdi_targets.txt > .tmp/cmdi_targets_limited.txt
+            commix --batch -m .tmp/cmdi_targets_limited.txt --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
+          fi
+        fi
+
+        rm -f .tmp/cmdi_targets.txt .tmp/cmdi_targets_limited.txt 2>/dev/null || true
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 15: SSL/TLS Security Testing (testssl.sh)
+  # ===========================================================================
+  - name: testssl-scan
+    type: bash
+    pre_condition: '{{enableTestSSL}} && file_exists("{{httpFile}}")'
+    log: "Running SSL/TLS security testing with testssl.sh"
+    command: |
+      : > {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
+
+      TESTSSL_BIN=$(command -v testssl.sh 2>/dev/null || echo "{{toolsDir}}/testssl.sh/testssl.sh")
+      grep -E "^https://" {{httpFile}} 2>/dev/null | head -50 | while read url; do
+        host=$(echo "$url" | awk -F/ '{print $3}' | sed 's/:.*$//')
+        port=$(echo "$url" | awk -F/ '{print $3}' | grep -oE ':[0-9]+$' | sed 's/://' || echo "443")
+
+        echo "Testing $host:$port" >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
+        "$TESTSSL_BIN" --quiet --color 0 "$host:$port" 2>/dev/null >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt || true
+        echo "---" >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
+      done
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 16: Password Spraying (spraying equivalent)
+  # ===========================================================================
+  - name: spraying-scan
+    type: bash
+    pre_condition: '{{enableSpraying}} && file_exists("{{portscanGnmapFile}}")'
+    log: "Running password spraying on discovered services"
+    command: |
+      : > {{sprayingOutputFile}}
+      mkdir -p {{sprayingOutputDir}} 2>/dev/null || true
+
+      if [ ! -s "{{portscanGnmapFile}}" ]; then
+        echo "No port scan results available for spraying" > {{sprayingOutputFile}}
+        exit 0
+      fi
+
+      if [ "{{sprayingEngine}}" == "brutus" ]; then
+        brutus_input=""
+        if [ -s "{{Output}}/ipspace/service_fingerprints.jsonl" ]; then
+          brutus_input="{{Output}}/ipspace/service_fingerprints.jsonl"
+        elif [ -s "{{Output}}/probing/naabu_open.txt" ]; then
+          nerva --json -l {{Output}}/probing/naabu_open.txt -o {{vulnSuiteDir}}/service_fp_for_brutus.jsonl 2>/dev/null || true
+          [ -s "{{vulnSuiteDir}}/service_fp_for_brutus.jsonl" ] && brutus_input="{{vulnSuiteDir}}/service_fp_for_brutus.jsonl"
+        fi
+
+        if [ -n "$brutus_input" ]; then
+          brutus_cmd="brutus --json -o {{brutusOutputFile}}"
+          [ -n "{{brutusUsernames}}" ] && [ -s "{{brutusUsernames}}" ] && brutus_cmd="$brutus_cmd -u {{brutusUsernames}}"
+          [ -n "{{brutusPasswords}}" ] && [ -s "{{brutusPasswords}}" ] && brutus_cmd="$brutus_cmd -p {{brutusPasswords}}"
+          timeout -k 1m {{sprayingTimeout}} $brutus_cmd < "$brutus_input" 2>/dev/null || true
+          [ -s "{{brutusOutputFile}}" ] && echo "=== Brutus Results ===" >> {{sprayingOutputFile}} && cat {{brutusOutputFile}} >> {{sprayingOutputFile}}
+        else
+          echo "No service fingerprint data available for Brutus" > {{sprayingOutputFile}}
+        fi
+      else
+        timeout -k 1m {{sprayingTimeout}} brutespray -f {{portscanGnmapFile}} -T {{brutesprayConcurrency}} -o {{sprayingOutputDir}} 2>/dev/null || true
+        if ls {{sprayingOutputDir}}/*.txt 1>/dev/null 2>&1; then
+          echo "=== BruteSpray Results ===" >> {{sprayingOutputFile}}
+          cat {{sprayingOutputDir}}/*.txt 2>/dev/null >> {{sprayingOutputFile}} || true
+        fi
+      fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 16: LLM Vulnerability Analysis
+  # ===========================================================================
+  - name: llm-vuln-analysis
+    type: llm
+    pre_condition: '{{enableLlmAnalysis}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    log: "Running LLM-powered vulnerability analysis"
+    messages:
+      - role: system
+        content: |
+          You are a senior security analyst. Analyze the vulnerability scan results and provide:
+          1. Risk assessment for each finding
+          2. Likely false positives (low confidence findings)
+          3. Business impact analysis
+          4. Remediation priority recommendations
+          
+          Output in Markdown format with clear sections.
+      - role: user
+        content: |
+          Analyze these Nuclei vulnerability scan results for {{Target}}:
+          
+          {{readFile("{{nucleiOutputJsonl}}")}}
+          
+          Provide a concise analysis focusing on:
+          - Critical/High severity findings that need immediate attention
+          - Potential false positives based on the target context
+          - Recommended remediation order
+    exports:
+      analysis: "{{llm_vuln_analysis_content}}"
+
+  - name: save-llm-analysis
+    type: bash
+    pre_condition: "{{enableLlmAnalysis}}"
+    log: "Saving LLM analysis report"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      echo "# LLM Vulnerability Analysis Report" > {{llmAnalysisOutput}}
+      echo "" >> {{llmAnalysisOutput}}
+      echo "**Target:** {{Target}}" >> {{llmAnalysisOutput}}
+      echo "**Generated:** $(date)" >> {{llmAnalysisOutput}}
+      echo "" >> {{llmAnalysisOutput}}
+      echo "{{analysis}}" >> {{llmAnalysisOutput}}
+    on_error:
+      - action: continue
+
+  - name: llm-false-positive-filter
+    type: llm
+    pre_condition: '{{enableLlmAnalysis}} && {{llmFalsePositiveFilter}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    log: "Filtering false positives with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a security analyst. Review vulnerability findings and identify likely false positives.
+          Return a JSON object with:
+          - "valid_findings": array of finding IDs that are likely real vulnerabilities
+          - "false_positives": array of finding IDs that are likely false positives with reasons
+      - role: user
+        content: |
+          Review these vulnerability findings for {{Target}} and identify false positives:
+          
+          {{readFile("{{nucleiOutputJsonl}}")}}
+    response_format:
+      type: json_object
+    exports:
+      fp_filter: "{{llm_false_positive_filter_content}}"
+
+  - name: llm-risk-prioritization
+    type: llm
+    pre_condition: '{{enableLlmAnalysis}} && {{llmRiskPrioritization}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    log: "Prioritizing vulnerabilities by risk with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a security risk analyst. Prioritize vulnerabilities based on:
+          1. Severity and exploitability
+          2. Business impact (data exposure, service disruption)
+          3. Attack complexity
+          4. Likelihood of exploitation
+          
+          Return JSON with "priority_order" array containing finding IDs sorted by risk (highest first).
+      - role: user
+        content: |
+          Prioritize these vulnerabilities for {{Target}}:
+          
+          {{readFile("{{nucleiOutputJsonl}}")}}
+    response_format:
+      type: json_object
+    exports:
+      priority: "{{llm_risk_prioritization_content}}"
+
+  # ===========================================================================
+  # Phase 16: LLM WAF Bypass Strategy (P2)
+  # ===========================================================================
+  - name: llm-waf-bypass-strategy
+    type: llm
+    pre_condition: '{{enableLlmWafBypass}} && file_exists("{{wafDetectionFile}}")'
+    log: "Generating WAF bypass strategies with LLM"
+    messages:
+      - role: system
+        content: |
+          You are a senior red team operator specializing in WAF evasion techniques.
+          Based on the detected WAF, provide specific bypass strategies:
+          
+          1. **WAF Fingerprint Analysis**: Identify the WAF vendor and version
+          
+          2. **Bypass Techniques**: Specific methods for each WAF type
+             - Cloudflare: Unicode encoding, chunked encoding, HTTP smuggling
+             - Akamai: Case variation, null bytes, double encoding
+             - Imperva: Comment insertion, alternative syntax
+             - ModSecurity: Rule-specific bypasses
+             - AWS WAF: JSON parsing tricks, multipart encoding
+          
+          3. **Payload Obfuscation**: Techniques for each attack type
+             - SQLi: Alternative whitespace, case switching, encoding
+             - XSS: JavaScript template literals, event handlers
+             - RCE: Command chaining alternatives, encoding
+          
+          4. **Request Manipulation**: HTTP-level bypasses
+             - Header injection, HTTP version manipulation
+             - Content-Type switching, encoding tricks
+          
+          5. **Rate Limit Bypass**: Timing and distribution strategies
+          
+          Provide specific, tested payloads and techniques.
+          Format in Markdown with code examples.
+      - role: user
+        content: |
+          Generate WAF bypass strategies for {{Target}}:
+          
+          WAF Detection Results:
+          {{readFile("{{wafDetectionFile}}") if file_exists("{{wafDetectionFile}}") else "No WAF detected"}}
+          
+          Blocked requests patterns (if any):
+          {{readFile("{{Output}}/links/blocked-requests-{{TargetSpace}}.txt") if file_exists("{{Output}}/links/blocked-requests-{{TargetSpace}}.txt") else "No blocked request data"}}
+          
+          Known vulnerabilities to test:
+          {{readFile("{{nucleiOutputJsonl}}") if file_exists("{{nucleiOutputJsonl}}") else "No vulnerability data"}}
+          
+          Provide specific bypass techniques for this target.
+    exports:
+      waf_bypass_strategy: "{{llm_waf_bypass_strategy_content}}"
+
+  - name: save-llm-waf-bypass-report
+    type: bash
+    pre_condition: "{{enableLlmWafBypass}}"
+    log: "Saving LLM WAF bypass strategy report"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      echo "# WAF Bypass Strategy - {{Target}}" > {{llmWafBypassReport}}
+      echo "" >> {{llmWafBypassReport}}
+      echo "**Generated:** $(date)" >> {{llmWafBypassReport}}
+      echo "" >> {{llmWafBypassReport}}
+      echo "{{waf_bypass_strategy}}" >> {{llmWafBypassReport}}
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 17: Summary
+  # ===========================================================================
+  - name: vuln-suite-summary
+    type: function
+    log: "Vulnerability Suite Scan Summary"
+    functions:
+      - 'db_total_assets("{{nucleiOutputJsonl}}")'
