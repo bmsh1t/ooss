@@ -223,14 +223,21 @@ steps:
         # 提取 markdown 代码块中的 JSON
         echo '{{validation_json}}' | sed 's/```json//g; s/```//g' | jq '.' > {{vulnValidationOutput}} 2>/dev/null || echo '{{validation_json}}' > {{vulnValidationOutput}}
         
-        # 验证 JSON 格式
+        # 验证 JSON 格式和必要字段
         if jq empty {{vulnValidationOutput}} 2>/dev/null; then
-          CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-          FP=$(jq -r '.validation_summary.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-          MANUAL=$(jq -r '.validation_summary.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-          echo "[Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
+          # 验证必要字段是否存在
+          if jq -e '.validation_summary' {{vulnValidationOutput}} > /dev/null 2>&1; then
+            CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+            FP=$(jq -r '.validation_summary.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+            MANUAL=$(jq -r '.validation_summary.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+            echo "[Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
+          else
+            echo "[Vuln Validation] Warning: Required fields missing in JSON, using default"
+            echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
+          fi
         else
-          echo "[Vuln Validation] Warning: Invalid JSON output"
+          echo "[Vuln Validation] Warning: Invalid JSON output, creating empty structure"
+          echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
         fi
       else
         echo "[Vuln Validation] No validation data, creating empty structure"

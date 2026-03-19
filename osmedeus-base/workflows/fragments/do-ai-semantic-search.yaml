@@ -202,9 +202,18 @@ steps:
           ;;
       esac
       
-      # 检查 API key
-      if [ -z "$API_KEY" ] || [ "$API_KEY" = "{{JINA_API_KEY}}" ] || [ "$API_KEY" = "{{OPENAI_API_KEY}}" ] || [ "$API_KEY" = "{{AZURE_OPENAI_API_KEY}}" ]; then
-        echo "[Semantic] API key not set for $PROVIDER, skipping vector embeddings"
+      # 检查 API key - 确保不是占位符或空值
+      # 过滤掉常见的占位符格式
+      API_KEY_ACTUAL="$API_KEY"
+      if [ -z "$API_KEY_ACTUAL" ] || \
+         echo "$API_KEY_ACTUAL" | grep -qiE '^\{\{.*\}\}$' || \
+         [ "$API_KEY_ACTUAL" = "{{JINA_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "{{OPENAI_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "{{AZURE_OPENAI_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
+         [ "$API_KEY_ACTUAL" = "sk-" ]; then
+        echo "[Semantic] API key not configured for $PROVIDER, skipping vector embeddings"
+        echo "[Semantic] Please set JINA_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_API_KEY environment variable"
         exit 0
       fi
       
@@ -276,9 +285,16 @@ steps:
           ;;
       esac
       
-      # 检查 API key
-      if [ -z "$API_KEY" ] || [ "$API_KEY" = "{{JINA_API_KEY}}" ] || [ "$API_KEY" = "{{OPENAI_API_KEY}}" ] || [ "$API_KEY" = "{{AZURE_OPENAI_API_KEY}}" ]; then
-        echo "[Semantic] API key not set for $PROVIDER, will use LLM-based search"
+      # 检查 API key - 确保不是占位符或空值
+      API_KEY_ACTUAL="$API_KEY"
+      if [ -z "$API_KEY_ACTUAL" ] || \
+         echo "$API_KEY_ACTUAL" | grep -qiE '^\{\{.*\}\}$' || \
+         [ "$API_KEY_ACTUAL" = "{{JINA_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "{{OPENAI_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "{{AZURE_OPENAI_API_KEY}}" ] || \
+         [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
+         [ "$API_KEY_ACTUAL" = "sk-" ]; then
+        echo "[Semantic] API key not configured for $PROVIDER, will use LLM-based search"
         exit 0
       fi
       

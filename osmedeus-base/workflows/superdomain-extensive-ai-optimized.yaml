@@ -191,9 +191,10 @@ modules:
     pre_condition: "{{enablePreScanDecision}}"
 
   # AI 语义搜索 - RAG 功能，跨目标知识共享
+  # 依赖 http-probe 可以更早开始并行执行
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
-    depends_on: [fingerprint, content-analysis]
+    depends_on: [http-probe]
     pre_condition: "{{enableSemanticSearch}}"
     params:
       searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
