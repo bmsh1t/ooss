@@ -1,0 +1,144 @@
+# =============================================================================
+# AI WAF 规避模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 动态分析 WAF 并生成规避策略
+# - 识别 WAF 类型和规则
+# - 提供绕过方法
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 模式识别，稳定优先
+# =============================================================================
+
+kind: module
+name: ai-waf-bypass
+description: AI-powered WAF bypass using agent-acp - analyze WAF and generate evasion strategies
+
+params:
+  - name: wafBypassOutput
+    default: "{{Output}}/ai-analysis/waf-bypass-{{TargetSpace}}.json"
+  - name: wafRulesFile
+    default: "{{Output}}/ai-analysis/waf-rules-{{TargetSpace}}.txt"
+
+  # 输入文件
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enableWafBypass
+    type: bool
+    default: false
+  - name: agentTimeout
+    type: string
+    default: "15m"
+
+steps:
+  - name: prepare-waf-bypass
+    type: function
+    pre_condition: "{{enableWafBypass}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI WAF bypass analysis for {{Target}}")'
+
+  - name: ai-analyze-waf
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enableWafBypass}}"
+    on_error:
+      action: continue
+      log: "WAF bypass analysis failed, continuing without bypass strategies"
+    messages:
+      - role: system
+        content: |
+          你是一个 Web 安全专家，专注于 WAF 规避技术。
+          你的任务是分析目标 WAF 的特征，生成规避策略。
+          
+          分析原则：
+          1. 识别 WAF 类型（如 Cloudflare, Akamai, AWS WAF 等）
+          2. 分析 WAF 规则特征
+          3. 提供具体的绕过方法
+          4. 考虑实际可行性
+          
+          重要约束：
+          - 返回结构化的 JSON 输出
+          - 每个绕过方法必须可执行
+
+      - role: user
+        content: |
+          请分析目标 {{Target}} 的 WAF 特征，生成规避策略。
+
+          ## HTTP 探测结果
+          {% if file_exists("{{httpFile}}") %}
+          {{read_lines("{{httpFile}}")[:30]}}
+          {% else %}无{% endif %}
+
+          ## 指纹信息
+          {% if file_exists("{{fingerprintFile}}") %}
+          {{read_lines("{{fingerprintFile}}")[:20]}}
+          {% else %}未知{% endif %}
+
+          ## 已检测的 WAF
+          {% if file_exists("{{wafFile}}") %}
+          {{read_lines("{{wafFile}}")[:10]}}
+          {% else %}未检测到 WAF{% endif %}
+
+          请输出 JSON 格式的 WAF 规避策略保存到 {{wafBypassOutput}}：
+          ```json
+          {
+            "waf_analysis_summary": {
+              "waf_detected": true,
+              "waf_type": "WAF类型",
+              "confidence": 0.9,
+              "rules_identified": ["规则1", "规则2"]
+            },
+            "bypass_techniques": [
+              {
+                "technique": "绕过技术名称",
+                "description": "技术描述",
+                "example_request": "示例请求修改",
+                "expected_success_rate": "高/中/低",
+                "risk_level": "风险等级"
+              }
+            ],
+            "recommended_settings": {
+              "rate_limit": "建议速率",
+              "request_delay": "请求间隔",
+              "recommended_tools": ["工具1", "工具2"]
+            }
+          }
+          ```
+
+          只输出 JSON。
+
+    exports:
+      waf_bypass_json: "{{acp_output}}"
+
+  - name: save-waf-bypass-results
+    type: bash
+    pre_condition: "{{enableWafBypass}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：处理可能的空输出
+      if [ -n "{{waf_bypass_json}}" ] && [ "{{waf_bypass_json}}" != "null" ] && [ "{{waf_bypass_json}}" != "{}" ]; then
+        echo '{{waf_bypass_json}}' > {{wafBypassOutput}}
+      else
+        echo '{"waf_analysis_summary":{"waf_detected":false},"bypass_techniques":[]}' > {{wafBypassOutput}}
+      fi
+
+      # 提取 WAF 规则
+      if [ -f "{{wafBypassOutput}}" ] && jq empty {{wafBypassOutput}} 2>/dev/null; then
+        jq -r '.bypass_techniques[].technique' {{wafBypassOutput}} 2>/dev/null > {{wafRulesFile}} || true
+      fi
+
+  - name: log-waf-bypass-complete
+    type: function
+    pre_condition: "{{enableWafBypass}}"
+    functions:
+      - 'log_info("AI WAF bypass analysis completed for {{Target}}")'

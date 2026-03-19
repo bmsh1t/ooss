@@ -1,0 +1,268 @@
+# =============================================================================
+# AI 攻击链分析模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 分析可串联的漏洞，构建攻击路径
+# - 识别关键入口点和依赖关系
+# - 评估攻击链的可行性和影响
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 增加容错机制
+# =============================================================================
+
+kind: module
+name: ai-attack-chain
+description: AI-powered attack chain analysis using agent-acp - identify exploitable vulnerability chains
+
+params:
+  - name: attackChainOutput
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: attackChainsFile
+    default: "{{Output}}/ai-analysis/attack-chains.txt"
+  - name: criticalPathsFile
+    default: "{{Output}}/ai-analysis/critical-paths.txt"
+
+  # 输入文件
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: secretsFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: ssrfFile
+    default: "{{Output}}/vuln-scan-suite/ssrf-{{TargetSpace}}.txt"
+  - name: sqliFile
+    default: "{{Output}}/vuln-scan-suite/sqli-{{TargetSpace}}.txt"
+  - name: takeoverFile
+    default: "{{Output}}/vuln-scan-suite/takeover-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enableAttackChain
+    type: bool
+    default: true
+  - name: agentTimeout
+    type: string
+    default: "{{agentTimeout}}"
+
+steps:
+  - name: prepare-attack-chain
+    type: function
+    pre_condition: "{{enableAttackChain}}"
+    log: "Preparing attack chain analysis"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI attack chain analysis for {{Target}}")'
+
+  - name: collect-vuln-data
+    type: bash
+    pre_condition: "{{enableAttackChain}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 优先使用已验证的漏洞数据
+      if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
+        echo "[Attack Chain] Using validated vulnerability data"
+        cat {{vulnValidationFile}} > {{Output}}/ai-analysis/attack-chain-input.json
+      else
+        # 否则使用原始扫描数据构建输入
+        cat > {{Output}}/ai-analysis/attack-chain-input.json << 'EOF'
+        {
+          "source": "direct_scan",
+          "critical": [],
+          "high": [],
+          "secrets": [],
+          "confirmed": []
+        }
+        EOF
+
+        # 收集 Critical 漏洞
+        if [ -f "{{nucleiCriticalFile}}" ]; then
+          jq -rn 'input | split("\n") | map(select(length > 0))' < {{nucleiCriticalFile}} 2>/dev/null || cat {{nucleiCriticalFile}} >> {{Output}}/ai-analysis/attack-chain-input.json
+        fi
+      fi
+
+      # 统计可用的漏洞数据
+      CHAIN_INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/attack-chain-input.json 2>/dev/null || echo 0)
+      echo "[Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
+
+  - name: ai-analyze-attack-chains
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enableAttackChain}}"
+    on_error:
+      action: continue
+      log: "Attack chain analysis failed, continuing with empty results"
+    messages:
+      - role: system
+        content: |
+          你是一个资深红队专家，专注于攻击链分析和路径规划。
+          你的任务是分析漏洞之间的关联性，识别可串联的攻击路径。
+          
+          分析原则：
+          1. 识别漏洞之间的依赖关系（前置条件）
+          2. 找到从入口点到目标的最短攻击路径
+          3. 评估每个攻击链的可行性和影响
+          4. 提供具体的攻击步骤和预期结果
+          
+          重要约束：
+          - 必须返回结构化的 JSON 输出
+          - 每个攻击链必须包含具体可执行的步骤
+          - 识别关键路径和单点故障
+
+      - role: user
+        content: |
+          请分析目标 {{Target}} 的漏洞数据，识别可串联的攻击链。
+
+          ## 技术栈
+          {% if file_exists("{{fingerprintFile}}") %}
+          {{read_lines("{{fingerprintFile}}")[:10]}}
+          {% else %}未知{% endif %}
+
+          ## 已验证漏洞（优先使用）
+          {% if file_exists("{{vulnValidationFile}}") %}
+          {{read_lines("{{vulnValidationFile}}")[:50]}}
+          {% else %}无验证数据，使用原始扫描结果{% endif %}
+
+          ## Critical 漏洞
+          {% if file_exists("{{nucleiCriticalFile}}") %}
+          {{read_lines("{{nucleiCriticalFile}}")[:10]}}
+          {% else %}无{% endif %}
+
+          ## High 漏洞
+          {% if file_exists("{{nucleiHighFile}}") %}
+          {{read_lines("{{nucleiHighFile}}")[:10]}}
+          {% else %}无{% endif %}
+
+          ## Secrets
+          {% if file_exists("{{secretsFile}}") %}
+          {{read_lines("{{secretsFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## SQLi
+          {% if file_exists("{{sqliFile}}") %}
+          {{read_lines("{{sqliFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## Takeover
+          {% if file_exists("{{takeoverFile}}") %}
+          {{read_lines("{{takeoverFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## 已确认可利用的 URL
+          {% if file_exists("{{confirmedUrlsFile}}") %}
+          {{read_lines("{{confirmedUrlsFile}}")[:20]}}
+          {% else %}无{% endif %}
+
+          请输出 JSON 格式的攻击链分析保存到 {{attackChainOutput}}：
+          ```json
+          {
+            "attack_chain_summary": {
+              "total_chains": 0,
+              "critical_chains": 0,
+              "high_impact_chains": 0,
+              "most_likely_entry_points": ["入口点1", "入口点2"]
+            },
+            "attack_chains": [
+              {
+                "chain_id": "chain-1",
+                "chain_name": "链名称（如：SQL注入→提权→RCE）",
+                "entry_point": {
+                  "vulnerability": "入口漏洞",
+                  "url": "目标URL",
+                  "severity": "critical/high",
+                  "prerequisites": ["前置条件"]
+                },
+                "chain_steps": [
+                  {
+                    "step": 1,
+                    "action": "执行操作",
+                    "vulnerability": "利用的漏洞",
+                    "result": "预期结果",
+                    "command": "具体命令（如果有）"
+                  }
+                ],
+                "final_objective": "最终目标（如：获取数据库访问）",
+                "difficulty": "高/中/低",
+                "impact": "影响描述",
+                "estimated_time": "预计耗时",
+                "success_probability": 0.8,
+                "mitigation": "缓解措施"
+              }
+            ],
+            "critical_paths": [
+              {
+                "path": ["入口1", "漏洞2", "目标"],
+                "total_risk": "高/中/低",
+                "weakness": "关键弱点"
+              }
+            ],
+            "defense_recommendations": ["建议1", "建议2"]
+          }
+          ```
+
+          只输出 JSON，确保格式完全正确。
+
+    exports:
+      attack_chain_json: "{{acp_output}}"
+
+  - name: save-attack-chain-results
+    type: bash
+    pre_condition: "{{enableAttackChain}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：处理可能的空输出
+      if [ -n "{{attack_chain_json}}" ] && [ "{{attack_chain_json}}" != "null" ] && [ "{{attack_chain_json}}" != "{}" ]; then
+        echo '{{attack_chain_json}}' > {{attackChainOutput}}
+        
+        if jq empty {{attackChainOutput}} 2>/dev/null; then
+          CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
+          CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
+          echo "[Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
+        else
+          echo "[Attack Chain] Warning: Invalid JSON output"
+        fi
+      else
+        echo "[Attack Chain] No analysis data, creating empty structure"
+        echo '{"attack_chain_summary":{"total_chains":0,"critical_chains":0,"high_impact_chains":0,"most_likely_entry_points":[]},"attack_chains":[]}' > {{attackChainOutput}}
+      fi
+
+  - name: extract-attack-chain-data
+    type: bash
+    pre_condition: "{{enableAttackChain}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：检查文件是否存在
+      if [ -f "{{attackChainOutput}}" ] && jq empty {{attackChainOutput}} 2>/dev/null; then
+        # 提取攻击链摘要
+        jq -r '.attack_chains[] | "## \(.chain_name)\nEntry: \(.entry_point.vulnerability)\nDifficulty: \(.difficulty)\nImpact: \(.impact)\n" + (.chain_steps | .[] | "- Step \(.step): \(.action) -> \(.result)\n") + "\n---"' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
+
+        # 提取关键路径
+        jq -r '.critical_paths[] | "Path: \(.path | join(" -> "))\nRisk: \(.total_risk)\nWeakness: \(.weakness)\n"' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
+
+        # 提取入口点列表（用于后续路径规划）
+        jq -r '.attack_chain_summary.most_likely_entry_points[]' {{attackChainOutput}} 2>/dev/null > {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt || true
+      else
+        echo "# No attack chain data" > {{attackChainsFile}}
+        echo "# No critical paths" > {{criticalPathsFile}}
+        touch {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt
+      fi
+
+      echo "[Attack Chain] Extraction complete"
+
+  - name: log-attack-chain-complete
+    type: function
+    pre_condition: "{{enableAttackChain}}"
+    functions:
+      - 'log_info("AI attack chain analysis completed for {{Target}}")'

@@ -1,0 +1,296 @@
+# =============================================================================
+# AI 攻击路径规划模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 基于攻击链分析生成详细攻击计划
+# - 分解攻击步骤为可执行命令
+# - 生成时间线和资源需求
+# - 提供防御建议
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 增加容错机制
+# =============================================================================
+
+kind: module
+name: ai-path-planning
+description: AI-powered attack path planning using agent-acp - detailed execution plans for attack chains
+
+params:
+  - name: pathPlanningOutput
+    default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
+  - name: attackPlanFile
+    default: "{{Output}}/ai-analysis/attack-plan-{{TargetSpace}}.md"
+  - name: executionChecklistFile
+    default: "{{Output}}/ai-analysis/execution-checklist-{{TargetSpace}}.txt"
+
+  # 输入文件
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+  - name: wafFile
+    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enablePathPlanning
+    type: bool
+    default: true
+  - name: agentTimeout
+    type: string
+    default: "{{agentTimeout}}"
+
+steps:
+  - name: prepare-path-planning
+    type: function
+    pre_condition: "{{enablePathPlanning}}"
+    log: "Preparing attack path planning"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI attack path planning for {{Target}}")'
+
+  - name: collect-planning-data
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 优先使用攻击链分析结果
+      if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
+        echo "[Path Planning] Using attack chain analysis data"
+      else
+        echo "[Path Planning] No attack chain data, generating standalone plan"
+        cat > {{attackChainFile}} << 'EOF'
+        {
+          "error": "no_attack_chain_data"
+        }
+        EOF
+      fi
+
+  - name: ai-generate-attack-plan
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enablePathPlanning}}"
+    on_error:
+      action: continue
+      log: "Path planning failed, continuing with basic plan"
+    messages:
+      - role: system
+        content: |
+          你是一个资深红队行动规划专家，专注于攻击执行规划。
+          你的任务是将攻击链转化为详细的、可执行的行动计划。
+          
+          规划原则：
+          1. 每个步骤必须有明确的执行命令
+          2. 考虑实际操作环境和限制
+          3. 提供备选方案和回退策略
+          4. 评估执行风险和成功概率
+          
+          重要约束：
+          - 必须返回结构化的 JSON 输出
+          - 每个阶段必须有具体的时间估计
+          - 提供验证步骤确认攻击成功
+
+      - role: user
+        content: |
+          请基于以下攻击链分析，为目标 {{Target}} 生成详细的执行计划。
+
+          ## 攻击链分析结果
+          {% if file_exists("{{attackChainFile}}") %}
+          {{read_lines("{{attackChainFile}}")[:80]}}
+          {% else %}无可用攻击链数据{% endif %}
+
+          ## 已验证漏洞
+          {% if file_exists("{{vulnValidationFile}}") %}
+          {{read_lines("{{vulnValidationFile}}")[:30]}}
+          {% else %}无{% endif %}
+
+          ## 入口点
+          {% if file_exists("{{entryPointsFile}}") %}
+          {{read_lines("{{entryPointsFile}}")[:20]}}
+          {% else %}无{% endif %}
+
+          ## 技术栈
+          {% if file_exists("{{fingerprintFile}}") %}
+          {{read_lines("{{fingerprintFile}}")[:10]}}
+          {% else %}未知{% endif %}
+
+          ## WAF 状态
+          {% if file_exists("{{wafFile}}") %}
+          {{read_lines("{{wafFile}}")[:10]}}
+          {% else %}未检测到 WAF{% endif %}
+
+          请输出 JSON 格式的攻击计划保存到 {{pathPlanningOutput}}：
+          ```json
+          {
+            "plan_summary": {
+              "total_phases": 0,
+              "estimated_total_time": "总耗时",
+              "success_probability": 0.85,
+              "risk_level": "高/中/低",
+              "resources_needed": ["工具1", "工具2"]
+            },
+            "execution_phases": [
+              {
+                "phase": 1,
+                "phase_name": "阶段名称（如：信息收集）",
+                "objectives": ["目标1", "目标2"],
+                "actions": [
+                  {
+                    "action_id": "action-1",
+                    "description": "操作描述",
+                    "command": "具体执行命令",
+                    "expected_result": "预期结果",
+                    "verification": "如何验证成功",
+                    "timeout": "超时时间",
+                    "retry_on_failure": true,
+                    "fallback": "失败时的备选方案"
+                  }
+                ],
+                "tools_required": ["工具列表"],
+                "estimated_time": "预计耗时",
+                "risk_factors": ["风险因素"],
+                "success_criteria": "成功标准"
+              }
+            ],
+            "execution_order": {
+              "sequence": ["phase1", "phase2"],
+              "dependencies": {
+                "phase2": ["phase1"],
+                "phase3": ["phase2"]
+              },
+              "parallelizable": ["phase1"]
+            },
+            "verification_checklist": [
+              {
+                "step": 1,
+                "verification_point": "验证点描述",
+                "command": "验证命令",
+                "expected": "预期结果",
+                "critical": true
+              }
+            ],
+            "rollback_plan": "如果失败如何回退",
+            "contingency": "备选方案描述"
+          }
+          ```
+
+          只输出 JSON，确保格式完全正确。
+
+    exports:
+      path_planning_json: "{{acp_output}}"
+
+  - name: save-path-planning-results
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：处理可能的空输出
+      if [ -n "{{path_planning_json}}" ] && [ "{{path_planning_json}}" != "null" ] && [ "{{path_planning_json}}" != "{}" ]; then
+        echo '{{path_planning_json}}' > {{pathPlanningOutput}}
+        
+        if jq empty {{pathPlanningOutput}} 2>/dev/null; then
+          PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null || echo 0)
+          TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null || echo "unknown")
+          echo "[Path Planning] Total phases: $PHASES, Est. time: $TIME"
+        else
+          echo "[Path Planning] Warning: Invalid JSON output"
+        fi
+      else
+        echo "[Path Planning] No planning data, creating empty structure"
+        echo '{"plan_summary":{"total_phases":0,"estimated_total_time":"unknown","success_probability":0,"risk_level":"中"},"execution_phases":[]}' > {{pathPlanningOutput}}
+      fi
+
+  - name: generate-attack-plan-markdown
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+      # 构建报告
+      cat > {{attackPlanFile}} << 'HEADER'
+      # AI 攻击执行计划
+      ## 目标
+      TARGET_PLACEHOLDER
+      
+      ## 生成时间
+      TIMESTAMP_PLACEHOLDER
+      
+      ---
+      
+      ## 执行摘要
+      HEADER
+
+      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" {{attackPlanFile}}
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$TIMESTAMP|g" {{attackPlanFile}}
+
+      # 容错：检查文件是否存在
+      if [ -f "{{pathPlanningOutput}}" ] && jq empty {{pathPlanningOutput}} 2>/dev/null; then
+        # 添加摘要信息
+        jq -r '.plan_summary | "**总阶段数:** \(.total_phases)\n**预计时间:** \(.estimated_total_time)\n**成功率:** \(.success_probability)\n**风险等级:** \(.risk_level)\n**所需资源:** \(.resources_needed | join(", "))"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
+
+        echo "" >> {{attackPlanFile}}
+        echo "---" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+        echo "## 执行阶段" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+
+        # 添加各阶段详情
+        jq -r '.execution_phases[] | "### Phase \(.phase): \(.phase_name)\n\n**目标:** \(.objectives | join(", "))\n**预计时间:** \(.estimated_time)\n**所需工具:** \(.tools_required | join(", "))\n**成功标准:** \(.success_criteria)\n\n**操作步骤:**\n" + (.actions | .[] | "- **[\(.action_id)]** \(.description)\n  - Command: `\(.command)`\n  - Expected: \(.expected_result)\n  - Verification: \(.verification)\n  - Timeout: \(.timeout)\n")' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
+
+        echo "" >> {{attackPlanFile}}
+        echo "---" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+        echo "## 验证清单" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+
+        jq -r '.verification_checklist[] | "\(.step). [CRITICAL] " * (.critical | if . then "**" else "" end) + "\(.verification_point)\n   Command: `\(.command)`\n   Expected: \(.expected)\n"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
+
+        echo "" >> {{attackPlanFile}}
+        echo "---" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+        echo "## 回退计划" >> {{attackPlanFile}}
+        echo "" >> {{attackPlanFile}}
+        jq -r '.rollback_plan' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
+      else
+        echo "无可用的攻击计划数据" >> {{attackPlanFile}}
+      fi
+
+      echo "" >> {{attackPlanFile}}
+      echo "*此计划由 AI 攻击路径规划模块自动生成*" >> {{attackPlanFile}}
+
+      echo "[Path Planning] Attack plan saved to {{attackPlanFile}}"
+
+  - name: generate-execution-checklist
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：检查文件是否存在
+      if [ -f "{{pathPlanningOutput}}" ] && jq empty {{pathPlanningOutput}} 2>/dev/null; then
+        # 生成可执行的检查清单
+        jq -r '.verification_checklist[] | "\(.step). [\(.critical ? "CRITICAL" : "OPTIONAL")] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
+      else
+        echo "# No execution checklist available" > {{executionChecklistFile}}
+      fi
+
+      echo "[Path Planning] Execution checklist saved"
+
+  - name: log-path-planning-complete
+    type: function
+    pre_condition: "{{enablePathPlanning}}"
+    functions:
+      - 'log_info("AI attack path planning completed for {{Target}}")'

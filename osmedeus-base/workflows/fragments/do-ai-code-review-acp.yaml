@@ -1,0 +1,168 @@
+# =============================================================================
+# AI 代码审查模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 审查代码中的安全漏洞
+# - 识别潜在的 exploit
+# - 提供修复建议
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 增加容错机制
+# =============================================================================
+
+kind: module
+name: ai-code-review
+description: AI-powered code review using agent-acp - identify security vulnerabilities in code
+
+params:
+  - name: codeReviewOutput
+    default: "{{Output}}/ai-analysis/code-review-{{TargetSpace}}.json"
+  - name: codeReviewReport
+    default: "{{Output}}/ai-analysis/code-review-report-{{TargetSpace}}.md"
+
+  # 输入文件
+  - name: sourceCodeDir
+    default: "{{Output}}/source-code"
+  - name: vulnFindingsFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enableLlmCodeReview
+    type: bool
+    default: false
+  - name: agentTimeout
+    type: string
+    default: "30m"
+
+steps:
+  - name: prepare-code-review
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI code review for {{Target}}")'
+
+  - name: ai-review-code
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enableLlmCodeReview}}"
+    allowed_paths:
+      - "{{Output}}"
+      - "{{sourceCodeDir}}"
+    acp_config:
+      write_enabled: true
+    on_error:
+      action: continue
+      log: "Code review failed, continuing without detailed review"
+    messages:
+      - role: system
+        content: |
+          你是一个安全代码审查专家，专注于发现代码中的安全漏洞。
+          你的任务是审查代码，识别潜在的安全问题。
+          
+          审查原则：
+          1. 识别 OWASP Top 10 漏洞
+          2. 检查输入验证和输出编码
+          3. 分析认证和授权机制
+          4. 检查敏感信息处理
+          5. 提供具体的修复建议
+          
+          重要约束：
+          - 返回结构化的 JSON 输出
+          - 每个漏洞必须包含位置和修复建议
+
+      - role: user
+        content: |
+          请审查目标 {{Target}} 的代码，识别安全漏洞。
+
+          {% if file_exists("{{vulnFindingsFile}}") %}
+          ## 已发现的漏洞
+          {{read_lines("{{vulnFindingsFile}}")[:50]}}
+          {% else %}无已发现漏洞{% endif %}
+
+          请输出 JSON 格式的代码审查结果保存到 {{codeReviewOutput}}：
+          ```json
+          {
+            "code_review_summary": {
+              "files_reviewed": 0,
+              "total_issues": 0,
+              "critical_issues": 0,
+              "high_issues": 0,
+              "medium_issues": 0
+            },
+            "findings": [
+              {
+                "severity": "critical/high/medium/low",
+                "category": "漏洞类别",
+                "title": "漏洞标题",
+                "description": "漏洞描述",
+                "file": "文件路径",
+                "line": "行号",
+                "code": "相关代码",
+                "impact": "影响分析",
+                "remediation": "修复建议",
+                "cwe_id": "CWE-XXX"
+              }
+            ],
+            "secure_coding_recommendations": ["安全编码建议"]
+          }
+          ```
+
+          只输出 JSON。
+
+    exports:
+      code_review_json: "{{acp_output}}"
+
+  - name: save-code-review-results
+    type: bash
+    pre_condition: "{{enableLlmCodeReview}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：处理可能的空输出
+      if [ -n "{{code_review_json}}" ] && [ "{{code_review_json}}" != "null" ] && [ "{{code_review_json}}" != "{}" ]; then
+        echo '{{code_review_json}}' > {{codeReviewOutput}}
+        
+        if jq empty {{codeReviewOutput}} 2>/dev/null; then
+          TOTAL=$(jq -r '.code_review_summary.total_issues // 0' {{codeReviewOutput}} 2>/dev/null || echo 0)
+          CRITICAL=$(jq -r '.code_review_summary.critical_issues // 0' {{codeReviewOutput}} 2>/dev/null || echo 0)
+          echo "[Code Review] Total issues: $TOTAL, Critical: $CRITICAL"
+        fi
+      else
+        echo '{"code_review_summary":{"files_reviewed":0,"total_issues":0},"findings":[]}' > {{codeReviewOutput}}
+      fi
+
+      # 生成 Markdown 报告
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+      cat > {{codeReviewReport}} << 'HEADER'
+      # AI 代码安全审查报告
+      ## 目标
+      TARGET_PLACEHOLDER
+      ## 生成时间
+      TIMESTAMP_PLACEHOLDER
+      HEADER
+
+      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" {{codeReviewReport}}
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$TIMESTAMP|g" {{codeReviewReport}}
+
+      if [ -f "{{codeReviewOutput}}" ] && jq empty {{codeReviewOutput}} 2>/dev/null; then
+        echo "" >> {{codeReviewReport}}
+        echo "## 审查摘要" >> {{codeReviewReport}}
+        echo "" >> {{codeReviewReport}}
+        jq -r '.code_review_summary | "**文件审查数:** \(.files_reviewed)\n**问题总数:** \(.total_issues)\n**严重:** \(.critical_issues) | **高:** \(.high_issues) | **中:** \(.medium_issues)"' {{codeReviewOutput}} 2>/dev/null >> {{codeReviewReport}} || true
+
+        echo "" >> {{codeReviewReport}}
+        echo "## 漏洞详情" >> {{codeReviewReport}}
+        echo "" >> {{codeReviewReport}}
+        jq -r '.findings[] | "### \(.severity | upper) - \(.title)\n\n**文件:** \(.file):\(.line)\n**类别:** \(.category)\n**描述:** \(.description)\n**影响:** \(.impact)\n**修复建议:** \(.remediation)\n\n---"' {{codeReviewOutput}} 2>/dev/null >> {{codeReviewReport}} || true
+      else
+        echo "无可用的代码审查数据" >> {{codeReviewReport}}
+      fi
+
+  - name: log-code-review-complete
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'log_info("AI code review completed for {{Target}}")'

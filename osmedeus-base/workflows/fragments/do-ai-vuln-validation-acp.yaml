@@ -1,0 +1,221 @@
+# =============================================================================
+# AI 漏洞验证模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 验证 Nuclei 发现的漏洞是否真实
+# - 识别假阳性
+# - 生成手动验证命令
+# - 风险评估和优先级排序
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 增加容错机制，API 不稳时也能运行
+# =============================================================================
+
+kind: module
+name: ai-vuln-validation
+description: AI-powered vulnerability validation using agent-acp - verify findings and identify false positives
+
+params:
+  - name: vulnValidationOutput
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: validatedVulnsFile
+    default: "{{Output}}/ai-analysis/validated-vulns-{{TargetSpace}}.json"
+  - name: falsePositivesFile
+    default: "{{Output}}/ai-analysis/false-positives-{{TargetSpace}}.txt"
+  - name: manualVerifyCommandsFile
+    default: "{{Output}}/ai-analysis/validation/manual-commands.sh"
+
+  # 输入文件
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: secretsFile
+    default: "{{Output}}/vuln-scan-suite/secrets-{{TargetSpace}}.txt"
+  - name: ssrfFile
+    default: "{{Output}}/vuln-scan-suite/ssrf-{{TargetSpace}}.txt"
+  - name: sstiFile
+    default: "{{Output}}/vuln-scan-suite/ssti-{{TargetSpace}}.txt"
+  - name: sqliFile
+    default: "{{Output}}/vuln-scan-suite/sqli-{{TargetSpace}}.txt"
+  - name: takeoverFile
+    default: "{{Output}}/vuln-scan-suite/takeover-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+
+  # 配置
+  - name: enableVulnValidation
+    type: bool
+    default: true
+  - name: agentTimeout
+    type: string
+    default: "{{agentTimeout}}"
+
+steps:
+  - name: prepare-vuln-validation
+    type: function
+    pre_condition: "{{enableVulnValidation}}"
+    log: "Preparing vulnerability validation"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis/validation")'
+      - 'log_info("Starting AI vulnerability validation for {{Target}}")'
+
+  - name: ai-validate-vulns
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enableVulnValidation}}"
+    on_error:
+      action: continue
+      log: "Vuln validation failed, continuing with unvalidated data"
+    messages:
+      - role: system
+        content: |
+          你是一个资深渗透测试专家，专注于漏洞验证。
+          你的任务是对扫描结果进行验证，判断漏洞是否真实存在，识别假阳性。
+          
+          验证原则：
+          1. 每个漏洞必须有明确的验证状态（真实/假阳性/需手动验证）
+          2. 对于真实漏洞，提供具体的验证方法和命令
+          3. 对于假阳性，说明原因
+          4. 按风险等级排序输出
+          
+          重要约束：
+          - 必须返回结构化的 JSON 输出
+          - 每个漏洞必须有置信度评分
+          - 提供可执行的验证命令
+          
+      - role: user
+        content: |
+          请验证目标 {{Target}} 的漏洞发现，判断其真实性并识别假阳性。
+
+          ## 技术栈背景
+          {% if file_exists("{{fingerprintFile}}") %}
+          {{read_lines("{{fingerprintFile}}")[:10]}}
+          {% else %}未知{% endif %}
+
+          ## Nuclei Critical 漏洞
+          {% if file_exists("{{nucleiCriticalFile}}") %}
+          {{read_lines("{{nucleiCriticalFile}}")[:15]}}
+          {% else %}无{% endif %}
+
+          ## Nuclei High 漏洞
+          {% if file_exists("{{nucleiHighFile}}") %}
+          {{read_lines("{{nucleiHighFile}}")[:15]}}
+          {% else %}无{% endif %}
+
+          ## Secrets 发现
+          {% if file_exists("{{secretsFile}}") %}
+          {{read_lines("{{secretsFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## SSRF 发现
+          {% if file_exists("{{ssrfFile}}") %}
+          {{read_lines("{{ssrfFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## SQLi 发现
+          {% if file_exists("{{sqliFile}}") %}
+          {{read_lines("{{sqliFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          ## Takeover 发现
+          {% if file_exists("{{takeoverFile}}") %}
+          {{read_lines("{{takeoverFile}}")[:5]}}
+          {% else %}无{% endif %}
+
+          请输出 JSON 格式的验证结果保存到 {{vulnValidationOutput}}：
+          ```json
+          {
+            "validation_summary": {
+              "total_validated": 0,
+              "confirmed_real": 0,
+              "false_positives": 0,
+              "needs_manual_verification": 0,
+              "risk_level": "高/中/低"
+            },
+            "validated_findings": [
+              {
+                "id": "vuln-1",
+                "severity": "critical/high/medium",
+                "finding": "漏洞描述",
+                "url": "目标URL",
+                "template": "nuclei模板名",
+                "verification_status": "confirmed/false_positive/needs_verification",
+                "confidence": 0.95,
+                "false_positive_reason": "如果是假阳性，说明原因",
+                "manual_verification": {
+                  "command": "curl命令或验证步骤",
+                  "expected_response": "预期响应特征"
+                },
+                "remediation": "修复建议"
+              }
+            ],
+            "high_priority_items": ["需要立即处理的项目"],
+            "verification_commands": ["可执行的验证命令"]
+          }
+          ```
+
+          只输出 JSON，确保格式完全正确。
+
+    exports:
+      validation_json: "{{acp_output}}"
+
+  - name: save-validation-results
+    type: bash
+    pre_condition: "{{enableVulnValidation}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation
+
+      # 容错：处理可能的空输出
+      if [ -n "{{validation_json}}" ] && [ "{{validation_json}}" != "null" ] && [ "{{validation_json}}" != "{}" ]; then
+        echo '{{validation_json}}' > {{vulnValidationOutput}}
+        
+        # 验证 JSON 格式
+        if jq empty {{vulnValidationOutput}} 2>/dev/null; then
+          CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+          FP=$(jq -r '.validation_summary.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+          MANUAL=$(jq -r '.validation_summary.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+          echo "[Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
+        else
+          echo "[Vuln Validation] Warning: Invalid JSON output"
+        fi
+      else
+        echo "[Vuln Validation] No validation data, creating empty structure"
+        echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
+      fi
+
+  - name: extract-validation-data
+    type: bash
+    pre_condition: "{{enableVulnValidation}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation
+
+      # 容错：检查文件是否存在
+      if [ -f "{{vulnValidationOutput}}" ] && jq empty {{vulnValidationOutput}} 2>/dev/null; then
+        # 提取假阳性列表
+        jq -r '.validated_findings[] | select(.verification_status == "false_positive") | "\(.url) - \(.finding) - \(.false_positive_reason)"' {{vulnValidationOutput}} 2>/dev/null > {{falsePositivesFile}} || true
+
+        # 提取手动验证命令
+        jq -r '.validated_findings[] | select(.verification_status == "needs_verification") | "# \(.severity): \(.finding)\n# URL: \(.url)\n\(.manual_verification.command)\n# Expected: \(.manual_verification.expected_response)\n"' {{vulnValidationOutput}} 2>/dev/null > {{manualVerifyCommandsFile}} || true
+
+        chmod +x {{manualVerifyCommandsFile}} 2>/dev/null || true
+
+        # 提取已验证漏洞列表（用于后续攻击链分析）
+        jq -r '.validated_findings[] | select(.verification_status == "confirmed") | .url' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
+      else
+        echo "[]" > {{falsePositivesFile}}
+        echo "# No validation data" > {{manualVerifyCommandsFile}}
+        touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
+      fi
+
+      echo "[Vuln Validation] Extraction complete"
+
+  - name: log-validation-complete
+    type: function
+    pre_condition: "{{enableVulnValidation}}"
+    functions:
+      - 'log_info("AI vulnerability validation completed for {{Target}}")'

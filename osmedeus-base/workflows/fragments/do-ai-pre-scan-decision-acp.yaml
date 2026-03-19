@@ -1,0 +1,143 @@
+# =============================================================================
+# AI 预扫描决策模块 (agent-acp 版本)
+# =============================================================================
+# 功能：
+# - 在大量扫描前分析子域名
+# - 预测高价值目标
+# - 建议扫描策略
+#
+# 特点：
+# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 快速预判，不需要深度推理
+# =============================================================================
+
+kind: module
+name: ai-pre-scan-decision
+description: AI pre-scan decision making using agent-acp - analyze subdomains and predict high-value targets
+
+params:
+  - name: preScanOutput
+    default: "{{Output}}/ai-analysis/pre-scan-decision-{{TargetSpace}}.json"
+  - name: priorityTargetsFile
+    default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+
+  # 输入文件
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: resolvedFile
+    default: "{{Output}}/probing/resolved-{{TargetSpace}}.txt"
+  - name: osintFile
+    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
+
+  # 配置
+  - name: enablePreScanDecision
+    type: bool
+    default: false
+  - name: agentTimeout
+    type: string
+    default: "15m"
+
+steps:
+  - name: prepare-pre-scan
+    type: function
+    pre_condition: "{{enablePreScanDecision}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI pre-scan decision for {{Target}}")'
+
+  - name: ai-pre-scan
+    type: agent-acp
+    agent: flowcli
+    timeout: "{{agentTimeout}}"
+    pre_condition: "{{enablePreScanDecision}}"
+    on_error:
+      action: continue
+      log: "Pre-scan decision failed, using default strategy"
+    messages:
+      - role: system
+        content: |
+          你是一个安全专家，专注于资源优化。
+          你的任务是在大量扫描前分析子域名列表，预测高价值目标。
+          
+          分析原则：
+          1. 识别可能包含敏感服务的主机
+          2. 识别内部/管理后台域名
+          3. 识别测试/开发环境
+          4. 按优先级排序建议
+          
+          重要约束：
+          - 返回结构化的 JSON 输出
+          - 提供具体的扫描建议
+
+      - role: user
+        content: |
+          请分析目标 {{Target}} 的子域名列表，识别高价值扫描目标。
+
+          ## 子域名列表
+          {% if file_exists("{{subdomainFile}}") %}
+          {{read_lines("{{subdomainFile}}")[:100]}}
+          {% else %}无可用子域名数据{% endif %}
+
+          ## 已解析主机
+          {% if file_exists("{{resolvedFile}}") %}
+          {{read_lines("{{resolvedFile}}")[:50]}}
+          {% else %}无{% endif %}
+
+          ## OSINT 信息
+          {% if file_exists("{{osintFile}}") %}
+          {{read_lines("{{osintFile}}")[:20]}}
+          {% else %}无{% endif %}
+
+          请输出 JSON 格式的预扫描决策保存到 {{preScanOutput}}：
+          ```json
+          {
+            "pre_scan_summary": {
+              "total_subdomains": 0,
+              "high_value_targets": 0,
+              "recommended_scan_depth": "normal/deep",
+              "estimated_scan_time": "预计耗时"
+            },
+            "priority_targets": [
+              {
+                "rank": 1,
+                "subdomain": "目标域名",
+                "reason": "优先级原因",
+                "suggested_scan": ["建议的扫描类型"]
+              }
+            ],
+            "scan_strategy": {
+              "depth": "normal/deep",
+              "focus_areas": ["重点区域"],
+              "skip_areas": ["可跳过的区域"]
+            }
+          }
+          ```
+
+          只输出 JSON。
+
+    exports:
+      pre_scan_json: "{{acp_output}}"
+
+  - name: save-pre-scan-results
+    type: bash
+    pre_condition: "{{enablePreScanDecision}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 容错：处理可能的空输出
+      if [ -n "{{pre_scan_json}}" ] && [ "{{pre_scan_json}}" != "null" ] && [ "{{pre_scan_json}}" != "{}" ]; then
+        echo '{{pre_scan_json}}' > {{preScanOutput}}
+      else
+        echo '{"pre_scan_summary":{"total_subdomains":0,"high_value_targets":0},"priority_targets":[]}' > {{preScanOutput}}
+      fi
+
+      # 提取高优先级目标
+      if [ -f "{{preScanOutput}}" ] && jq empty {{preScanOutput}} 2>/dev/null; then
+        jq -r '.priority_targets[].subdomain' {{preScanOutput}} 2>/dev/null > {{priorityTargetsFile}} || true
+      fi
+
+  - name: log-pre-scan-complete
+    type: function
+    pre_condition: "{{enablePreScanDecision}}"
+    functions:
+      - 'log_info("AI pre-scan decision completed for {{Target}}")'

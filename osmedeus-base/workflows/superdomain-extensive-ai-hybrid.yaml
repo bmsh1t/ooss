@@ -1,18 +1,25 @@
 # =============================================================================
-# SUPERDOMAIN EXTENSIVE - Ultimate Reconnaissance Workflow (LLM Optimized)
+# SUPERDOMAIN EXTENSIVE - Ultimate Reconnaissance Workflow (Hybrid)
 # =============================================================================
 # 
-# 优化版本 - 使用 agent (LLM) 进行 AI 分析
-# 特点：利用 LLM 的深度推理能力，适合 API 稳定时使用
+# 混合版本 - 根据模块特点选择 agent 或 agent-acp
+# 特点：平衡稳定性和分析能力，日常推荐使用
+#
+# 策略：
+# - vuln-validation: agent-acp (结构化输出，稳定优先)
+# - attack-chain: agent (需要深度推理能力)
+# - path-planning: agent-acp (结构化规划，稳定优先)
+# - semantic-search: embeddings (Jina，独立处理)
+# - intelligent-analysis: bash (聚合，不调用 LLM)
 #
 # Usage:
-#   osmedeus run -f superdomain-extensive-ai-optimized -t example.com
+#   osmedeus run -f superdomain-extensive-ai-hybrid -t example.com
 # =============================================================================
 
 kind: flow
-name: superdomain-extensive
-description: Ultimate reconnaissance - AI-powered workflow with LLM optimization
-tags: "recon, domain, extensive, full, vuln, osint, super, ai, optimized"
+name: superdomain-extensive-hybrid
+description: Ultimate reconnaissance - hybrid workflow mixing agent and agent-acp based on module requirements
+tags: "recon, domain, extensive, full, vuln, osint, super, ai, hybrid"
 
 # -----------------------------------------------------------------------------
 # PARAMS SECTION
@@ -37,7 +44,7 @@ params:
     default: 150
 
   # ===========================================================
-  # AI 智能分析配置 (agent 版本)
+  # AI 智能分析配置
   # ===========================================================
   - name: enableLlmAnalysis
     type: bool
@@ -75,6 +82,18 @@ params:
     type: bool
     default: true
     description: "Enable AI attack path planning"
+
+  # ===========================================================
+  # Agent 配置
+  # ===========================================================
+  - name: agentTimeout
+    type: string
+    default: "30m"
+    description: "Timeout for agent-acp calls"
+  - name: agentRetry
+    type: integer
+    default: 3
+    description: "Number of retries on failure"
 
   # ===========================================================
   # 规避检测与 WAF 感知配置
@@ -181,16 +200,16 @@ modules:
     depends_on: [http-probe, content-analysis, scan-backup]
 
   # ===========================================================================
-  # Phase 7: AI 智能分析 (agent 版本 - 使用 LLM)
+  # Phase 7: AI 智能分析 (混合版本)
   # ===========================================================================
   
-  # AI 预扫描决策 - agent 版本
+  # AI 预扫描决策 - agent-acp 版本 (快速预判，不需要深度推理)
   - name: ai-pre-scan-decision
-    path: fragments/do-ai-pre-scan-decision.yaml
+    path: fragments/do-ai-pre-scan-decision-acp.yaml
     depends_on: [subdomain, dns-resolve]
     pre_condition: "{{enablePreScanDecision}}"
 
-  # AI 语义搜索 - RAG 功能，跨目标知识共享
+  # AI 语义搜索 - RAG 功能 (Jina embeddings，独立处理)
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [fingerprint, content-analysis]
@@ -198,31 +217,32 @@ modules:
     params:
       searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
 
-  # AI 实时 WAF 规避 - agent 版本
+  # AI 实时 WAF 规避 - agent-acp 版本 (模式识别，稳定优先)
   - name: ai-waf-bypass
-    path: fragments/do-ai-waf-bypass.yaml
+    path: fragments/do-ai-waf-bypass-acp.yaml
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
-  # AI 漏洞验证 - agent 版本 (LLM)
+  # AI 漏洞验证 - agent-acp 版本 (结构化输出，稳定优先)
   - name: ai-vuln-validation
-    path: fragments/do-ai-vuln-validation.yaml
+    path: fragments/do-ai-vuln-validation-acp.yaml
     depends_on: [content-analysis, scan-content]
     pre_condition: "{{enableVulnValidation}}"
 
-  # AI 攻击链分析 - agent 版本 (LLM)
+  # AI 攻击链分析 - agent 版本 (需要深度推理能力，使用 LLM)
+  # 这是混合版本中唯一使用 agent (LLM) 的模块
   - name: ai-attack-chain
     path: fragments/do-ai-attack-chain.yaml
     depends_on: [ai-vuln-validation]
     pre_condition: "{{enableAttackChain}}"
 
-  # AI 攻击路径规划 - agent 版本 (LLM)
+  # AI 攻击路径规划 - agent-acp 版本 (结构化规划，稳定优先)
   - name: ai-path-planning
-    path: fragments/do-ai-path-planning.yaml
+    path: fragments/do-ai-path-planning-acp.yaml
     depends_on: [ai-attack-chain]
     pre_condition: "{{enablePathPlanning}}"
 
-  # AI 协调器 - 汇总分析结果
+  # AI 协调器 - 汇总分析结果 (bash，不调用 LLM)
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
@@ -239,7 +259,7 @@ modules:
   # Phase 9: Code Review
   # ===========================================================================
   - name: ai-code-review
-    path: fragments/do-ai-code-review-enhanced.yaml
+    path: fragments/do-ai-code-review-acp.yaml
     depends_on: [vuln-suite]
     pre_condition: "{{enableLlmCodeReview}}"
 
