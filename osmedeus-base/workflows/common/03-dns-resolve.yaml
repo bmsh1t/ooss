@@ -762,7 +762,7 @@ steps:
       : > {{Output}}/ipspace/{{TargetSpace}}-range.txt
 
       # Use asnmap to discover ASN info
-      asnmap -d {{Target}} -silent -j 2>/dev/null > {{asnAutoFile}} || true
+      PDCP_API_KEY="{{PDCP_API_KEY}}" asnmap -d {{Target}} -silent -j 2>/dev/null > {{asnAutoFile}} || true
 
       if [ -s "{{asnAutoFile}}" ]; then
         jq -r '.cidr // empty' {{asnAutoFile}} 2>/dev/null | sed '/^$/d' | sort -u > {{Output}}/ipspace/{{TargetSpace}}-range.txt || true

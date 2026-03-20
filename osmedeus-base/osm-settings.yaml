@@ -229,6 +229,11 @@ global_vars:
     value: ""
     as_env: true  # Exports as ANTHROPIC_API_KEY
 
+  # PDCP API key for asnmap
+  PDCP_API_KEY:
+    value: "19cfe264-8a55-4f11-8457-fd38906abeb2"
+    as_env: true  # Exports as PDCP_API_KEY
+
   # Add more API keys as needed (use _API_KEY suffix for secrets)
 
 # =============================================================================
