@@ -88,14 +88,10 @@ params:
   - name: gitlabSubsFile
     default: "{{Output}}/subdomain/gitlab-subs-{{TargetSpace}}.txt"
 
-  # LLM 子域名价值分析配置
-  - name: enableLlmSubdomainAnalysis
-    type: bool
-    default: true
-    description: "Enable LLM-powered subdomain value analysis"
+  # High-value subdomain analysis
   - name: llmSubdomainReport
-    default: "{{Output}}/subdomain/llm-subdomain-analysis-{{TargetSpace}}.md"
-    description: "LLM subdomain value analysis report"
+    default: "{{Output}}/subdomain/high-value-analysis-{{TargetSpace}}.md"
+    description: "Subdomain value analysis report"
   - name: highValueSubsFile
     default: "{{Output}}/subdomain/high-value-subs-{{TargetSpace}}.txt"
     description: "High-value subdomains identified by LLM"
@@ -318,73 +314,22 @@ steps:
       - action: continue
 
   # ===========================================================================
-  # Phase 5: LLM Subdomain Value Analysis (P0)
+  # Phase 5: High-Value Subdomain Analysis
   # ===========================================================================
-  - name: llm-subdomain-analysis
-    type: llm
-    pre_condition: '{{enableLlmSubdomainAnalysis}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") > 0'
-    log: "Analyzing subdomain values with LLM"
-    timeout: 300
-    on_error:
-      - action: continue
-    messages:
-      - role: system
-        content: |
-          You are a senior penetration tester specializing in attack surface analysis.
-          Analyze the discovered subdomains and identify:
-          
-          1. **High-Value Targets**: Subdomains likely containing sensitive functionality
-             - Login portals (login, auth, signin, sso, idp)
-             - Admin panels (admin, cpanel, manage, console, dashboard)
-             - API endpoints (api, apiv1, rest, graphql)
-             - Development/Testing (dev, test, staging, uat, beta)
-             - Internal systems (internal, intranet, vpn, portal)
-             - Database/Service (db, mysql, mongo, redis, es, elastic)
-             - CI/CD (jenkins, gitlab, git, ci, cd, pipeline)
-             - Monitoring (monitor, grafana, kibana, prometheus)
-          
-          2. **Potential Vulnerabilities**: Based on naming patterns
-             - Misconfiguration risks (dev, test, staging)
-             - Information disclosure (backup, old, archive)
-             - Access control issues (public, external, open)
-          
-          3. **Priority Ranking**: Score each subdomain 1-10 for attack priority
-          
-          4. **Recommended Actions**: Specific tests for each category
-          
-          Output a prioritized list with reasoning. Format in plain text (no markdown code blocks).
-      - role: user
-        content: |
-          Analyze these discovered subdomains for {{Target}}:
-          
-          {{readFile("{{subdomainFile}}")}}
-          
-          Provide:
-          1. Top 10 high-value targets with reasoning
-          2. Risk assessment for each category
-          3. Recommended testing approach
-          
-          Output in plain text only, no markdown code blocks.
-    exports:
-      subdomain_analysis: "{{llm_subdomain_analysis_content}}"
-
-  - name: save-llm-subdomain-report
+  - name: extract-high-value-subdomains
     type: bash
-    pre_condition: "{{enableLlmSubdomainAnalysis}}"
-    log: "Saving LLM subdomain analysis report"
+    pre_condition: 'file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") > 0'
+    log: "Extracting high-value subdomains based on naming patterns"
     command: |
       mkdir -p {{Output}}/subdomain 2>/dev/null || true
       echo "# Subdomain Value Analysis - {{Target}}" > {{llmSubdomainReport}}
       echo "" >> {{llmSubdomainReport}}
       echo "**Generated:** $(date)" >> {{llmSubdomainReport}}
       echo "" >> {{llmSubdomainReport}}
-      if [ -n "{{subdomain_analysis}}" ]; then
-        echo "{{subdomain_analysis}}" >> {{llmSubdomainReport}}
-      else
-        echo "*LLM analysis was skipped or failed. Generating heuristic-based high-value subdomain list.*" >> {{llmSubdomainReport}}
-      fi
+      echo "High-value subdomains identified based on naming patterns:" >> {{llmSubdomainReport}}
+      echo "" >> {{llmSubdomainReport}}
       grep -E '^(login|admin|api|dev|test|staging|internal|db|jenkins|git|monitor|portal|auth|sso|dashboard|console|manage|cpanel|vpn|intranet)' {{subdomainFile}} 2>/dev/null | sort -u > {{highValueSubsFile}} || true
-      echo "[LLM-Subdomain] Identified $(wc -l < {{highValueSubsFile}} 2>/dev/null || echo 0) high-value subdomains"
+      echo "[High-Value] Identified $(wc -l < {{highValueSubsFile}} 2>/dev/null || echo 0) high-value subdomains"
     on_error:
       - action: continue
 
