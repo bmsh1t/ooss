@@ -51,8 +51,8 @@ steps:
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableWafBypass}}"
     on_error:
-      action: continue
-      log: "WAF bypass analysis failed, continuing without bypass strategies"
+      - action: continue
+        log: "WAF bypass analysis failed, continuing without bypass strategies"
     messages:
       - role: system
         content: |

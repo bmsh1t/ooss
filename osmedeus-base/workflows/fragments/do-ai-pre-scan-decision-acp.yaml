@@ -51,8 +51,8 @@ steps:
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enablePreScanDecision}}"
     on_error:
-      action: continue
-      log: "Pre-scan decision failed, using default strategy"
+      - action: continue
+        log: "Pre-scan decision failed, using default strategy"
     messages:
       - role: system
         content: |

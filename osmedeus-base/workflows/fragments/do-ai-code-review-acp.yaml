@@ -54,8 +54,8 @@ steps:
     acp_config:
       write_enabled: true
     on_error:
-      action: continue
-      log: "Code review failed, continuing without detailed review"
+      - action: continue
+        log: "Code review failed, continuing without detailed review"
     messages:
       - role: system
         content: |

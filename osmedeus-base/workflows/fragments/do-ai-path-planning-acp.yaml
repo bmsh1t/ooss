@@ -111,8 +111,8 @@ steps:
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enablePathPlanning}}"
     on_error:
-      action: continue
-      log: "Path planning failed, continuing with basic plan"
+      - action: continue
+        log: "Path planning failed, continuing with basic plan"
     messages:
       - role: system
         content: |

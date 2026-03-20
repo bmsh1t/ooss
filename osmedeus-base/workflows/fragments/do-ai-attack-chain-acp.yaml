@@ -130,8 +130,8 @@ steps:
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableAttackChain}}"
     on_error:
-      action: continue
-      log: "Attack chain analysis failed, continuing with empty results"
+      - action: continue
+        log: "Attack chain analysis failed, continuing with empty results"
     messages:
       - role: system
         content: |

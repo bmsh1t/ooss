@@ -109,8 +109,8 @@ steps:
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableVulnValidation}}"
     on_error:
-      action: continue
-      log: "Vuln validation failed, continuing with unvalidated data"
+      - action: continue
+        log: "Vuln validation failed, continuing with unvalidated data"
     messages:
       - role: system
         content: |
