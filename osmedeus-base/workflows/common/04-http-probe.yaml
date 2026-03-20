@@ -249,6 +249,7 @@ steps:
     log: "Running port scan with rustscan"
     pre_condition: "{{enablePortScan}} && {{enableSYNScan}} && file_exists(\"{{ipFile}}\")"
     command: |
+      mkdir -p {{Output}}/portscan 2>/dev/null || true
       rustscan --timeout {{rustscanTimeout}} -b {{rateRustScan}} --scripts None --range {{rustscanPorts}} -a {{ipFile}} 2>/dev/null | grep "Open" | awk '{print $2}' >> {{openPortsFile}} || true
     on_error:
       - action: continue
