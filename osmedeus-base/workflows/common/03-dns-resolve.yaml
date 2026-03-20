@@ -364,7 +364,9 @@ steps:
           while IFS= read -r line; do
             # Extract subdomain from JSON (host field) and remove trailing dot
             sub=$(echo "$line" | jq -r '.host // .host_name // empty' 2>/dev/null | sed 's/\.$//')
+            # Skip empty, null, or base domain
             [ -z "$sub" ] && continue
+            [ "$sub" = "null" ] && continue
             
             # Skip the base domain itself (already checked by dns-zone-transfer)
             if [ "$sub" = "$TARGET_NORMALIZED" ]; then
@@ -374,14 +376,15 @@ steps:
             # Extract NS records from JSON response
             ns_list=$(echo "$line" | jq -r '.ns[]? // .nameservers[]? // empty' 2>/dev/null)
             
-            if [ -n "$ns_list" ]; then
+            if [ -n "$ns_list" ] && [ "$ns_list" != "null" ]; then
               echo "$sub" >> {{nsDelegatedZonesFile}}
-              # Attempt AXFR on each delegated NS
+              # Attempt AXFR on each delegated NS (with 5s timeout per NS)
               while IFS= read -r ns; do
                 [ -z "$ns" ] && continue
+                [ "$ns" = "null" ] && continue
                 # Remove trailing dot from NS if present
                 ns="${ns%.}"
-                dig axfr "$sub" @"$ns" +short 2>/dev/null | awk '{print $1}' | sed 's/\.$//' | sed '/^$/d' >> {{nsAxfrSubsFile}} || true
+                timeout 5 dig axfr "$sub" @"$ns" +short 2>/dev/null | awk '{print $1}' | sed 's/\.$//' | sed '/^$/d' >> {{nsAxfrSubsFile}} || true
               done <<< "$ns_list"
             fi
           done < {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl
@@ -393,7 +396,7 @@ steps:
       
       # Filter and merge AXFR results - match target domain
       if [ -s "{{nsAxfrSubsFile}}" ]; then
-        grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' {{nsAxfrSubsFile}} 2>/dev/null  | grep -E "\.{{Target}}$" | sort -u >> {{subdomainFile}} || true
+        grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' {{nsAxfrSubsFile}} 2>/dev/null | grep -E "\.{{Target}}$" | sort -u >> {{subdomainFile}} || true
       fi
       
       # Sort delegated zones
