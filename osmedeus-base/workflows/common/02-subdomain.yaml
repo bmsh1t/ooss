@@ -88,14 +88,6 @@ params:
   - name: gitlabSubsFile
     default: "{{Output}}/subdomain/gitlab-subs-{{TargetSpace}}.txt"
 
-  # High-value subdomain analysis
-  - name: llmSubdomainReport
-    default: "{{Output}}/subdomain/high-value-analysis-{{TargetSpace}}.md"
-    description: "Subdomain value analysis report"
-  - name: highValueSubsFile
-    default: "{{Output}}/subdomain/high-value-subs-{{TargetSpace}}.txt"
-    description: "High-value subdomains identified by LLM"
-
 # -----------------------------------------------------------------------------
 # DEPENDENCIES SECTION
 # -----------------------------------------------------------------------------
@@ -310,26 +302,6 @@ steps:
         fi
       fi
       rm -f {{Output}}/subdomain/recursive_top.txt {{Output}}/subdomain/recursive_passive_tmp.txt 2>/dev/null || true
-    on_error:
-      - action: continue
-
-  # ===========================================================================
-  # Phase 5: High-Value Subdomain Analysis
-  # ===========================================================================
-  - name: extract-high-value-subdomains
-    type: bash
-    pre_condition: 'file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") > 0'
-    log: "Extracting high-value subdomains based on naming patterns"
-    command: |
-      mkdir -p {{Output}}/subdomain 2>/dev/null || true
-      echo "# Subdomain Value Analysis - {{Target}}" > {{llmSubdomainReport}}
-      echo "" >> {{llmSubdomainReport}}
-      echo "**Generated:** $(date)" >> {{llmSubdomainReport}}
-      echo "" >> {{llmSubdomainReport}}
-      echo "High-value subdomains identified based on naming patterns:" >> {{llmSubdomainReport}}
-      echo "" >> {{llmSubdomainReport}}
-      grep -E '^(login|admin|api|dev|test|staging|internal|db|jenkins|git|monitor|portal|auth|sso|dashboard|console|manage|cpanel|vpn|intranet)' {{subdomainFile}} 2>/dev/null | sort -u > {{highValueSubsFile}} || true
-      echo "[High-Value] Identified $(wc -l < {{highValueSubsFile}} 2>/dev/null || echo 0) high-value subdomains"
     on_error:
       - action: continue
 
