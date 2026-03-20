@@ -352,7 +352,7 @@ steps:
           
           4. **Recommended Actions**: Specific tests for each category
           
-          Output a prioritized list with reasoning. Format in Markdown.
+          Output a prioritized list with reasoning. Format in plain text (no markdown code blocks).
       - role: user
         content: |
           Analyze these discovered subdomains for {{Target}}:
@@ -363,6 +363,8 @@ steps:
           1. Top 10 high-value targets with reasoning
           2. Risk assessment for each category
           3. Recommended testing approach
+          
+          Output in plain text only, no markdown code blocks.
     exports:
       subdomain_analysis: "{{llm_subdomain_analysis_content}}"
 
