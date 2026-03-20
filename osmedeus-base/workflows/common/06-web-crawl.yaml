@@ -834,7 +834,7 @@ steps:
           - WAF bypass techniques
           - Confidence level (High/Medium/Low)
           
-          Format in Markdown with actionable testing instructions.
+          Format in plain text with actionable testing instructions. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Analyze these URLs with parameters for {{Target}}:

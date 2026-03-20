@@ -1057,6 +1057,7 @@ steps:
           - Critical/High severity findings that need immediate attention
           - Potential false positives based on the target context
           - Recommended remediation order
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       analysis: "{{llm_vuln_analysis_content}}"
 
@@ -1178,6 +1179,7 @@ steps:
           {{readFile("{{nucleiOutputJsonl}}") if file_exists("{{nucleiOutputJsonl}}") else "No vulnerability data"}}
           
           Provide specific bypass techniques for this target.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       waf_bypass_strategy: "{{llm_waf_bypass_strategy_content}}"
 

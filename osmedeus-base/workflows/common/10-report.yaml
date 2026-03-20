@@ -330,7 +330,7 @@ steps:
           3. Business impact assessment
           4. Recommended actions
           
-          Format in Markdown, keep it concise for C-level executives.
+          Format in plain text, keep it concise for C-level executives. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Generate an executive summary for security assessment of {{Target}}.
@@ -372,7 +372,7 @@ steps:
           3. Threat modeling insights
           4. Risk scoring (CVSS context)
           
-          Format in Markdown with clear sections.
+          Format in plain text with clear sections. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Generate risk assessment for {{Target}}:
@@ -414,6 +414,7 @@ steps:
           3. Long-term security improvements
           
           Include specific steps and code examples where applicable.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Generate remediation recommendations for {{Target}}:
@@ -511,6 +512,7 @@ steps:
           {{readFile("{{wafFile}}") if file_exists("{{wafFile}}") else "No WAF data"}}
           
           Provide a comprehensive attack surface analysis with attack paths.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       attack_surface: "{{llm_attack_surface_analysis_content}}"
 

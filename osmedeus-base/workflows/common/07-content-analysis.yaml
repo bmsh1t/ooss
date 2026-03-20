@@ -667,6 +667,7 @@ steps:
           {{readFile("{{jsSecretsJsmapFile}}") if file_exists("{{jsSecretsJsmapFile}}") else "No secrets found"}}
           
           Provide a risk assessment and prioritize findings.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       secrets_analysis: "{{llm_secrets_analysis_content}}"
 
@@ -701,7 +702,7 @@ steps:
           4. Client-side validation weaknesses
           5. DOM manipulation vulnerabilities
           
-          Focus on high-confidence findings only. Report in Markdown.
+          Focus on high-confidence findings only. Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Review JavaScript files discovered for {{Target}}.
@@ -758,6 +759,7 @@ steps:
           {{readFile("{{gfDir}}/params-{{TargetSpace}}.txt") if file_exists("{{gfDir}}/params-{{TargetSpace}}.txt") else "No params data"}}
           
           Provide actionable API endpoint findings for penetration testing.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       js_api_endpoints: "{{llm_js_api_extraction_content}}"
 
@@ -822,6 +824,7 @@ steps:
           {{readFile("{{jsEndpointsFile}}") if file_exists("{{jsEndpointsFile}}") else "No endpoints data"}}
           
           Provide an exploitation-focused analysis with actionable next steps.
+          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       sensitive_context: "{{llm_sensitive_context_analysis_content}}"
 
