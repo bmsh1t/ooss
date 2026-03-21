@@ -115,6 +115,7 @@ steps:
     type: bash
     pre_condition: "{{enableSemanticSearch}} && {{indexExistingData}}"
     command: |
+      set +e  # Don't exit on error
       mkdir -p {{semanticIndexDir}}
       
       # 索引漏洞数据
@@ -123,7 +124,7 @@ steps:
       for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt 2>/dev/null; do
         if [ -f "$f" ]; then
           echo "Indexing: $f" >> {{semanticIndexDir}}/index.log
-          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt
+          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt || true
         fi
       done
       
@@ -131,36 +132,42 @@ steps:
       echo "=== Indexing tech stack ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/tech-index.txt
       if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
-        cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt
+        cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt || true
       fi
       
       # 索引 JS 端点
       echo "=== Indexing JS endpoints ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/endpoints-index.txt
       if [ -f "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" ]; then
-        cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt
+        cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt || true
       fi
       
       # 索引子域名
       echo "=== Indexing subdomains ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/subdomains-index.txt
       if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
-        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt
+        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt || true
       fi
       
       # 创建索引元数据
+      VULNS_COUNT=$(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0)
+      TECH_COUNT=$(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0)
+      ENDPOINTS_COUNT=$(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0)
+      SUBDOMAINS_COUNT=$(wc -l < {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || echo 0)
+      
       cat > {{semanticIndexDir}}/metadata.json << EOF
       {
         "target": "{{Target}}",
-        "indexed_at": "$(date -Iseconds)",
-        "vulns_count": $(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0),
-        "tech_count": $(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0),
-        "endpoints_count": $(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0),
-        "subdomains_count": $(wc -l < {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || echo 0)
+        "indexed_at": "$(date -Iseconds 2>/dev/null || echo 'unknown')",
+        "vulns_count": $VULNS_COUNT,
+        "tech_count": $TECH_COUNT,
+        "endpoints_count": $ENDPOINTS_COUNT,
+        "subdomains_count": $SUBDOMAINS_COUNT
       }
       EOF
       
       echo "[Semantic] Index created successfully"
+      exit 0
 
   - name: generate-data-embeddings
     type: bash
