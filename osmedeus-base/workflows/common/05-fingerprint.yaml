@@ -267,7 +267,7 @@ steps:
           No CMS detected
           
           Provide specific attack suggestions with CVEs, tools, and techniques.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} or {{= }} in your response.
+          Output in plain text only. Do NOT use any template syntax like {{ variable }} or {{=}} in your response.
     exports:
       tech_attack_suggestions: "{{llm_tech_attack_suggestions_content}}"
 
