@@ -455,8 +455,9 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security analyst specializing in security surface management.
-          Create a comprehensive security surface analysis that:
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
+          Create a comprehensive security surface analysis:
           
           1. **Asset Correlation**: Map relationships between discovered assets
              - Subdomains to IP addresses

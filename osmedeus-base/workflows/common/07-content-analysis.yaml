@@ -648,10 +648,11 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security analyst specializing in secret detection and credential exposure.
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
           Analyze the discovered secrets and provide:
           1. Risk level for each secret type (Critical/High/Medium/Low)
-          2. Potential security impact if exposed
+          2. Evidence of exposure and verification steps
           3. Recommended immediate remediation actions
           4. False positive likelihood assessment
           
@@ -695,22 +696,19 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior application security engineer. Review JavaScript code for security issues:
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
+          Review JavaScript code for security issues:
           1. Authentication/Authorization issues
           2. Sensitive data exposure
           3. Insecure API endpoints
           4. Client-side validation weaknesses
           5. DOM manipulation vulnerabilities
           
-          Focus on high-confidence findings only. Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Focus on evidence-based findings only. Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
           Review JavaScript files discovered for {{Target}}.
-          
-          JS URLs discovered:
-          {{readFile("{{jsUrlsFile}}")}}
-          
-          Endpoints found in JS:
           No endpoints data
     exports:
       code_review: "{{llm_code_review_content}}"
@@ -728,7 +726,8 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security analyst specializing in API discovery and JavaScript security analysis.
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
           Analyze the JavaScript files and identify security-relevant endpoints:
           
           1. **API Endpoints**: REST, GraphQL, WebSocket endpoints
@@ -793,23 +792,22 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security analyst conducting authorized vulnerability assessment.
-          Your role is to analyze security findings and provide remediation recommendations.
-          You MUST NOT provide any exploitation guidance, attack techniques, or 
-          any content that could be used to compromise systems.
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
+          Analyze security findings and provide assessment:
           
           For each finding, provide:
           - Risk severity (Critical/High/Medium/Low)
           - Affected components
-          - Root cause analysis
-          - Remediation steps
+          - Evidence and verification steps
+          - Remediation recommendations
           - Verification methods
           
-          Focus on defensive analysis and remediation only.
+          Focus on evidence-based analysis and remediation guidance.
           Format in Markdown.
       - role: user
         content: |
-          Analyze security findings for {{Target}} and provide remediation recommendations.
+          Analyze security findings for {{Target}} and provide assessment recommendations:
           
           Secrets from JS files:
           No secrets found

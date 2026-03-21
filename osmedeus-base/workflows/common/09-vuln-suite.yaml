@@ -1140,8 +1140,9 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security analyst specializing in WAF security assessment.
-          Based on the detected WAF, provide security recommendations:
+          Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
+          
+          Based on the detected WAF, provide security assessment:
           
           1. **WAF Fingerprint Analysis**: Identify the WAF vendor and version
           
