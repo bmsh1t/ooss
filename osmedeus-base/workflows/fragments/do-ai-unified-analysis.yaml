@@ -188,7 +188,7 @@ steps:
     functions:
       - 'log_info("Unified AI analysis completed")'
 
-  - name: save-unified-output
+  - name: validate-json-output
     type: bash
     pre_condition: "{{enableUnifiedAnalysis}}"
     command: |
@@ -196,13 +196,55 @@ steps:
 
       echo '{{unified_analysis}}' > {{unifiedOutputJson}} 2>/dev/null || echo '{"error": "no data"}' > {{unifiedOutputJson}}
 
-      if jq empty {{unifiedOutputJson}} 2>/dev/null; then
-        echo "[Unified] JSON saved and valid"
-        RISK_LEVEL=$(jq -r '.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
-        CRITICAL_COUNT=$(jq -r '.total_critical // 0' {{unifiedOutputJson}} 2>/dev/null)
-        echo "[Unified] Risk: $RISK_LEVEL, Critical: $CRITICAL_COUNT"
+      # 验证 JSON 格式
+      if ! jq empty {{unifiedOutputJson}} 2>/dev/null; then
+        echo "[ERROR] Invalid JSON format"
+        echo '{"error": "invalid_json", "risk_level": "中", "total_critical": 0, "total_high": 0, "findings": [], "attack_chains": [], "critical_paths": [], "defense_recommendations": [], "verification_checklist": []}' > {{unifiedOutputJson}}
+        echo "[WARN] JSON reset to default structure"
+        exit 0
+      fi
+
+      # 验证必需字段
+      REQUIRED_FIELDS="risk_level total_critical total_high findings"
+      for field in $REQUIRED_FIELDS; do
+        if ! jq -e "has(\"$field\")" {{unifiedOutputJson}} > /dev/null 2>&1; then
+          echo "[WARN] Missing field: $field, adding default"
+          case $field in
+            risk_level) jq ".risk_level = \"中\" | ." {{unifiedOutputJson}} > {{unifiedOutputJson}}.tmp && mv {{unifiedOutputJson}}.tmp {{unifiedOutputJson}} ;;
+            total_critical) jq ".total_critical = 0 | ." {{unifiedOutputJson}} > {{unifiedOutputJson}}.tmp && mv {{unifiedOutputJson}}.tmp {{unifiedOutputJson}} ;;
+            total_high) jq ".total_high = 0 | ." {{unifiedOutputJson}} > {{unifiedOutputJson}}.tmp && mv {{unifiedOutputJson}}.tmp {{unifiedOutputJson}} ;;
+            findings) jq ".findings = [] | ." {{unifiedOutputJson}} > {{unifiedOutputJson}}.tmp && mv {{unifiedOutputJson}}.tmp {{unifiedOutputJson}} ;;
+          esac
+        fi
+      done
+
+      # 验证 findings 数组格式
+      if ! jq -e '.findings | type == "array"' {{unifiedOutputJson}} > /dev/null 2>&1; then
+        echo "[WARN] findings is not an array, resetting"
+        jq ".findings = [] | ." {{unifiedOutputJson}} > {{unifiedOutputJson}}.tmp && mv {{unifiedOutputJson}}.tmp {{unifiedOutputJson}}
+      fi
+
+      # 提取统计信息
+      RISK_LEVEL=$(jq -r '.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
+      CRITICAL_COUNT=$(jq -r '.total_critical // 0' {{unifiedOutputJson}} 2>/dev/null)
+      HIGH_COUNT=$(jq -r '.total_high // 0' {{unifiedOutputJson}} 2>/dev/null)
+      FINDINGS_COUNT=$(jq -r '.findings | length' {{unifiedOutputJson}} 2>/dev/null)
+
+      echo "[OK] JSON validation passed"
+      echo "[INFO] Risk: $RISK_LEVEL, Critical: $CRITICAL_COUNT, High: $HIGH_COUNT, Findings: $FINDINGS_COUNT"
+
+  - name: save-unified-output
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      # 使用验证后的 JSON（validate-json-output 步骤已保存）
+      if [ -f "{{unifiedOutputJson}}" ]; then
+        echo "[Unified] JSON ready: $(wc -c < {{unifiedOutputJson}}) bytes"
       else
-        echo "[Unified] JSON invalid"
+        echo '{"error": "no data", "risk_level": "中", "total_critical": 0, "total_high": 0, "findings": [], "attack_chains": [], "critical_paths": [], "defense_recommendations": [], "verification_checklist": []}' > {{unifiedOutputJson}}
+        echo "[WARN] JSON file not found, created default"
       fi
 
   - name: generate-markdown-report

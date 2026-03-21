@@ -140,14 +140,41 @@ steps:
       # 保存原始验证结果
       echo '{{validation_json}}' > {{vulnValidationOutput}} 2>/dev/null || echo '{"error": "no data"}' > {{vulnValidationOutput}}
 
-      if jq empty {{vulnValidationOutput}} 2>/dev/null; then
-        CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null)
-        FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null)
-        MANUAL=$(jq -r '.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null)
-        echo "[Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
-      else
-        echo "[Vuln Validation] Invalid JSON output"
+      # 验证 JSON 格式
+      if ! jq empty {{vulnValidationOutput}} 2>/dev/null; then
+        echo "[ERROR] Invalid JSON format"
+        echo '{"error": "invalid_json", "risk_level": "中", "findings": [], "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0}' > {{vulnValidationOutput}}
+        echo "[WARN] JSON reset to default structure"
       fi
+
+      # 验证必需字段
+      for field in risk_level findings confirmed_real false_positives needs_manual_verification; do
+        if ! jq -e "has(\"$field\")" {{vulnValidationOutput}} > /dev/null 2>&1; then
+          echo "[WARN] Missing field: $field, adding default"
+          case $field in
+            risk_level) jq ".risk_level = \"中\" | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            findings) jq ".findings = [] | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            confirmed_real) jq ".confirmed_real = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            false_positives) jq ".false_positives = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            needs_manual_verification) jq ".needs_manual_verification = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+          esac
+        fi
+      done
+
+      # 验证 findings 数组格式
+      if ! jq -e '.findings | type == "array"' {{vulnValidationOutput}} > /dev/null 2>&1; then
+        echo "[WARN] findings is not an array, resetting"
+        jq ".findings = [] | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}}
+      fi
+
+      # 提取统计信息
+      CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null)
+      FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null)
+      MANUAL=$(jq -r '.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null)
+      TOTAL=$(jq -r '.findings | length' {{vulnValidationOutput}} 2>/dev/null)
+
+      echo "[OK] JSON validation passed"
+      echo "[INFO] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL, Total Findings: $TOTAL"
 
   - name: extract-validation-data
     type: bash
