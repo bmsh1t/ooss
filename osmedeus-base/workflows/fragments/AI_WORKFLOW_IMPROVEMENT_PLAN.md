@@ -76,23 +76,73 @@
 
 ---
 
-#### 1.2 添加 CVE/CVSS 关联
+#### 1.2 CVE/CVSS 关联（方案2：预查询）
 
-**问题**：当前只输出漏洞描述，不关联已知 CVE
+**问题**：当前 LLM 自行判断 CVE，知识截止日期限制+幻觉风险
 
-**改进方案**：在 query 中要求 Agent 关联 CVE/CVSS
+**选定方案**：方案2 - 预查询模式
+- 在 Agent 分析前，先用 bash 预查询相关 CVE
+- 查询结果写入 JSON 文件供 Agent 直接读取
+- Token 消耗低（~30-50/查询），延迟小（~1-3s/查询）
+
+**Token 消耗分析**：
+| 方案 | 额外 Token（10漏洞） | 额外延迟 | 风险 |
+|------|---------------------|----------|------|
+| LLM 自行判断 | 0 | 0 | 不准确（60-70%） |
+| 方案1 Agent联网 | 500-1000 | +30-60s | API 不稳定 |
+| **方案2 预查询** | **300-500** | **+3-10s** | **低** |
+| 方案3 混合 | 1000-2000 | +30-60s | 复杂 |
+
+**实现方案**：
 
 ```yaml
-query: |
-  请验证漏洞并关联 CVE：
+# 在 AI 分析前添加 CVE 预查询步骤
+- name: pre-query-cve
+  type: bash
+  pre_condition: "{{enableVulnValidation}}"
+  command: |
+    mkdir -p {{Output}}/ai-analysis/cve
+    
+    # 查询关键技术栈的最新 CVE
+    TECH_KEYWORDS=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[0:5][]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    
+    # 预查询 Top 5 技术的 CVE（CVSS > 7.0）
+    for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
+      curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
+        jq -r '.vulnerabilities[] | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore)|\(.cve.descriptions[0].value | .[0:200])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
+    done
+    
+    # 查询通用高危漏洞类型
+    for vuln_type in "sql injection" "xss" "rce" "ssrf" "ssti"; do
+      curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
+        jq -r '.vulnerabilities[] | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore)|\(.cve.descriptions[0].value | .[0:200])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
+    done
+    
+    echo "[CVE] Pre-query completed"
 
-  对于每个漏洞，必须提供：
-  - cve: 关联的 CVE 编号（如 CVE-2024-XXXX）
-  - cvss: CVSS 评分（0-10）
-  - cvss_vector: CVSS 向量（如 CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H）
-  - cwe: CWE 编号（如 CWE-89）
-  - epss: EPSS 评分（0-1）
+# Agent 分析时引用预查询结果
+query: |
+  ## 预查询的 CVE 参考数据
+  请使用 read_lines 工具读取以下文件获取 CVE 参考：
+  - {{Output}}/ai-analysis/cve/tech-cve.txt - 技术栈相关 CVE
+  - {{Output}}/ai-analysis/cve/vuln-type-cve.txt - 漏洞类型相关 CVE
+  
+  ## 数据文件
+  请使用 read_lines 工具读取以下文件获取详细信息：
+  ...
 ```
+
+**CVE 数据文件格式**：
+```
+|CVE-2024-1234|9.8|SQL Injection in login form allows remote code execution
+|CVE-2024-5678|8.5|Cross-site scripting vulnerability in comment section
+```
+
+**NVD API 限制应对**：
+- 免费 API，无 key 要求
+- 每秒限速：5 请求
+- 建议添加 `sleep 0.2` 控制频率
+- 失败时使用缓存降级
 
 **涉及文件**：
 - `do-ai-vuln-validation.yaml`
@@ -100,7 +150,7 @@ query: |
 
 ---
 
-#### 1.3 添加输出验证
+#### 1.4 添加输出验证
 
 **问题**：当前 JSON 验证只是静默失败
 
@@ -280,10 +330,12 @@ agent_tools:
 
 ## 实施顺序
 
-1. **第一阶段**：简化 JSON Schema + 添加 CVE 关联
-2. **第二阶段**：添加输出验证 + POC 生成
-3. **第三阶段**：Root Cause 分析 + 攻击面量化
-4. **第四阶段**：限制 Agent 权限（可选）
+1. **第一阶段**：~~简化 JSON Schema~~ ✅ 已完成
+2. **第二阶段**：CVE 预查询实现
+3. **第三阶段**：添加输出验证
+4. **第四阶段**：POC 生成 + Root Cause 分析
+5. **第五阶段**：攻击面量化
+6. **第六阶段**：限制 Agent 权限（可选）
 
 ---
 
@@ -292,7 +344,7 @@ agent_tools:
 | 改进项 | 风险 | 缓解措施 |
 |--------|------|----------|
 | 简化 JSON | 低：可能影响解析逻辑 | 充分测试 |
-| 添加 CVE 关联 | 中：API 调用可能失败 | 使用本地 CVE 数据库或缓存 |
+| CVE 预查询 | 中：NVD API 限速/不可用 | 添加缓存降级 + sleep 控制频率 |
 | Agent POC 生成 | 中：POC 可能不稳定 | 沙箱环境执行 |
 | 限制 Agent 权限 | 中：功能受限 | 提供白名单机制 |
 
@@ -303,7 +355,8 @@ agent_tools:
 | 指标 | 当前 | 改进后 |
 |------|------|--------|
 | JSON 解析成功率 | ~70% | >95% |
-| 漏洞关联 CVE 率 | 0% | >80% |
+| CVE 关联准确率 | N/A | >90% |
+| CVE 关联覆盖率 | 0% | >80% |
 | POC 可用率 | ~30% | >70% |
 | 攻击面量化 | 无 | 完整量化 |
 
@@ -311,6 +364,7 @@ agent_tools:
 
 ## 待确认事项
 
-1. 是否需要支持本地 CVE 数据库？
-2. POC 生成是否需要沙箱环境？
-3. JSON Schema 简化后的具体字段需求？
+1. ~~是否需要支持本地 CVE 数据库？~~ - **已选定方案2：NVD API 预查询**
+2. ~~POC 生成是否需要沙箱环境？~~ - 可后续根据需求决定
+3. ~~JSON Schema 简化后的具体字段需求？~~ - ✅ 已完成
+4. CVE 预查询是否需要添加本地缓存？（减少 API 调用）
