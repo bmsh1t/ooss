@@ -55,6 +55,10 @@ params:
   - name: enableMemory
     type: bool
     default: true
+  - name: enableCvePreQuery
+    type: bool
+    default: false
+    description: "Enable CVE pre-query from NVD API before analysis"
 
 steps:
   - name: prepare-analysis-data
@@ -63,7 +67,54 @@ steps:
     log: "Preparing unified analysis"
     functions:
       - 'create_folder("{{Output}}/ai-analysis")'
+      - 'create_folder("{{Output}}/ai-analysis/cve")'
       - 'log_info("Starting unified AI analysis for {{Target}}")'
+
+  - name: pre-query-cve
+    type: bash
+    pre_condition: "{{enableUnifiedAnalysis}} && {{enableCvePreQuery}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/cve
+      
+      echo "[CVE] Starting NVD API pre-query..."
+      echo "[CVE] Target: {{Target}}"
+      
+      # 提取技术栈关键词
+      TECH_KEYWORDS=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[0:5][]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+      
+      if [ -z "$TECH_KEYWORDS" ]; then
+        TECH_KEYWORDS="apache,nginx,wordpress,jetty,django"
+      fi
+      
+      echo "[CVE] Tech keywords: $TECH_KEYWORDS"
+      
+      # 初始化 CVE 文件
+      > {{Output}}/ai-analysis/cve/tech-cve.txt
+      > {{Output}}/ai-analysis/cve/vuln-type-cve.txt
+      
+      # 查询技术栈相关 CVE（CVSS >= 7.0）
+      for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
+        echo "[CVE] Querying: $tech"
+        curl -s --connect-timeout 5 --max-time 10 \
+          "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
+        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
+        sleep 0.3
+      done
+      
+      # 查询通用漏洞类型 CVE
+      for vuln_type in "sql injection" "xss" "remote code execution" "ssrf" "ssti"; do
+        echo "[CVE] Querying vuln type: $vuln_type"
+        curl -s --connect-timeout 5 --max-time 10 \
+          "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
+        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
+        sleep 0.3
+      done
+      
+      TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
+      VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
+      
+      echo "[CVE] Pre-query completed"
+      echo "[CVE] Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
   - name: collect-analysis-data
     type: bash
@@ -122,6 +173,17 @@ steps:
       ## 资产统计 (已收集)
       {{readFile("{{Output}}/ai-analysis/unified-stats.json")}}
       
+      ## CVE 参考数据（可选）
+      {% if enableCvePreQuery %}
+      请使用 read_lines 工具读取以下文件获取 CVE 参考：
+      - {{Output}}/ai-analysis/cve/tech-cve.txt - 技术栈相关 CVE（格式：CVE编号|评分|描述）
+      - {{Output}}/ai-analysis/cve/vuln-type-cve.txt - 漏洞类型相关 CVE
+      
+      如发现匹配的 CVE，请关联到对应漏洞的 cve 和 cvss 字段。
+      {% else %}
+      如有需要，可自行搜索 CVE 数据库进行关联。
+      {% endif %}
+
       ## 详细漏洞数据
       请使用 agent_tools 中的 read_lines 工具读取以下文件获取详细信息：
       - nucleiCriticalFile: {{nucleiCriticalFile}}
@@ -145,6 +207,8 @@ steps:
             "type": "漏洞类型",
             "finding": "漏洞描述",
             "url": "目标URL",
+            "cve": "CVE-XXXX-XXXX（如有）",
+            "cvss": 9.8（如有）",
             "status": "confirmed/false_positive/needs_verification",
             "confidence": "高/中/低",
             "verification_command": "curl命令",
