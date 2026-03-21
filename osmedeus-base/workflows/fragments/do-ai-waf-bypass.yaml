@@ -57,7 +57,7 @@ steps:
       SAMPLE_COUNT=$(wc -l < {{Output}}/ai-analysis/waf-test/http-samples.txt 2>/dev/null || echo 0)
       WAF_COUNT=$(wc -l < {{Output}}/ai-analysis/waf-test/waf-samples.txt 2>/dev/null || echo 0)
       
-      echo "[WAF Bypass] Collected: $SAMPLE_COUNT HTTP samples, $WAF_COUNT WAF samples"
+      echo "[INFO] [WAF Bypass] Collected: $SAMPLE_COUNT HTTP samples, $WAF_COUNT WAF samples"
 
   - name: ai-waf-analysis
     type: agent
@@ -134,9 +134,9 @@ steps:
       if jq empty {{wafBypassOutput}} 2>/dev/null; then
         WAF_TYPE=$(jq -r '.waf_type // "Unknown"' {{wafBypassOutput}} 2>/dev/null)
         TECH_COUNT=$(jq -r '.bypass_techniques | length' {{wafBypassOutput}} 2>/dev/null || echo 0)
-        echo "[WAF Bypass] Detected: $WAF_TYPE, Techniques: $TECH_COUNT"
+        echo "[INFO] [WAF Bypass] Detected: $WAF_TYPE, Techniques: $TECH_COUNT"
       else
-        echo "[WAF Bypass] Invalid JSON"
+        echo "[INFO] [WAF Bypass] Invalid JSON"
       fi
 
   - name: generate-waf-bypass-config
@@ -189,7 +189,7 @@ steps:
       export AI_WAF_USER_AGENT="$USER_AGENT"
       EOF
       
-      echo "[WAF Bypass] Config saved"
+      echo "[INFO] [WAF Bypass] Config saved"
 
   - name: log-waf-complete
     type: function

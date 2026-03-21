@@ -63,7 +63,7 @@ steps:
 
       # 优先使用已验证的漏洞数据
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
-        echo "[Attack Chain] Using validated vulnerability data"
+        echo "[INFO] [Attack Chain] Using validated vulnerability data"
         cat {{vulnValidationFile}} > {{Output}}/ai-analysis/attack-chain-input.json
       else
         # 否则使用原始扫描数据构建输入
@@ -85,7 +85,7 @@ steps:
 
       # 统计可用的漏洞数据
       CHAIN_INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/attack-chain-input.json 2>/dev/null || echo 0)
-      echo "[Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
+      echo "[INFO] [Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
 
   - name: ai-analyze-attack-chains
     type: agent
@@ -207,9 +207,9 @@ steps:
       if jq empty {{attackChainOutput}} 2>/dev/null; then
         CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null)
         CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null)
-        echo "[Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
+        echo "[INFO] [Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
       else
-        echo "[Attack Chain] Invalid JSON output"
+        echo "[INFO] [Attack Chain] Invalid JSON output"
       fi
 
   - name: extract-attack-chain-data
@@ -227,7 +227,7 @@ steps:
       # 提取入口点列表（用于后续路径规划）
       jq -r '.attack_chain_summary.most_likely_entry_points[]' {{attackChainOutput}} 2>/dev/null > {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt || true
 
-      echo "[Attack Chain] Extraction complete"
+      echo "[INFO] [Attack Chain] Extraction complete"
 
   - name: log-attack-chain-complete
     type: function

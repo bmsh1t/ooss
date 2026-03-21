@@ -58,9 +58,9 @@ steps:
 
       # 优先使用攻击链分析结果
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
-        echo "[Path Planning] Using attack chain analysis data"
+        echo "[INFO] [Path Planning] Using attack chain analysis data"
       else
-        echo "[Path Planning] No attack chain data, generating standalone plan"
+        echo "[INFO] [Path Planning] No attack chain data, generating standalone plan"
         cat > {{attackChainFile}} << 'EOF'
         {
           "error": "no_attack_chain_data"
@@ -185,9 +185,9 @@ steps:
       if jq empty {{pathPlanningOutput}} 2>/dev/null; then
         PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null)
         TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null)
-        echo "[Path Planning] Total phases: $PHASES, Est. time: $TIME"
+        echo "[INFO] [Path Planning] Total phases: $PHASES, Est. time: $TIME"
       else
-        echo "[Path Planning] Invalid JSON output"
+        echo "[INFO] [Path Planning] Invalid JSON output"
       fi
 
   - name: generate-attack-plan-markdown
@@ -245,7 +245,7 @@ steps:
       echo "" >> {{attackPlanFile}}
       echo "*此计划由 AI 攻击路径规划模块自动生成*" >> {{attackPlanFile}}
 
-      echo "[Path Planning] Attack plan saved to {{attackPlanFile}}"
+      echo "[INFO] [Path Planning] Attack plan saved to {{attackPlanFile}}"
 
   - name: generate-execution-checklist
     type: bash
@@ -256,7 +256,7 @@ steps:
       # 生成可执行的检查清单
       jq -r '.verification_checklist[] | "\(.step). [\(.critical ? "CRITICAL" : "OPTIONAL")] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
 
-      echo "[Path Planning] Execution checklist saved"
+      echo "[INFO] [Path Planning] Execution checklist saved"
 
   - name: log-path-planning-complete
     type: function

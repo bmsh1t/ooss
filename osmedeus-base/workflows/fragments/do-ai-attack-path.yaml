@@ -135,7 +135,7 @@ steps:
       # 提取关键路径
       echo "{{attack_chain_json}}" | jq -r '.critical_paths[]' 2>/dev/null > {{Output}}/ai-analysis/critical-paths.txt || true
       
-      echo "[Attack Chain] Analysis saved"
+      echo "[INFO] [Attack Chain] Analysis saved"
 
   - name: comprehensive-attack-analysis
     type: agent

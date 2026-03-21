@@ -91,7 +91,7 @@ steps:
       }
       EOF
       
-      echo "[Decision Data] Collected: Subdomains=$SUBDOMAINS, HTTP=$HTTP_COUNT, WAF=$WAF_COUNT"
+      echo "[INFO] [Decision Data] Collected: Subdomains=$SUBDOMAINS, HTTP=$HTTP_COUNT, WAF=$WAF_COUNT"
 
   - name: ai-strategy-decision-unified
     type: agent
@@ -176,7 +176,7 @@ steps:
 
       # 验证 JSON 有效性并提取关键参数
       if jq empty {{decisionOutput}} 2>/dev/null; then
-        echo "[Decision] JSON valid"
+        echo "[INFO] [Decision] JSON valid"
 
         # 提取关键参数
         SEVERITY=$(jq -r '.nuclei_severity // "critical,high"' {{decisionOutput}} 2>/dev/null)
@@ -191,7 +191,7 @@ steps:
         jq -r '.focus_areas[] // ""' {{decisionOutput}} 2>/dev/null > {{Output}}/ai-analysis/focus-areas.txt || true
         jq -r '.enable_additional_scans | to_entries | .[] | "\(.key)=\(.value)"' {{decisionOutput}} 2>/dev/null > {{Output}}/ai-analysis/enabled-scans.txt || true
       else
-        echo "[Decision] JSON invalid, using defaults"
+        echo "[INFO] [Decision] JSON invalid, using defaults"
         SEVERITY="critical,high"
         THREADS=10
         RATE_LIMIT=30

@@ -67,7 +67,7 @@ steps:
     type: bash
     pre_condition: "{{enableVulnValidation}}"
     command: |
-      echo "[Vuln Validation] Checking input data..."
+      echo "[INFO] [Vuln Validation] Checking input data..."
       
       # 检查必要的输入文件
       REQUIRED_FILES="{{nucleiCriticalFile}} {{nucleiHighFile}} {{fingerprintFile}}"
@@ -83,25 +83,25 @@ steps:
       done
       
       if [ -n "$MISSING_FILES" ]; then
-        echo "[Warning] Missing input files:$MISSING_FILES"
+        echo "[WARN] Missing input files:$MISSING_FILES"
       fi
       
       if [ -n "$EMPTY_FILES" ]; then
-        echo "[Warning] Empty input files:$EMPTY_FILES"
+        echo "[WARN] Empty input files:$EMPTY_FILES"
       fi
       
       # 统计可用数据量
       if [ -f "{{nucleiCriticalFile}}" ]; then
         CRIT_COUNT=$(wc -l < "{{nucleiCriticalFile}}" 2>/dev/null || echo 0)
-        echo "[Vuln Validation] Critical vulns available: $CRIT_COUNT"
+        echo "[INFO] [Vuln Validation] Critical vulns available: $CRIT_COUNT"
       fi
       
       if [ -f "{{nucleiHighFile}}" ]; then
         HIGH_COUNT=$(wc -l < "{{nucleiHighFile}}" 2>/dev/null || echo 0)
-        echo "[Vuln Validation] High vulns available: $HIGH_COUNT"
+        echo "[INFO] [Vuln Validation] High vulns available: $HIGH_COUNT"
       fi
       
-      echo "[Vuln Validation] Input data check complete"
+      echo "[INFO] [Vuln Validation] Input data check complete"
 
   - name: ai-validate-vulns
     type: agent-acp
@@ -201,7 +201,7 @@ steps:
     type: bash
     pre_condition: "{{enableVulnValidation}}"
     command: |
-      echo "[Vuln Validation] Saving validation results..."
+      echo "[INFO] [Vuln Validation] Saving validation results..."
       mkdir -p {{Output}}/ai-analysis/validation
 
       # 容错：处理可能的空输出
@@ -216,17 +216,17 @@ steps:
             CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
             FP=$(jq -r '.validation_summary.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
             MANUAL=$(jq -r '.validation_summary.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-            echo "[Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
+            echo "[INFO] [Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
           else
-            echo "[Vuln Validation] Warning: Required fields missing in JSON, using default"
+            echo "[INFO] [Vuln Validation] Warning: Required fields missing in JSON, using default"
             echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
           fi
         else
-          echo "[Vuln Validation] Warning: Invalid JSON output, creating empty structure"
+          echo "[INFO] [Vuln Validation] Warning: Invalid JSON output, creating empty structure"
           echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
         fi
       else
-        echo "[Vuln Validation] No validation data, creating empty structure"
+        echo "[INFO] [Vuln Validation] No validation data, creating empty structure"
         echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
       fi
 
@@ -254,7 +254,7 @@ steps:
         touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
       fi
 
-      echo "[Vuln Validation] Extraction complete"
+      echo "[INFO] [Vuln Validation] Extraction complete"
 
   - name: log-validation-complete
     type: function

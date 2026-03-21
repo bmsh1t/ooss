@@ -61,7 +61,7 @@ steps:
     type: bash
     pre_condition: "{{enablePathPlanning}}"
     command: |
-      echo "[Path Planning] Checking input data..."
+      echo "[INFO] [Path Planning] Checking input data..."
       
       # 检查必要的输入文件
       REQUIRED_FILES="{{attackChainFile}} {{vulnValidationFile}}"
@@ -74,18 +74,18 @@ steps:
       done
       
       if [ -n "$MISSING_FILES" ]; then
-        echo "[Warning] Missing/empty input files:$MISSING_FILES"
+        echo "[WARN] Missing/empty input files:$MISSING_FILES"
       else
-        echo "[Path Planning] All required input files available"
+        echo "[INFO] [Path Planning] All required input files available"
       fi
       
       # 检查攻击链数据
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
         CHAINS=$(jq -r '.attack_chain_summary.total_chains // 0' "{{attackChainFile}}" 2>/dev/null || echo 0)
-        echo "[Path Planning] Attack chains available: $CHAINS"
+        echo "[INFO] [Path Planning] Attack chains available: $CHAINS"
       fi
       
-      echo "[Path Planning] Input data check complete"
+      echo "[INFO] [Path Planning] Input data check complete"
 
   - name: collect-planning-data
     type: bash
@@ -95,9 +95,9 @@ steps:
 
       # 优先使用攻击链分析结果
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
-        echo "[Path Planning] Using attack chain analysis data"
+        echo "[INFO] [Path Planning] Using attack chain analysis data"
       else
-        echo "[Path Planning] No attack chain data, generating standalone plan"
+        echo "[INFO] [Path Planning] No attack chain data, generating standalone plan"
         cat > {{attackChainFile}} << 'EOF'
         {
           "error": "no_attack_chain_data"
@@ -219,7 +219,7 @@ steps:
     type: bash
     pre_condition: "{{enablePathPlanning}}"
     command: |
-      echo "[Path Planning] Saving planning results..."
+      echo "[INFO] [Path Planning] Saving planning results..."
       mkdir -p {{Output}}/ai-analysis
 
       # 容错：处理可能的空输出
@@ -230,12 +230,12 @@ steps:
         if jq empty {{pathPlanningOutput}} 2>/dev/null; then
           PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null || echo 0)
           TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null || echo "unknown")
-          echo "[Path Planning] Total phases: $PHASES, Est. time: $TIME"
+          echo "[INFO] [Path Planning] Total phases: $PHASES, Est. time: $TIME"
         else
-          echo "[Path Planning] Warning: Invalid JSON output"
+          echo "[INFO] [Path Planning] Warning: Invalid JSON output"
         fi
       else
-        echo "[Path Planning] No planning data, creating empty structure"
+        echo "[INFO] [Path Planning] No planning data, creating empty structure"
         echo '{"plan_summary":{"total_phases":0,"estimated_total_time":"unknown","success_probability":0,"risk_level":"中"},"execution_phases":[]}' > {{pathPlanningOutput}}
       fi
 
@@ -299,7 +299,7 @@ steps:
       echo "" >> {{attackPlanFile}}
       echo "*此计划由 AI 攻击路径规划模块自动生成*" >> {{attackPlanFile}}
 
-      echo "[Path Planning] Attack plan saved to {{attackPlanFile}}"
+      echo "[INFO] [Path Planning] Attack plan saved to {{attackPlanFile}}"
 
   - name: generate-execution-checklist
     type: bash
@@ -315,7 +315,7 @@ steps:
         echo "# No execution checklist available" > {{executionChecklistFile}}
       fi
 
-      echo "[Path Planning] Execution checklist saved"
+      echo "[INFO] [Path Planning] Execution checklist saved"
 
   - name: log-path-planning-complete
     type: function

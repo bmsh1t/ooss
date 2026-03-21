@@ -67,7 +67,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/cve
       
-      echo "[INFO] [CVE] Starting NVD API pre-query..."
+      echo "[INFO] [INFO] [CVE] Starting NVD API pre-query..."
       
       # 提取技术栈关键词
       TECH_KEYWORDS=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[0:5][]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -76,7 +76,7 @@ steps:
         TECH_KEYWORDS="apache,nginx,wordpress,jetty,django"
       fi
       
-      echo "[INFO] [CVE] Tech keywords: $TECH_KEYWORDS"
+      echo "[INFO] [INFO] [CVE] Tech keywords: $TECH_KEYWORDS"
       
       # 初始化 CVE 文件
       > {{Output}}/ai-analysis/cve/tech-cve.txt
@@ -84,7 +84,7 @@ steps:
       
       # 查询技术栈相关 CVE（CVSS >= 7.0）
       for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
-        echo "[INFO] [CVE] Querying: $tech"
+        echo "[INFO] [INFO] [CVE] Querying: $tech"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
@@ -93,7 +93,7 @@ steps:
       
       # 查询通用漏洞类型 CVE
       for vuln_type in "sql injection" "xss" "remote code execution" "ssrf" "ssti"; do
-        echo "[INFO] [CVE] Querying vuln type: $vuln_type"
+        echo "[INFO] [INFO] [CVE] Querying vuln type: $vuln_type"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
@@ -103,7 +103,7 @@ steps:
       TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
       VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
       
-      echo "[INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
+      echo "[INFO] [INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
   - name: ai-validate-vulns
     type: agent
@@ -255,7 +255,7 @@ steps:
       # 提取已验证漏洞列表（用于后续攻击链分析）
       jq -r '.findings[] | select(.status == "confirmed") | .url' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
 
-      echo "[INFO] [Vuln Validation] Extraction complete"
+      echo "[INFO] [INFO] [Vuln Validation] Extraction complete"
 
   - name: log-validation-complete
     type: function

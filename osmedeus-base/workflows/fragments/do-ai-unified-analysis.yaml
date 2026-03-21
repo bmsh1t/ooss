@@ -76,7 +76,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/cve
       
-      echo "[INFO] [CVE] Starting NVD API pre-query..."
+      echo "[INFO] [INFO] [CVE] Starting NVD API pre-query..."
       
       # 提取技术栈关键词
       TECH_KEYWORDS=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[0:5][]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -85,7 +85,7 @@ steps:
         TECH_KEYWORDS="apache,nginx,wordpress,jetty,django"
       fi
       
-      echo "[INFO] [CVE] Tech keywords: $TECH_KEYWORDS"
+      echo "[INFO] [INFO] [CVE] Tech keywords: $TECH_KEYWORDS"
       
       # 初始化 CVE 文件
       > {{Output}}/ai-analysis/cve/tech-cve.txt
@@ -93,7 +93,7 @@ steps:
       
       # 查询技术栈相关 CVE（CVSS >= 7.0）
       for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
-        echo "[INFO] [CVE] Querying: $tech"
+        echo "[INFO] [INFO] [CVE] Querying: $tech"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
@@ -102,7 +102,7 @@ steps:
       
       # 查询通用漏洞类型 CVE
       for vuln_type in "sql injection" "xss" "remote code execution" "ssrf" "ssti"; do
-        echo "[INFO] [CVE] Querying vuln type: $vuln_type"
+        echo "[INFO] [INFO] [CVE] Querying vuln type: $vuln_type"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
@@ -112,7 +112,7 @@ steps:
       TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
       VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
       
-      echo "[INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
+      echo "[INFO] [INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
   - name: collect-analysis-data
     type: bash
@@ -303,10 +303,10 @@ steps:
 
       # 使用验证后的 JSON（validate-json-output 步骤已保存）
       if [ -f "{{unifiedOutputJson}}" ]; then
-        echo "[INFO] [Unified] JSON ready: $(wc -c < {{unifiedOutputJson}}) bytes"
+        echo "[INFO] [INFO] [Unified] JSON ready: $(wc -c < {{unifiedOutputJson}}) bytes"
       else
         echo '{"error": "no data", "risk_level": "中", "total_critical": 0, "total_high": 0, "findings": [], "attack_chains": [], "critical_paths": [], "defense_recommendations": [], "verification_checklist": []}' > {{unifiedOutputJson}}
-        echo "[WARN] [Unified] JSON file not found, created default"
+        echo "[WARN] [INFO] [Unified] JSON file not found, created default"
       fi
 
   - name: generate-markdown-report
@@ -363,7 +363,7 @@ steps:
       *仅供授权的安全评估和防御改进使用*
       EOF
       
-      echo "[INFO] [Unified] Markdown report saved"
+      echo "[INFO] [INFO] [Unified] Markdown report saved"
 
   - name: extract-verification-commands
     type: bash
@@ -376,7 +376,7 @@ steps:
       jq -r '.critical_paths[]' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/critical-paths.txt || true
       chmod +x {{Output}}/ai-analysis/validation/manual-commands.sh 2>/dev/null || true
 
-      echo "[INFO] [Unified] Extraction complete"
+      echo "[INFO] [INFO] [Unified] Extraction complete"
 
   - name: save-memory-context
     type: bash

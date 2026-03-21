@@ -66,7 +66,7 @@ steps:
     type: bash
     pre_condition: "{{enableAttackChain}}"
     command: |
-      echo "[Attack Chain] Checking input data..."
+      echo "[INFO] [Attack Chain] Checking input data..."
       
       # 检查必要的输入文件
       REQUIRED_FILES="{{vulnValidationFile}} {{nucleiCriticalFile}} {{nucleiHighFile}}"
@@ -79,18 +79,18 @@ steps:
       done
       
       if [ -n "$MISSING_FILES" ]; then
-        echo "[Warning] Missing/empty input files:$MISSING_FILES"
+        echo "[WARN] Missing/empty input files:$MISSING_FILES"
       else
-        echo "[Attack Chain] All required input files available"
+        echo "[INFO] [Attack Chain] All required input files available"
       fi
       
       # 检查验证后的漏洞数据
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
         CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
-        echo "[Attack Chain] Confirmed vulns from validation: $CONFIRMED"
+        echo "[INFO] [Attack Chain] Confirmed vulns from validation: $CONFIRMED"
       fi
       
-      echo "[Attack Chain] Input data check complete"
+      echo "[INFO] [Attack Chain] Input data check complete"
 
   - name: collect-vuln-data
     type: bash
@@ -100,7 +100,7 @@ steps:
 
       # 优先使用已验证的漏洞数据
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
-        echo "[Attack Chain] Using validated vulnerability data"
+        echo "[INFO] [Attack Chain] Using validated vulnerability data"
         cat {{vulnValidationFile}} > {{Output}}/ai-analysis/attack-chain-input.json
       else
         # 否则使用原始扫描数据构建输入
@@ -122,7 +122,7 @@ steps:
 
       # 统计可用的漏洞数据
       CHAIN_INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/attack-chain-input.json 2>/dev/null || echo 0)
-      echo "[Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
+      echo "[INFO] [Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
 
   - name: ai-analyze-attack-chains
     type: agent-acp
@@ -239,7 +239,7 @@ steps:
     type: bash
     pre_condition: "{{enableAttackChain}}"
     command: |
-      echo "[Attack Chain] Saving analysis results..."
+      echo "[INFO] [Attack Chain] Saving analysis results..."
       mkdir -p {{Output}}/ai-analysis
 
       # 容错：处理可能的空输出
@@ -250,12 +250,12 @@ steps:
         if jq empty {{attackChainOutput}} 2>/dev/null; then
           CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
           CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
-          echo "[Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
+          echo "[INFO] [Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
         else
-          echo "[Attack Chain] Warning: Invalid JSON output"
+          echo "[INFO] [Attack Chain] Warning: Invalid JSON output"
         fi
       else
-        echo "[Attack Chain] No analysis data, creating empty structure"
+        echo "[INFO] [Attack Chain] No analysis data, creating empty structure"
         echo '{"attack_chain_summary":{"total_chains":0,"critical_chains":0,"high_impact_chains":0,"most_likely_entry_points":[]},"attack_chains":[]}' > {{attackChainOutput}}
       fi
 
@@ -281,7 +281,7 @@ steps:
         touch {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt
       fi
 
-      echo "[Attack Chain] Extraction complete"
+      echo "[INFO] [Attack Chain] Extraction complete"
 
   - name: log-attack-chain-complete
     type: function
