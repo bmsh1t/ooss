@@ -134,16 +134,38 @@ steps:
       请输出完整的 JSON 格式分析报告：
       ```json
       {
-        "summary": {"total_critical": 0, "total_high": 0, "risk_level": "高/中/低", "overall_assessment": "总体评估"},
-        "vulnerability_validation": {
-          "critical_findings": [{"id": "vuln-1", "finding": "漏洞描述", "url": "目标URL", "verification_status": "真实/假阳性/需手动验证", "confidence": "高/中/低", "manual_verification": {"command": "curl -v '验证URL'", "expected": "预期响应"}, "remediation": "修复建议"}],
-          "high_findings": [],
-          "special_vulns": {"ssrf": [], "ssti": [], "sqli": [], "secrets": [], "takeover": []}
-        },
-        "attack_chain": {"chains": [{"name": "链1名称", "entry_point": "入口漏洞", "steps": [{"step": 1, "action": "操作", "vulnerability": "漏洞", "result": "结果"}], "difficulty": "高/中/低", "impact": "影响"}], "critical_paths": ["路径1"]},
-        "attack_path_planning": {"overview": "攻击概述", "phases": [{"phase": "第一阶段", "objectives": ["目标1"], "actions": ["操作1"], "commands": ["具体命令"]}], "expected_results": ["预期结果"], "risk_mitigation": ["风险缓解"]},
-        "manual_verification_checklist": [{"priority": 1, "vuln": "漏洞名", "command": "curl命令", "expected": "预期"}],
-        "defense_recommendations": ["建议1"]
+        "risk_level": "高/中/低",
+        "risk_score": 8.5,
+        "total_critical": 0,
+        "total_high": 0,
+        "overall_assessment": "总体评估",
+        "findings": [
+          {
+            "severity": "critical/high/medium",
+            "type": "漏洞类型",
+            "finding": "漏洞描述",
+            "url": "目标URL",
+            "status": "confirmed/false_positive/needs_verification",
+            "confidence": "高/中/低",
+            "verification_command": "curl命令",
+            "verification_expected": "预期响应",
+            "remediation": "修复建议"
+          }
+        ],
+        "attack_chains": [
+          {
+            "name": "链1名称",
+            "entry_point": "入口漏洞",
+            "steps": [{"step": 1, "action": "操作", "result": "结果"}],
+            "difficulty": "高/中/低",
+            "impact": "影响"
+          }
+        ],
+        "critical_paths": ["路径1"],
+        "defense_recommendations": ["建议1"],
+        "verification_checklist": [
+          {"priority": 1, "vulnerability": "漏洞名", "command": "curl命令", "expected": "预期"}
+        ]
       }
       ```
       
@@ -176,8 +198,8 @@ steps:
 
       if jq empty {{unifiedOutputJson}} 2>/dev/null; then
         echo "[Unified] JSON saved and valid"
-        RISK_LEVEL=$(jq -r '.summary.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
-        CRITICAL_COUNT=$(jq -r '.summary.total_critical // 0' {{unifiedOutputJson}} 2>/dev/null)
+        RISK_LEVEL=$(jq -r '.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
+        CRITICAL_COUNT=$(jq -r '.total_critical // 0' {{unifiedOutputJson}} 2>/dev/null)
         echo "[Unified] Risk: $RISK_LEVEL, Critical: $CRITICAL_COUNT"
       else
         echo "[Unified] JSON invalid"
@@ -208,20 +230,20 @@ steps:
 
       echo "## 分析总结" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
-      jq -r '.summary | "- 风险等级: \(.risk_level // "中")\n- Critical: \(.total_critical // 0)\n- High: \(.total_high // 0)\n- 总体评估: \(.overall_assessment // "无")"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+      jq -r '. | "- 风险等级: \(.risk_level // "中")\n- Critical: \(.total_critical // 0)\n- High: \(.total_high // 0)\n- 总体评估: \(.overall_assessment // "无")"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
       echo "" >> {{unifiedOutputMd}}
 
       echo "---" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
       echo "## 漏洞验证结果" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
-      jq -r '.vulnerability_validation.critical_findings[] | "### \(.finding)\n- URL: \(.url)\n- 验证状态: \(.verification_status)\n- 置信度: \(.confidence)\n- 修复建议: \(.remediation)\n\n**手动验证:**\n```bash\n\(.manual_verification.command // "N/A")\n```\n\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+      jq -r '.findings[] | select(.severity == "critical" or .severity == "high") | "### [\(.severity)] \(.finding)\n- URL: \(.url)\n- 验证状态: \(.status)\n- 置信度: \(.confidence)\n- 修复建议: \(.remediation)\n\n**手动验证:**\n```bash\n\(.verification_command // "N/A")\n```\n\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
 
       echo "---" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
       echo "## 攻击链分析" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
-      jq -r '.attack_chain.chains[] | "### \(.name)\n- 入口点: \(.entry_point)\n- 难度: \(.difficulty)\n- 影响: \(.impact)\n\n**攻击步骤:**\n" + (.steps | .[] | "- 步骤 \(.step): \(.action) -> \(.result)\n") + "\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
+      jq -r '.attack_chains[] | "### \(.name)\n- 入口点: \(.entry_point)\n- 难度: \(.difficulty)\n- 影响: \(.impact)\n\n**攻击步骤:**\n" + (.steps | .[] | "- 步骤 \(.step): \(.action) -> \(.result)\n") + "\n---\n"' {{unifiedOutputJson}} 2>/dev/null >> {{unifiedOutputMd}} || true
 
       echo "---" >> {{unifiedOutputMd}}
       echo "" >> {{unifiedOutputMd}}
@@ -245,9 +267,9 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/validation
 
-      jq -r '.manual_verification_checklist[] | "# \(.priority). \(.vuln)\n\(.command)\n# Expected: \(.expected)\n"' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/validation/manual-commands.sh || true
-      jq -r '.attack_chain.chains[] | "## \(.name)\nEntry: \(.entry_point)\n" + (.steps | .[] | "- \(.step): \(.action)\n")' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/attack-chains.txt || true
-      jq -r '.attack_chain.critical_paths[]' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/critical-paths.txt || true
+      jq -r '.verification_checklist[] | "# \(.priority). \(.vulnerability)\n\(.command)\n# Expected: \(.expected)\n"' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/validation/manual-commands.sh || true
+      jq -r '.attack_chains[] | "## \(.name)\nEntry: \(.entry_point)\n" + (.steps | .[] | "- \(.step): \(.action)\n")' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/attack-chains.txt || true
+      jq -r '.critical_paths[]' {{unifiedOutputJson}} 2>/dev/null > {{Output}}/ai-analysis/critical-paths.txt || true
       chmod +x {{Output}}/ai-analysis/validation/manual-commands.sh 2>/dev/null || true
 
       echo "[Unified] Extraction complete"
@@ -258,8 +280,8 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      RISK=$(jq -r '.summary.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
-      TOTAL=$(jq -r '[.vulnerability_validation.critical_findings[], .vulnerability_validation.high_findings[]] | length' {{unifiedOutputJson}} 2>/dev/null || echo 0)
+      RISK=$(jq -r '.risk_level // "中"' {{unifiedOutputJson}} 2>/dev/null)
+      TOTAL=$(jq -r '.findings | length' {{unifiedOutputJson}} 2>/dev/null || echo 0)
 
       cat > {{memoryOutput}} << EOF
       {
