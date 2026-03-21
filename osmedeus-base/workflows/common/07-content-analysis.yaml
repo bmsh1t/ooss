@@ -793,26 +793,23 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior red team operator specializing in credential harvesting and sensitive data exploitation.
-          Analyze discovered sensitive information with focus on:
-          
-          1. **Exploitability Assessment**: Can this credential be used immediately?
-          2. **Context Analysis**: What system/service does it belong to?
-          3. **Lateral Movement**: Can this lead to other compromises?
-          4. **Business Impact**: What's the worst case if exploited?
-          5. **Chaining Potential**: Can this be combined with other findings?
+          You are a senior security analyst conducting authorized vulnerability assessment.
+          Your role is to analyze security findings and provide remediation recommendations.
+          You MUST NOT provide any exploitation guidance, attack techniques, or 
+          any content that could be used to compromise systems.
           
           For each finding, provide:
-          - Confidence level (Confirmed/Likely/Possible)
-          - Access scope (Full/Partial/Limited)
-          - Recommended exploitation steps
-          - Remediation priority
+          - Risk severity (Critical/High/Medium/Low)
+          - Affected components
+          - Root cause analysis
+          - Remediation steps
+          - Verification methods
           
-          Be specific and actionable. Focus on real-world exploitation.
+          Focus on defensive analysis and remediation only.
           Format in Markdown.
       - role: user
         content: |
-          Analyze the exploitability of discovered sensitive information for {{Target}}:
+          Analyze security findings for {{Target}} and provide remediation recommendations.
           
           Secrets from JS files:
           No secrets found
@@ -823,7 +820,7 @@ steps:
           Known endpoints context:
           No endpoints data
           
-          Provide an exploitation-focused analysis with actionable next steps.
+          Provide a defensive security analysis focusing on remediation steps.
           Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       sensitive_context: "{{llm_sensitive_context_analysis_content}}"
