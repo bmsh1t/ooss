@@ -115,16 +115,16 @@ steps:
     type: bash
     pre_condition: "{{enableSemanticSearch}} && {{indexExistingData}}"
     command: |
-      set +e  # Don't exit on error
+      set +e
       mkdir -p {{semanticIndexDir}}
       
       # 索引漏洞数据
       echo "=== Indexing vulnerabilities ===" > {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/vulns-index.txt
-      for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt 2>/dev/null; do
+      for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt; do
         if [ -f "$f" ]; then
           echo "Indexing: $f" >> {{semanticIndexDir}}/index.log
-          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt || true
+          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || true
         fi
       done
       
@@ -132,21 +132,21 @@ steps:
       echo "=== Indexing tech stack ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/tech-index.txt
       if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
-        cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt || true
+        cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt 2>/dev/null || true
       fi
       
       # 索引 JS 端点
       echo "=== Indexing JS endpoints ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/endpoints-index.txt
       if [ -f "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" ]; then
-        cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt || true
+        cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || true
       fi
       
       # 索引子域名
       echo "=== Indexing subdomains ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/subdomains-index.txt
       if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
-        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt || true
+        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || true
       fi
       
       # 创建索引元数据
