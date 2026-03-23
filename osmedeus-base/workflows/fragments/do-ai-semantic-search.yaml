@@ -547,7 +547,52 @@ steps:
       mkdir -p {{Output}}/ai-analysis
       SKILLS_DIR="{{OsmedeusBase}}/osmedeus-base/skills"
       KB_OUTPUT="{{Output}}/ai-analysis/knowledge-base-results.md"
+      SKILLS_COMBINED="{{Output}}/ai-analysis/skills-combined.md"
       echo "[Knowledge Base] Searching security knowledge..."
+      
+      # 检测漏洞类型
+      VULN_TYPES_FOUND=""
+      if [ -f "{{nucleiFile}}" ]; then
+        if grep -qi "sql\|sqli\|injection" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND sql-injection,"
+        fi
+        if grep -qi "xss\|cross.*site\|scripting" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xss,"
+        fi
+        if grep -qi "ssrf\|request.*forgery\|file.*inclusion" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ssrf,"
+        fi
+        if grep -qi "command\|rce\|remote.*code\|exec" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND command-injection,"
+        fi
+        if grep -qi "csrf\|request.*forg" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND csrf,"
+        fi
+        if grep -qi "upload\|file.*upload" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND file-upload,"
+        fi
+        if grep -qi "idor\|direct.*object\|authoriz" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND idor,"
+        fi
+        if grep -qi "xxe\|xml.*entity\|external.*entity" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xxe,"
+        fi
+        if grep -qi "ldap" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ldap-injection,"
+        fi
+        if grep -qi "api\|rest\|graphql\|endpoint" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND api-security,"
+        fi
+      fi
+      
+      echo "[Knowledge Base] Vulnerability types detected: $VULN_TYPES_FOUND"
+      
+      # 默认加载的技能
+      if [ -z "$VULN_TYPES_FOUND" ]; then
+        VULN_TYPES_FOUND="sql-injection,xss-testing,ssrf-testing,command-injection,csrf-testing,file-upload-testing,idor-testing,xxe-testing,api-security-testing,ldap-injection-testing"
+      fi
+      
+      # 生成知识库搜索结果
       echo "# Security Knowledge Base Results" > "$KB_OUTPUT"
       echo "" >> "$KB_OUTPUT"
       echo "Target: {{Target}}" >> "$KB_OUTPUT"
@@ -556,40 +601,127 @@ steps:
       echo "---" >> "$KB_OUTPUT"
       echo "" >> "$KB_OUTPUT"
       
-      # Check for SQL injection skills
-      if [ -f "$SKILLS_DIR/sql-injection/SKILL.md" ]; then
-        echo "## SQL Injection Testing" >> "$KB_OUTPUT"
-        echo "" >> "$KB_OUTPUT"
-        tail -n +20 "$SKILLS_DIR/sql-injection/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
-        echo "" >> "$KB_OUTPUT"
-      fi
+      # 生成技能组合文件
+      echo "# Security Testing Skills Library" > "$SKILLS_COMBINED"
+      echo "" >> "$SKILLS_COMBINED"
+      echo "Target: {{Target}}" >> "$SKILLS_COMBINED"
+      echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$SKILLS_COMBINED"
+      echo "" >> "$SKILLS_COMBINED"
       
-      # Check for XSS skills
-      if [ -f "$SKILLS_DIR/xss-testing/SKILL.md" ]; then
-        echo "## XSS Testing" >> "$KB_OUTPUT"
-        echo "" >> "$KB_OUTPUT"
-        tail -n +20 "$SKILLS_DIR/xss-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
-        echo "" >> "$KB_OUTPUT"
-      fi
-      
-      # Check for SSRF skills
-      if [ -f "$SKILLS_DIR/ssrf-testing/SKILL.md" ]; then
-        echo "## SSRF Testing" >> "$KB_OUTPUT"
-        echo "" >> "$KB_OUTPUT"
-        tail -n +20 "$SKILLS_DIR/ssrf-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
-        echo "" >> "$KB_OUTPUT"
-      fi
-      
-      # Check for RCE skills
-      if [ -f "$SKILLS_DIR/rce-testing/SKILL.md" ]; then
-        echo "## RCE Testing" >> "$KB_OUTPUT"
-        echo "" >> "$KB_OUTPUT"
-        tail -n +20 "$SKILLS_DIR/rce-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
-        echo "" >> "$KB_OUTPUT"
-      fi
+      # 根据检测到的漏洞类型加载对应技能
+      for skill_type in $VULN_TYPES_FOUND; do
+        case $skill_type in
+          sql-injection|sql-injection-testing)
+            if [ -f "$SKILLS_DIR/sql-injection/SKILL.md" ]; then
+              echo "## SQL Injection Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/sql-injection/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "## SQL Injection Testing" >> "$SKILLS_COMBINED"
+              echo "" >> "$SKILLS_COMBINED"
+              tail -n +25 "$SKILLS_DIR/sql-injection/SKILL.md" >> "$SKILLS_COMBINED" || true
+              echo "" >> "$SKILLS_COMBINED"
+            fi
+            ;;
+          xss|xss-testing)
+            if [ -f "$SKILLS_DIR/xss-testing/SKILL.md" ]; then
+              echo "## XSS Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/xss-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          ssrf)
+            if [ -f "$SKILLS_DIR/ssrf-testing/SKILL.md" ]; then
+              echo "## SSRF Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/ssrf-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          command-injection|command-injection-testing)
+            if [ -f "$SKILLS_DIR/command-injection-testing/SKILL.md" ]; then
+              echo "## Command Injection Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/command-injection-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          csrf|csrf-testing)
+            if [ -f "$SKILLS_DIR/csrf-testing/SKILL.md" ]; then
+              echo "## CSRF Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/csrf-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          file-upload|file-upload-testing)
+            if [ -f "$SKILLS_DIR/file-upload-testing/SKILL.md" ]; then
+              echo "## File Upload Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/file-upload-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          idor|idor-testing)
+            if [ -f "$SKILLS_DIR/idor-testing/SKILL.md" ]; then
+              echo "## IDOR Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/idor-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          xxe|xxe-testing)
+            if [ -f "$SKILLS_DIR/xxe-testing/SKILL.md" ]; then
+              echo "## XXE Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/xxe-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          ldap|ldap-injection|ldap-injection-testing)
+            if [ -f "$SKILLS_DIR/ldap-injection-testing/SKILL.md" ]; then
+              echo "## LDAP Injection Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/ldap-injection-testing/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+          api|api-security|api-security-testing)
+            if [ -f "$SKILLS_DIR/api-security/SKILL.md" ]; then
+              echo "## API Security Testing" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              cat "$SKILLS_DIR/api-security/SKILL.md" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+              echo "---" >> "$KB_OUTPUT"
+              echo "" >> "$KB_OUTPUT"
+            fi
+            ;;
+        esac
+      done
       
       KB_LINES=$(wc -l < "$KB_OUTPUT" 2>/dev/null || echo 0)
+      SKILLS_LINES=$(wc -l < "$SKILLS_COMBINED" 2>/dev/null || echo 0)
       echo "[Knowledge Base] Results saved: $KB_OUTPUT ($KB_LINES lines)"
+      echo "[Knowledge Base] Skills library: $SKILLS_COMBINED ($SKILLS_LINES lines)"
 
   - name: extract-semantic-highlights
     type: bash

