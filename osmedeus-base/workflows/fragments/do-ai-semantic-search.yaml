@@ -384,58 +384,36 @@ steps:
     on_error:
       - action: continue
     system_prompt: |
-      你是一个语义搜索专家。
-      你的任务是在已有的扫描数据中进行语义搜索，找到与查询相关的内容。
-      
-      功能：
-      1. 理解自然语言查询的语义
-      2. 在索引数据中找到相关内容
-      3. 按相关性排序返回结果
-      4. 提供洞察和分析
-      5. 特别关注高危漏洞和关键系统
-      
-      重要：返回结构化的 JSON 结果。
+      你是一个渗透测试语义搜索专家。
+      你的任务是在给定的数据中进行语义搜索和分析。
+
+      工作方式：
+      1. 先使用 read_lines 工具读取指定的索引文件
+      2. 理解数据内容
+      3. 根据用户查询进行语义匹配
+      4. 返回结构化的 JSON 结果
+
+      输出格式：
+      - 必须返回有效的 JSON
+      - 如果没有数据，返回空结果数组
+      - 每个结果要包含 type, content, relevance_score, source
+      - 特别关注 critical/high 级别的内容
     query: |
-      请在以下索引数据中搜索与 "{{searchQuery}}" 相关的内容：
+      请在以下数据中搜索与 "{{searchQuery}}" 相关的内容。
 
-      ## 搜索查询
-      {{searchQuery}}
+      首先读取以下索引文件：
+      1. {{semanticIndexDir}}/vulns-index.txt - 漏洞数据
+      2. {{semanticIndexDir}}/tech-index.txt - 技术栈
+      3. {{semanticIndexDir}}/subdomains-index.txt - 子域名
+      4. {{semanticIndexDir}}/http-index.txt - HTTP 端点
 
-      ## 漏洞索引数据
-      请使用 read_lines 工具读取 {{semanticIndexDir}}/vulns-index.txt
+      搜索查询：{{searchQuery}}
 
-      ## 技术栈索引
-      请使用 read_lines 工具读取 {{semanticIndexDir}}/tech-index.txt
-
-      ## 子域名索引
-      请使用 read_lines 工具读取 {{semanticIndexDir}}/subdomains-index.txt
-
-      请输出 JSON 格式的搜索结果：
-      ```json
-      {
-        "query": "{{searchQuery}}",
-        "total_results": 0,
-        "results": [
-          {
-            "type": "vuln/tech/endpoint/subdomain",
-            "content": "相关内容",
-            "relevance_score": 0.95,
-            "source": "来源文件",
-            "severity": "critical/high/medium/low",
-            "recommendation": "处理建议"
-          }
-        ],
-        "highlights": {
-          "critical_findings": ["关键发现1"],
-          "immediate_actions": ["立即行动1"],
-          "affected_systems": ["受影响的系统1"]
-        },
-        "insights": ["关键发现1", "发现2"],
-        "recommendations": ["建议1"]
-      }
-      ```
-
-      只输出 JSON。
+      要求：
+      - 如果索引文件存在且有内容，进行语义分析
+      - 如果没有数据，返回 {"error": "no_data", "results": [], "total_results": 0}
+      - 按 relevance_score 降序排序
+      - 只输出 JSON，不要有其他文字
     agent_tools:
       - preset: read_file
       - preset: read_lines
@@ -449,15 +427,30 @@ steps:
     pre_condition: "{{enableSemanticSearch}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      cd {{Output}}/ai-analysis
       
-      # 构建完整结果
+      # 收集统计数据
+      VULNS_LINES=$(wc -l < semantic-index/vulns-index.txt 2>/dev/null || echo 0)
+      TECH_LINES=$(wc -l < semantic-index/tech-index.txt 2>/dev/null || echo 0)
+      SUBDOMAIN_LINES=$(wc -l < semantic-index/subdomains-index.txt 2>/dev/null || echo 0)
+      HTTP_LINES=$(wc -l < semantic-index/http-index.txt 2>/dev/null || echo 0)
+      
+      echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES"
+      
+      # 构建基础结果
       cat > {{searchResultsOutput}} << 'EOF'
       {
-        "query": "SEARCH_QUERY_PLACEHOLDER",
+        "query": "QUERY_PLACEHOLDER",
         "timestamp": "TIMESTAMP_PLACEHOLDER",
         "source": "llm_agent",
-        "vector_search_used": VECTOR_SEARCH_PLACEHOLDER,
+        "vector_search_used": false,
         "provider": "PROVIDER_PLACEHOLDER",
+        "index_stats": {
+          "vulns": INDEX_VULNS_PLACEHOLDER,
+          "tech": INDEX_TECH_PLACEHOLDER,
+          "subdomains": INDEX_SUBDOMAINS_PLACEHOLDER,
+          "http": INDEX_HTTP_PLACEHOLDER
+        },
         "results": [],
         "highlights": {
           "critical_findings": [],
@@ -465,35 +458,86 @@ steps:
           "affected_systems": []
         },
         "insights": [],
-        "recommendations": []
+        "recommendations": [],
+        "status": "pending"
       }
       EOF
       
-      sed -i "s|SEARCH_QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
+      sed -i "s|QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
       sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" {{searchResultsOutput}}
       sed -i "s|PROVIDER_PLACEHOLDER|{{embeddingsProvider}}|g" {{searchResultsOutput}}
+      sed -i "s|INDEX_VULNS_PLACEHOLDER|$VULNS_LINES|g" {{searchResultsOutput}}
+      sed -i "s|INDEX_TECH_PLACEHOLDER|$TECH_LINES|g" {{searchResultsOutput}}
+      sed -i "s|INDEX_SUBDOMAINS_PLACEHOLDER|$SUBDOMAIN_LINES|g" {{searchResultsOutput}}
+      sed -i "s|INDEX_HTTP_PLACEHOLDER|$HTTP_LINES|g" {{searchResultsOutput}}
       
-      if [ "{{useVectorSearch}}" = "true" ] && [ -n "{{jinaApiKey}}" ] && [ "{{jinaApiKey}}" != "{{JINA_API_KEY}}" ]; then
-        sed -i "s|VECTOR_SEARCH_PLACEHOLDER|true|g" {{searchResultsOutput}}
-      else
-        sed -i "s|VECTOR_SEARCH_PLACEHOLDER|false|g" {{searchResultsOutput}}
+      # 检查索引数据是否为空
+      if [ "$VULNS_LINES" -eq 0 ] && [ "$TECH_LINES" -eq 0 ] && [ "$SUBDOMAIN_LINES" -eq 0 ]; then
+        echo "[Semantic] WARNING: All index files are empty! Search results will be limited."
+        echo "[Semantic] This is expected if vuln-suite hasn't completed yet."
+        cat > {{searchResultsOutput}} << 'EOF'
+        {
+          "query": "QUERY_PLACEHOLDER",
+          "timestamp": "TIMESTAMP_PLACEHOLDER",
+          "status": "no_index_data",
+          "message": "索引数据为空，请确保 vuln-suite 已完成执行",
+          "index_stats": {
+            "vulns": 0,
+            "tech": 0,
+            "subdomains": 0,
+            "http": 0
+          },
+          "results": [],
+          "highlights": {"critical_findings": [], "immediate_actions": [], "affected_systems": []},
+          "insights": ["索引数据为空，无法进行语义搜索"],
+          "recommendations": ["等待 vuln-suite 完成后再执行语义搜索"]
+        }
+        EOF
+        sed -i "s|QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
+        sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" {{searchResultsOutput}}
+        exit 0
       fi
       
-      # 如果 LLM agent 返回了结果，合并
-      if [ -n "{{search_results}}" ]; then
-        # 提取 highlights 到单独文件供后续模块使用
-        echo '{{search_results}}' | jq -r '.highlights // empty' > {{semanticHighlightsOutput}} 2>/dev/null || echo '{}' > {{semanticHighlightsOutput}}
+      # 尝试合并 LLM agent 返回的结果
+      if [ -n "{{search_results}}" ] && [ "{{search_results}}" != "{}" ] && [ "{{search_results}}" != "[]" ]; then
+        echo "[Semantic] Processing LLM agent results..."
         
-        # 合并到主结果
-        echo '{{search_results}}' | jq -s '.[0] * .[1]' {{searchResultsOutput}} - 2>/dev/null > {{Output}}/ai-analysis/semantic-merged.json || echo '{{search_results}}' >> {{searchResultsOutput}}
-        mv {{Output}}/ai-analysis/semantic-merged.json {{searchResultsOutput}} 2>/dev/null || true
+        # 清理 markdown 代码块
+        CLEANED=$(echo '{{search_results}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//')
+        
+        # 验证是否为有效 JSON
+        if echo "$CLEANED" | jq empty 2>/dev/null; then
+          echo "[Semantic] Valid JSON from agent, merging..."
+          
+          # 提取关键字段
+          TOTAL=$(echo "$CLEANED" | jq -r '.total_results // 0' 2>/dev/null)
+          INSIGHTS=$(echo "$CLEANED" | jq -r '.insights // [] | join(", ")' 2>/dev/null)
+          RECS=$(echo "$CLEANED" | jq -r '.recommendations // [] | join(", ")' 2>/dev/null)
+          
+          # 更新结果
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "$CLEANED" | jq --arg insights "$INSIGHTS" --arg recs "$RECS" \
+              '.insights = [$insights] | .recommendations = [$recs] | .status = "completed"' >> {{searchResultsOutput}}
+            echo "[Semantic] Search completed with $TOTAL results"
+          else
+            echo "[Semantic] Agent returned no results"
+            echo '{"status": "no_results", "message": "LLM 未找到相关结果"}' >> {{searchResultsOutput}}
+          fi
+        else
+          echo "[Semantic] WARNING: Agent returned invalid JSON, using default results"
+          echo '{"status": "invalid_json", "message": "LLM 输出格式错误"}' >> {{searchResultsOutput}}
+        fi
+      else
+        echo "[Semantic] No results from LLM agent"
+        echo '{"status": "no_agent_output", "message": "Agent 未返回有效结果"}' >> {{searchResultsOutput}}
       fi
       
+      # 最终验证
       if jq empty {{searchResultsOutput}} 2>/dev/null; then
-        RESULT_COUNT=$(jq -r '.total_results // 0' {{searchResultsOutput}} 2>/dev/null)
-        echo "[Semantic Search] Found $RESULT_COUNT results"
+        echo "[Semantic] Results saved successfully"
       else
-        echo "[Semantic Search] Results saved with warnings"
+        echo "[Semantic] WARNING: Final JSON invalid, recreating..."
+        echo '{"status": "error", "results": [], "error": "JSON validation failed"}' > {{searchResultsOutput}}
       fi
 
   - name: extract-semantic-highlights
