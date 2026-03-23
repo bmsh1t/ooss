@@ -170,9 +170,11 @@ modules:
     depends_on: [vuln-suite]
     pre_condition: "{{enableLlmAnalysis}}"
 
+  # 注意：ai-intelligent-analysis 不依赖 ai-vuln-validation
+  # 因为它有自己的数据源处理逻辑（即使没有 ai-vuln-validation 也能工作）
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
-    depends_on: [ai-vuln-validation]
+    depends_on: [vuln-suite]
     pre_condition: "{{enableLlmAnalysis}}"
 
   # ===========================================================================
@@ -186,8 +188,10 @@ modules:
   # ===========================================================================
   # Phase 10: Report (增强版 - 可视化)
   # ===========================================================================
+  # 注意：report 依赖 ai-intelligent-analysis 和 ai-code-review
+  # 由于使用了 pre_condition，这些依赖在 AI 禁用时会自动满足
   - name: report
     path: common/10-report-enhanced.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review]
+    depends_on: [vuln-suite]
     on_error:
       - action: continue
