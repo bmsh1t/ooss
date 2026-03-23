@@ -200,9 +200,16 @@ modules:
     depends_on: [http-probe, content-analysis, scan-backup]
 
   # ===========================================================================
-  # Phase 7: AI 智能分析 (混合版本)
+  # Phase 7: Vulnerability Scan (先执行，确保 AI 分析有数据可用)
   # ===========================================================================
-  
+  - name: vuln-suite
+    path: common/09-vuln-suite.yaml
+    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
+
+  # ===========================================================================
+  # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
+  # ===========================================================================
+
   # AI 预扫描决策 - agent-acp 版本 (快速预判，不需要深度推理)
   - name: ai-pre-scan-decision
     path: fragments/do-ai-pre-scan-decision-acp.yaml
@@ -210,7 +217,6 @@ modules:
     pre_condition: "{{enablePreScanDecision}}"
 
   # AI 语义搜索 - RAG 功能 (Jina embeddings，独立处理)
-  # 依赖 http-probe 而非 fingerprint，可以更早开始并行执行
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [http-probe]
@@ -218,7 +224,7 @@ modules:
     params:
       searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
 
-  # AI 实时 WAF 规避 - agent-acp 版本 (模式识别，稳定优先)
+  # AI 实时 WAF 规避 - agent-acp 版本
   - name: ai-waf-bypass
     path: fragments/do-ai-waf-bypass-acp.yaml
     depends_on: [http-probe, fingerprint]
@@ -227,11 +233,10 @@ modules:
   # AI 漏洞验证 - agent-acp 版本 (结构化输出，稳定优先)
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation-acp.yaml
-    depends_on: [content-analysis, scan-content]
+    depends_on: [vuln-suite]
     pre_condition: "{{enableVulnValidation}}"
 
   # AI 攻击链分析 - agent 版本 (需要深度推理能力，使用 LLM)
-  # 这是混合版本中唯一使用 agent (LLM) 的模块
   - name: ai-attack-chain
     path: fragments/do-ai-attack-chain.yaml
     depends_on: [ai-vuln-validation]
@@ -248,15 +253,6 @@ modules:
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
     pre_condition: "{{enableLlmAnalysis}}"
-
-  # ===========================================================================
-  # Phase 8: Vulnerability Scan
-  # ===========================================================================
-  # 注意：移除对 ai-intelligent-analysis 的强制依赖
-  # 即使 AI 分析失败，vuln-suite 仍会使用默认配置执行
-  - name: vuln-suite
-    path: common/09-vuln-suite.yaml
-    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
   # ===========================================================================
   # Phase 9: Code Review

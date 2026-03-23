@@ -193,17 +193,23 @@ modules:
     depends_on: [http-probe, content-analysis, scan-backup]
 
   # ===========================================================================
-  # Phase 7: AI 智能分析 (agent-acp 版本 - 使用 flowcli)
+  # Phase 7: Vulnerability Scan (先执行，确保 AI 分析有数据可用)
   # ===========================================================================
-  
-  # AI 预扫描决策 - agent-acp 版本
+  - name: vuln-suite
+    path: common/09-vuln-suite.yaml
+    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
+
+  # ===========================================================================
+  # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
+  # ===========================================================================
+
+  # AI 预扫描决策 - agent-acp 版本 (可并行，依赖较早阶段)
   - name: ai-pre-scan-decision
     path: fragments/do-ai-pre-scan-decision-acp.yaml
     depends_on: [subdomain, dns-resolve]
     pre_condition: "{{enablePreScanDecision}}"
 
   # AI 语义搜索 - RAG 功能 (Jina embeddings，独立处理)
-  # 依赖 http-probe 而非 fingerprint，可以更早开始并行执行
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [http-probe]
@@ -220,7 +226,7 @@ modules:
   # AI 漏洞验证 - agent-acp 版本 (flowcli)
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation-acp.yaml
-    depends_on: [content-analysis, scan-content]
+    depends_on: [vuln-suite]
     pre_condition: "{{enableVulnValidation}}"
 
   # AI 攻击链分析 - agent-acp 版本 (flowcli)
@@ -240,15 +246,6 @@ modules:
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
     pre_condition: "{{enableLlmAnalysis}}"
-
-  # ===========================================================================
-  # Phase 8: Vulnerability Scan
-  # ===========================================================================
-  # 注意：移除对 ai-intelligent-analysis 的强制依赖
-  # 即使 AI 分析失败，vuln-suite 仍会使用默认配置执行
-  - name: vuln-suite
-    path: common/09-vuln-suite.yaml
-    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
   # ===========================================================================
   # Phase 9: Code Review
