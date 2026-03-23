@@ -1,0 +1,63 @@
+# Roles System Module
+kind: module
+name: roles-system
+description: Role-based security testing configuration
+
+params:
+  - name: rolesDir
+    default: "{{OsmedeusBase}}/osmedeus-base/roles"
+  - name: roleName
+    type: string
+    default: ""
+  - name: roleOutput
+    default: "{{Output}}/ai-analysis/role-config-{{TargetSpace}}.yaml"
+
+steps:
+  - name: list-roles
+    type: bash
+    command: |
+      echo "=== Available Roles ==="
+      ROLES_DIR="{{rolesDir}}"
+      if [ ! -d "$ROLES_DIR" ]; then
+        echo "Roles directory not found"
+        exit 0
+      fi
+      for f in "$ROLES_DIR"/*.yaml; do
+        if [ -f "$f" ]; then
+          name=$(basename "$f" .yaml)
+          desc=$(grep "^description:" "$f" 2>/dev/null | head -1 | sed 's/description: //' || echo "No desc")
+          echo "  [$name] - $desc"
+        fi
+      done
+
+  - name: load-role
+    type: bash
+    pre_condition: '{{roleName}} != ""'
+    command: |
+      ROLE_FILE="{{rolesDir}}/{{roleName}}.yaml"
+      mkdir -p {{Output}}/ai-analysis
+      if [ ! -f "$ROLE_FILE" ]; then
+        echo "[ERROR] Role not found: {{roleName}}"
+        exit 0
+      fi
+      cp "$ROLE_FILE" {{roleOutput}}
+      echo "[OK] Role loaded: {{roleName}}"
+      echo "[OK] Output: {{roleOutput}}"
+
+  - name: show-role-info
+    type: bash
+    pre_condition: '{{roleName}} != ""'
+    command: |
+      ROLE_FILE="{{rolesDir}}/{{roleName}}.yaml"
+      if [ ! -f "$ROLE_FILE" ]; then
+        exit 0
+      fi
+      echo "=== Role: {{roleName}} ==="
+      echo ""
+      echo "Focus Areas:"
+      grep -A 10 "^focus_areas:" "$ROLE_FILE" 2>/dev/null | grep "^\s*-" | sed 's/^\s*/  /'
+      echo ""
+      echo "Tools:"
+      grep -A 20 "^tools:" "$ROLE_FILE" 2>/dev/null | grep "^\s*-" | sed 's/^\s*/  /' | head -10
+      echo ""
+      echo "[INFO] Load this role with: roleName={{roleName}}"

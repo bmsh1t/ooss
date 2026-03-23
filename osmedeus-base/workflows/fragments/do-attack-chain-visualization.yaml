@@ -1,0 +1,163 @@
+# Attack Chain Visualization Module
+kind: module
+name: attack-chain-visualization
+description: Generate visual representations of attack chains
+
+params:
+  - name: attackChainInput
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: mermaidOutput
+    default: "{{Output}}/ai-analysis/attack-chain-diagram-{{TargetSpace}}.md"
+  - name: textOutput
+    default: "{{Output}}/ai-analysis/attack-chain-view-{{TargetSpace}}.txt"
+
+steps:
+  - name: check-input
+    type: bash
+    command: |
+      INPUT="{{attackChainInput}}"
+      if [ ! -f "$INPUT" ]; then
+        echo "[ERROR] Attack chain input file not found: $INPUT"
+        echo "SKIP_VISUALIZATION=true" >> {{Output}}/ai-analysis/.viz-status
+        exit 0
+      fi
+      if ! jq empty "$INPUT" 2>/dev/null; then
+        echo "[ERROR] Invalid JSON in attack chain file"
+        echo "SKIP_VISUALIZATION=true" >> {{Output}}/ai-analysis/.viz-status
+        exit 0
+      fi
+      echo "INPUT_VALID=true" >> {{Output}}/ai-analysis/.viz-status
+      echo "[OK] Attack chain JSON is valid"
+
+  - name: generate-mermaid
+    type: bash
+    pre_condition: 'file_exists("{{Output}}/ai-analysis/.viz-status") && grep -q "INPUT_VALID=true" {{Output}}/ai-analysis/.viz-status'
+    command: |
+      INPUT="{{attackChainInput}}"
+      OUTPUT="{{mermaidOutput}}"
+      mkdir -p {{Output}}/ai-analysis
+
+      CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' "$INPUT" 2>/dev/null || echo 0)
+
+      echo "# Attack Chain Visualization" > "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "Target: {{Target}}" >> "$OUTPUT"
+      echo "Generated: $(date)" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "## Summary" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "- Total Attack Chains: $CHAIN_COUNT" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "## Mermaid Diagram" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo '```mermaid' >> "$OUTPUT"
+      echo "graph TD" >> "$OUTPUT"
+
+      INDEX=1
+      for chain in $(jq -r '.attack_chains[] | @base64' "$INPUT" 2>/dev/null); do
+        DATA=$(echo "$chain" | base64 -d)
+        NAME=$(echo "$DATA" | jq -r '.chain_name // "Chain_'$INDEX'"')
+        ENTRY=$(echo "$DATA" | jq -r '.entry_point.vulnerability // "Unknown"')
+        
+        echo "    subgraph \"$NAME\"" >> "$OUTPUT"
+        echo "        A$INDEX[\"$ENTRY\"]" >> "$OUTPUT"
+        
+        STEP=1
+        for step in $(echo "$DATA" | jq -r '.chain_steps[] | @base64' 2>/dev/null); do
+          STEP_DATA=$(echo "$step" | base64 -d)
+          ACTION=$(echo "$STEP_DATA" | jq -r '.action // "Step"')
+          if [ $STEP -eq 1 ]; then
+            echo "        A$INDEX --> B$INDEX"_"$STEP[\"$ACTION\"]" >> "$OUTPUT"
+          else
+            echo "        B$INDEX"_"$((STEP-1)) --> B$INDEX"_"$STEP[\"$ACTION\"]" >> "$OUTPUT"
+          fi
+          STEP=$((STEP+1))
+        done
+        
+        FINAL=$(echo "$DATA" | jq -r '.final_objective // "Goal"')
+        LAST=$((STEP-1))
+        echo "        B$INDEX"_"$LAST --> Z$INDEX[\"$FINAL\"]" >> "$OUTPUT"
+        echo "    end" >> "$OUTPUT"
+        
+        INDEX=$((INDEX+1))
+      done
+
+      echo '```' >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "[OK] Mermaid diagram generated: $OUTPUT"
+
+  - name: generate-text-view
+    type: bash
+    pre_condition: 'file_exists("{{Output}}/ai-analysis/.viz-status") && grep -q "INPUT_VALID=true" {{Output}}/ai-analysis/.viz-status'
+    command: |
+      INPUT="{{attackChainInput}}"
+      OUTPUT="{{textOutput}}"
+      mkdir -p {{Output}}/ai-analysis
+
+      CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' "$INPUT" 2>/dev/null || echo 0)
+      CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' "$INPUT" 2>/dev/null || echo 0)
+
+      echo "================================================================================" > "$OUTPUT"
+      echo "                     ATTACK CHAIN ANALYSIS REPORT" >> "$OUTPUT"
+      echo "================================================================================" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "Target: {{Target}}" >> "$OUTPUT"
+      echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "--------------------------------------------------------------------------------" >> "$OUTPUT"
+      echo "                              SUMMARY" >> "$OUTPUT"
+      echo "--------------------------------------------------------------------------------" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+      echo "  Total Attack Chains: $CHAIN_COUNT" >> "$OUTPUT"
+      echo "  Critical Chains: $CRITICAL" >> "$OUTPUT"
+      echo "" >> "$OUTPUT"
+
+      INDEX=1
+      for chain in $(jq -r '.attack_chains[] | @base64' "$INPUT" 2>/dev/null); do
+        DATA=$(echo "$chain" | base64 -d)
+        NAME=$(echo "$DATA" | jq -r '.chain_name // "Chain_"'$INDEX''')
+        SEVERITY=$(echo "$DATA" | jq -r '.severity // "unknown"')
+        DIFFICULTY=$(echo "$DATA" | jq -r '.difficulty // "unknown"')
+        SUCCESS=$(echo "$DATA" | jq -r '.success_probability // 0' | awk '{printf "%.0f", $1*100}')
+
+        echo "" >> "$OUTPUT"
+        echo "================================================================================" >> "$OUTPUT"
+        echo "ATTACK CHAIN #$INDEX: $NAME" >> "$OUTPUT"
+        echo "================================================================================" >> "$OUTPUT"
+        echo "" >> "$OUTPUT"
+        echo "  [$SEVERITY]  Difficulty: $DIFFICULTY  Success: ${SUCCESS}%" >> "$OUTPUT"
+        echo "" >> "$OUTPUT"
+        echo "  ATTACK PATH:" >> "$OUTPUT"
+        echo "  " >> "$OUTPUT"
+
+        ENTRY=$(echo "$DATA" | jq -r '.entry_point.vulnerability // "Unknown"')
+        echo "    [0] ENTRY --> $ENTRY" >> "$OUTPUT"
+
+        STEP=1
+        for step in $(echo "$DATA" | jq -r '.chain_steps[] | @base64' 2>/dev/null); do
+          STEP_DATA=$(echo "$step" | base64 -d)
+          ACTION=$(echo "$STEP_DATA" | jq -r '.action // "Unknown"')
+          echo "    [$STEP] STEP --> $ACTION" >> "$OUTPUT"
+          STEP=$((STEP+1))
+        done
+
+        FINAL=$(echo "$DATA" | jq -r '.final_objective // "Unknown"')
+        echo "    [$STEP] GOAL --> $FINAL" >> "$OUTPUT"
+
+        INDEX=$((INDEX+1))
+      done
+
+      echo "" >> "$OUTPUT"
+      echo "================================================================================" >> "$OUTPUT"
+      echo "                    END OF ATTACK CHAIN REPORT" >> "$OUTPUT"
+      echo "================================================================================" >> "$OUTPUT"
+
+      echo "[OK] Text view generated: $OUTPUT"
+
+  - name: log-visualization-complete
+    type: bash
+    command: |
+      echo "[OK] Attack chain visualization complete"
+      echo "[OK] Output files:"
+      echo "  - Mermaid: {{mermaidOutput}}"
+      echo "  - Text: {{textOutput}}"
