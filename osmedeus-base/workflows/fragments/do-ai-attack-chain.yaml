@@ -87,10 +87,41 @@ steps:
       CHAIN_INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/attack-chain-input.json 2>/dev/null || echo 0)
       echo "[INFO] [Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
 
+  - name: check-attack-chain-data
+    type: bash
+    pre_condition: "{{enableAttackChain}}"
+    command: |
+      echo "[INFO] [Attack Chain] Checking data availability..."
+      
+      # 检查关键数据文件
+      VULN_VALIDATION_SIZE=0
+      NUCLEI_CRITICAL_SIZE=0
+      
+      if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
+        VULN_VALIDATION_SIZE=$(wc -c < "{{vulnValidationFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{nucleiCriticalFile}}" ]; then
+        NUCLEI_CRITICAL_SIZE=$(wc -l < "{{nucleiCriticalFile}}" 2>/dev/null || echo 0)
+      fi
+      
+      echo "[INFO] [Attack Chain] Data check: vuln_validation=$VULN_VALIDATION_SIZE bytes, critical=$NUCLEI_CRITICAL_SIZE"
+      
+      # 如果没有数据，生成空结果
+      if [ "$VULN_VALIDATION_SIZE" -lt 50 ] && [ "$NUCLEI_CRITICAL_SIZE" -eq 0 ]; then
+        echo "[WARN] [Attack Chain] Insufficient data for attack chain analysis"
+        mkdir -p {{Output}}/ai-analysis
+        echo '{"error": "no_data", "attack_chain_summary": {"total_chains": 0, "critical_chains": 0, "high_impact_chains": 0, "most_likely_entry_points": []}, "attack_chains": [], "critical_paths": [], "defense_recommendations": []}' > {{attackChainOutput}}
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.attack-chain-skip
+        exit 0
+      fi
+      
+      rm -f {{Output}}/ai-analysis/.attack-chain-skip 2>/dev/null || true
+      echo "[INFO] [Attack Chain] Data available, proceeding with analysis"
+
   - name: ai-analyze-attack-chains
     type: agent
-    pre_condition: "{{enableAttackChain}}"
-    max_iterations: 8
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
+    max_iterations: 5
     timeout: 600
     on_error:
       - action: continue

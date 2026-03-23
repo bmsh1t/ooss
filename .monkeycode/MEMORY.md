@@ -31,3 +31,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 
 ## 条目
 
+[AI 工作流执行顺序问题修复]
+- Date: 2026-03-23
+- Context: Agent 在优化 superdomain-extensive-ai-optimized.yaml 工作流时发现
+- Category: 代码模式
+- Instructions:
+  - AI 模块（ai-vuln-validation, ai-attack-chain, ai-path-planning）与 vuln-suite 并行执行，导致 AI 分析时数据尚未生成
+  - 解决方案：调整执行顺序，将 Phase 8 vuln-suite 移到 Phase 7，使 AI 模块在漏洞扫描完成后执行
+  - 各 AI 模块增加数据有效性检查（check-xxx-data 步骤），无数据时生成空结果而非调用 LLM
+  - max_iterations 从 8-10 优化到 4-6，减少无效 token 消耗
+

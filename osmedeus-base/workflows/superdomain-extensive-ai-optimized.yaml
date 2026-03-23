@@ -181,17 +181,19 @@ modules:
     depends_on: [http-probe, content-analysis, scan-backup]
 
   # ===========================================================================
-  # Phase 7: AI 智能分析 (agent 版本 - 使用 LLM)
+  # Phase 7: Vulnerability Scan (先执行，确保 AI 分析有数据可用)
   # ===========================================================================
-  
-  # AI 预扫描决策 - agent 版本
-  - name: ai-pre-scan-decision
-    path: fragments/do-ai-pre-scan-decision.yaml
-    depends_on: [subdomain, dns-resolve]
-    pre_condition: "{{enablePreScanDecision}}"
+  - name: vuln-suite
+    path: common/09-vuln-suite.yaml
+    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
-  # AI 语义搜索 - RAG 功能，跨目标知识共享
-  # 依赖 http-probe 可以更早开始并行执行
+  # ===========================================================================
+  # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
+  # ===========================================================================
+  # 注意：AI 分析依赖 vuln-suite 生成的 nuclei 扫描结果
+
+  # AI 语义搜索 - RAG 功能，依赖 http-probe 可并行执行
+  # 注意：早期索引时漏洞数据可能较少，模块内部会处理这种情况
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [http-probe]
@@ -199,44 +201,41 @@ modules:
     params:
       searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
 
-  # AI 实时 WAF 规避 - agent 版本
+  # AI 预扫描决策 - 依赖子域名枚举结果
+  - name: ai-pre-scan-decision
+    path: fragments/do-ai-pre-scan-decision.yaml
+    depends_on: [subdomain, dns-resolve]
+    pre_condition: "{{enablePreScanDecision}}"
+
+  # AI 实时 WAF 规避 - 依赖指纹识别结果
   - name: ai-waf-bypass
     path: fragments/do-ai-waf-bypass.yaml
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
-  # AI 漏洞验证 - agent 版本 (LLM)
+  # AI 漏洞验证 - 依赖 vuln-suite 的 nuclei 扫描结果
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation.yaml
-    depends_on: [content-analysis, scan-content]
+    depends_on: [vuln-suite]
     pre_condition: "{{enableVulnValidation}}"
 
-  # AI 攻击链分析 - agent 版本 (LLM)
+  # AI 攻击链分析 - 依赖 ai-vuln-validation 的输出
   - name: ai-attack-chain
     path: fragments/do-ai-attack-chain.yaml
     depends_on: [ai-vuln-validation]
     pre_condition: "{{enableAttackChain}}"
 
-  # AI 攻击路径规划 - agent 版本 (LLM)
+  # AI 攻击路径规划 - 依赖 ai-attack-chain 的输出
   - name: ai-path-planning
     path: fragments/do-ai-path-planning.yaml
     depends_on: [ai-attack-chain]
     pre_condition: "{{enablePathPlanning}}"
 
-  # AI 协调器 - 汇总分析结果
+  # AI 协调器 - 汇总所有 AI 分析结果
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
     pre_condition: "{{enableLlmAnalysis}}"
-
-  # ===========================================================================
-  # Phase 8: Vulnerability Scan
-  # ===========================================================================
-  # 注意：移除对 ai-intelligent-analysis 的强制依赖
-  # 即使 AI 分析失败，vuln-suite 仍会使用默认配置执行
-  - name: vuln-suite
-    path: common/09-vuln-suite.yaml
-    depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
   # ===========================================================================
   # Phase 9: Code Review

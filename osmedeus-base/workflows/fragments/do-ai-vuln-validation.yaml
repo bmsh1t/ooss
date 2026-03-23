@@ -105,10 +105,50 @@ steps:
       
       echo "[INFO] [INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
+  - name: check-vuln-data
+    type: bash
+    pre_condition: "{{enableVulnValidation}}"
+    command: |
+      echo "[INFO] [Vuln Validation] Checking data availability..."
+      
+      # 检查关键数据文件
+      NUCLEI_JSONL_SIZE=0
+      CRITICAL_SIZE=0
+      HIGH_SIZE=0
+      
+      if [ -f "{{nucleiFile}}" ]; then
+        NUCLEI_JSONL_SIZE=$(wc -c < "{{nucleiFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{nucleiCriticalFile}}" ]; then
+        CRITICAL_SIZE=$(wc -l < "{{nucleiCriticalFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{nucleiHighFile}}" ]; then
+        HIGH_SIZE=$(wc -l < "{{nucleiHighFile}}" 2>/dev/null || echo 0)
+      fi
+      
+      echo "[INFO] [Vuln Validation] Data check: nuclei_jsonl=$NUCLEI_JSONL_SIZE bytes, critical=$CRITICAL_SIZE, high=$HIGH_SIZE"
+      
+      # 如果没有数据，生成空结果并标记跳过
+      if [ "$NUCLEI_JSONL_SIZE" -lt 100 ] && [ "$CRITICAL_SIZE" -eq 0 ] && [ "$HIGH_SIZE" -eq 0 ]; then
+        echo "[WARN] [Vuln Validation] No vulnerability data found, generating empty results"
+        mkdir -p {{Output}}/ai-analysis/validation
+        echo '{"error": "no_data", "risk_level": "低", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.vuln-validation-skip
+        exit 0
+      fi
+      
+      rm -f {{Output}}/ai-analysis/.vuln-validation-skip 2>/dev/null || true
+      
+      # 收集数据统计
+      echo "[INFO] [Vuln Validation] Data available, proceeding with validation"
+      echo "NUCLEI_JSONL_SIZE=$NUCLEI_JSONL_SIZE" > {{Output}}/ai-analysis/.vuln-validation-stats
+      echo "CRITICAL_COUNT=$CRITICAL_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
+      echo "HIGH_COUNT=$HIGH_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
+
   - name: ai-validate-vulns
     type: agent
-    pre_condition: "{{enableVulnValidation}}"
-    max_iterations: 10
+    pre_condition: '{{enableVulnValidation}} && !file_exists("{{Output}}/ai-analysis/.vuln-validation-skip")'
+    max_iterations: 6
     timeout: 600
     on_error:
       - action: continue
@@ -126,6 +166,7 @@ steps:
       - 必须返回结构化的 JSON 输出
       - 每个漏洞必须有置信度评分
       - 提供可执行的验证命令
+      - 只分析提供的数据，不要虚构漏洞
     query: |
       请验证以下漏洞发现，判断其真实性并识别假阳性：
 

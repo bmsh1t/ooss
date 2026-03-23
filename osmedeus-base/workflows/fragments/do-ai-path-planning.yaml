@@ -68,10 +68,37 @@ steps:
         EOF
       fi
 
+  - name: check-path-planning-data
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      echo "[INFO] [Path Planning] Checking data availability..."
+      
+      # 检查关键数据文件
+      ATTACK_CHAIN_SIZE=0
+      
+      if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
+        ATTACK_CHAIN_SIZE=$(wc -c < "{{attackChainFile}}" 2>/dev/null || echo 0)
+      fi
+      
+      echo "[INFO] [Path Planning] Data check: attack_chain=$ATTACK_CHAIN_SIZE bytes"
+      
+      # 如果没有数据，生成空结果
+      if [ "$ATTACK_CHAIN_SIZE" -lt 50 ]; then
+        echo "[WARN] [Path Planning] Insufficient data for path planning"
+        mkdir -p {{Output}}/ai-analysis
+        echo '{"error": "no_data", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.path-planning-skip
+        exit 0
+      fi
+      
+      rm -f {{Output}}/ai-analysis/.path-planning-skip 2>/dev/null || true
+      echo "[INFO] [Path Planning] Data available, proceeding with planning"
+
   - name: ai-generate-attack-plan
     type: agent
-    pre_condition: "{{enablePathPlanning}}"
-    max_iterations: 6
+    pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
+    max_iterations: 4
     timeout: 600
     on_error:
       - action: continue

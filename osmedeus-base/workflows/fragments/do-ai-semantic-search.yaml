@@ -111,6 +111,34 @@ steps:
       - 'log_info("JINA_API_KEY set: no")'
       - 'log_info("OPENAI_API_KEY set: no")'
 
+  - name: check-semantic-data
+    type: bash
+    pre_condition: "{{enableSemanticSearch}}"
+    command: |
+      echo "[INFO] [Semantic Search] Checking data availability..."
+      
+      # 检查索引数据
+      HTTP_COUNT=0
+      SUBDOMAIN_COUNT=0
+      FINGERPRINT_SIZE=0
+      
+      if [ -f "{{httpFile}}" ]; then
+        HTTP_COUNT=$(wc -l < "{{httpFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
+        SUBDOMAIN_COUNT=$(wc -l < "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
+        FINGERPRINT_SIZE=$(wc -c < "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" 2>/dev/null || echo 0)
+      fi
+      
+      echo "[INFO] [Semantic Search] Data check: http=$HTTP_COUNT, subdomains=$SUBDOMAIN_COUNT, fingerprint=$FINGERPRINT_SIZE bytes"
+      
+      # 如果数据太少，给出警告但继续执行
+      if [ "$HTTP_COUNT" -lt 10 ]; then
+        echo "[WARN] [Semantic Search] Low HTTP count ($HTTP_COUNT), semantic search may have limited results"
+      fi
+
   - name: index-scan-data
     type: bash
     pre_condition: "{{enableSemanticSearch}} && {{indexExistingData}}"
@@ -118,21 +146,28 @@ steps:
       set +e
       mkdir -p {{semanticIndexDir}}
       
-      # 索引漏洞数据
-      echo "=== Indexing vulnerabilities ===" > {{semanticIndexDir}}/index.log
-      : > {{semanticIndexDir}}/vulns-index.txt
-      for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt; do
-        if [ -f "$f" ]; then
-          echo "Indexing: $f" >> {{semanticIndexDir}}/index.log
-          cat "$f" >> {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || true
-        fi
-      done
+      echo "=== Semantic Search Index ===" > {{semanticIndexDir}}/index.log
+      echo "Created: $(date)" >> {{semanticIndexDir}}/index.log
+      
+      # 索引子域名（最早可用）
+      echo "=== Indexing subdomains ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/subdomains-index.txt
+      if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
+        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || true
+      fi
       
       # 索引技术栈数据
       echo "=== Indexing tech stack ===" >> {{semanticIndexDir}}/index.log
       : > {{semanticIndexDir}}/tech-index.txt
       if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
         cat "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" >> {{semanticIndexDir}}/tech-index.txt 2>/dev/null || true
+      fi
+      
+      # 索引 HTTP 探测结果
+      echo "=== Indexing HTTP results ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/http-index.txt
+      if [ -f "{{httpFile}}" ]; then
+        cat "{{httpFile}}" >> {{semanticIndexDir}}/http-index.txt 2>/dev/null || true
       fi
       
       # 索引 JS 端点
@@ -142,31 +177,49 @@ steps:
         cat "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || true
       fi
       
-      # 索引子域名
-      echo "=== Indexing subdomains ===" >> {{semanticIndexDir}}/index.log
-      : > {{semanticIndexDir}}/subdomains-index.txt
-      if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
-        cat "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" >> {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || true
-      fi
+      # 索引漏洞数据（可能是空的，因为与 vuln-suite 并行执行）
+      echo "=== Indexing vulnerabilities ===" >> {{semanticIndexDir}}/index.log
+      : > {{semanticIndexDir}}/vulns-index.txt
+      INDEXED_VULNS=0
+      for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt; do
+        if [ -f "$f" ]; then
+          fsize=$(wc -c < "$f" 2>/dev/null || echo 0)
+          if [ "$fsize" -gt 100 ]; then
+            echo "Indexing: $f ($fsize bytes)" >> {{semanticIndexDir}}/index.log
+            cat "$f" >> {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || true
+            INDEXED_VULNS=$((INDEXED_VULNS + 1))
+          fi
+        fi
+      done
       
       # 创建索引元数据
-      VULNS_COUNT=$(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0)
-      TECH_COUNT=$(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0)
-      ENDPOINTS_COUNT=$(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0)
       SUBDOMAINS_COUNT=$(wc -l < {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || echo 0)
+      TECH_COUNT=$(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0)
+      HTTP_COUNT=$(wc -l < {{semanticIndexDir}}/http-index.txt 2>/dev/null || echo 0)
+      ENDPOINTS_COUNT=$(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0)
+      VULNS_COUNT=$(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0)
       
       cat > {{semanticIndexDir}}/metadata.json << EOF
       {
         "target": "{{Target}}",
         "indexed_at": "$(date -Iseconds 2>/dev/null || echo 'unknown')",
-        "vulns_count": $VULNS_COUNT,
+        "subdomains_count": $SUBDOMAINS_COUNT,
         "tech_count": $TECH_COUNT,
+        "http_count": $HTTP_COUNT,
         "endpoints_count": $ENDPOINTS_COUNT,
-        "subdomains_count": $SUBDOMAINS_COUNT
+        "vulns_count": $VULNS_COUNT,
+        "vuln_files_indexed": $INDEXED_VULNS,
+        "note": "vulns may be incomplete if scanned in parallel with vuln-suite"
       }
       EOF
       
-      echo "[Semantic] Index created successfully"
+      echo "[Semantic] Index created: subdomains=$SUBDOMAINS_COUNT, tech=$TECH_COUNT, http=$HTTP_COUNT, vulns=$VULNS_COUNT"
+      
+      # 如果漏洞数据太少，标记可能需要后续更新
+      if [ "$VULNS_COUNT" -lt 10 ]; then
+        echo "[INFO] [Semantic Search] Low vuln count, consider re-running after vuln-suite completes"
+      fi
+      
       exit 0
 
   - name: generate-data-embeddings

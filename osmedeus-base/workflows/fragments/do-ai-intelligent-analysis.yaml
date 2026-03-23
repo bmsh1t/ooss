@@ -132,58 +132,70 @@ steps:
 
       echo "[AI Coordinator] Checking submodule results..."
 
+      # 检查并报告各模块状态
+      check_file() {
+        local file="$1"
+        local name="$2"
+        if [ -f "$file" ] && jq empty "$file" 2>/dev/null; then
+          local size=$(wc -c < "$file" 2>/dev/null || echo 0)
+          if [ "$size" -gt 50 ]; then
+            echo "[OK] [AI Coordinator] $name: available ($size bytes)"
+            return 0
+          fi
+        fi
+        echo "[WARN] [AI Coordinator] $name: not available or empty"
+        return 1
+      }
+
       # 聚合漏洞验证结果
       VULN_STATUS="not_available"
       CONFIRMED_VULNS=0
       FALSE_POSITIVES=0
-      if [ -f "$VULN_FILE" ] && jq empty "$VULN_FILE" 2>/dev/null; then
+      if check_file "$VULN_FILE" "Vuln validation"; then
         VULN_STATUS="available"
-        CONFIRMED_VULNS=$(jq -r '.validation_summary.confirmed_real // 0' "$VULN_FILE" 2>/dev/null || echo 0)
-        FALSE_POSITIVES=$(jq -r '.validation_summary.false_positives // 0' "$VULN_FILE" 2>/dev/null || echo 0)
-        echo "[AI Coordinator] Vuln validation: $CONFIRMED_VULNS confirmed, $FALSE_POSITIVES false positives"
-      else
-        echo "[AI Coordinator] Vuln validation results not available"
+        CONFIRMED_VULNS=$(jq -r '.confirmed_real // 0' "$VULN_FILE" 2>/dev/null || echo 0)
+        FALSE_POSITIVES=$(jq -r '.false_positives // 0' "$VULN_FILE" 2>/dev/null || echo 0)
       fi
 
       # 聚合攻击链结果
       CHAIN_STATUS="not_available"
       TOTAL_CHAINS=0
       CRITICAL_CHAINS=0
-      if [ -f "$CHAIN_FILE" ] && jq empty "$CHAIN_FILE" 2>/dev/null; then
+      if check_file "$CHAIN_FILE" "Attack chain"; then
         CHAIN_STATUS="available"
         TOTAL_CHAINS=$(jq -r '.attack_chain_summary.total_chains // 0' "$CHAIN_FILE" 2>/dev/null || echo 0)
         CRITICAL_CHAINS=$(jq -r '.attack_chain_summary.critical_chains // 0' "$CHAIN_FILE" 2>/dev/null || echo 0)
-        echo "[AI Coordinator] Attack chains: $TOTAL_CHAINS total, $CRITICAL_CHAINS critical"
-      else
-        echo "[AI Coordinator] Attack chain results not available"
       fi
 
       # 聚合路径规划结果
       PLAN_STATUS="not_available"
       TOTAL_PHASES=0
-      if [ -f "$PLAN_FILE" ] && jq empty "$PLAN_FILE" 2>/dev/null; then
+      if check_file "$PLAN_FILE" "Path planning"; then
         PLAN_STATUS="available"
         TOTAL_PHASES=$(jq -r '.plan_summary.total_phases // 0' "$PLAN_FILE" 2>/dev/null || echo 0)
-        echo "[AI Coordinator] Path planning: $TOTAL_PHASES phases"
-      else
-        echo "[AI Coordinator] Path planning results not available"
       fi
 
       # 聚合语义搜索结果
       SEMANTIC_STATUS="not_available"
       SEMANTIC_RESULTS=0
-      if [ -f "$SEMANTIC_FILE" ] && jq empty "$SEMANTIC_FILE" 2>/dev/null; then
+      if check_file "$SEMANTIC_FILE" "Semantic search"; then
         SEMANTIC_STATUS="available"
         SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
-        echo "[AI Coordinator] Semantic search: $SEMANTIC_RESULTS results"
-      else
-        echo "[AI Coordinator] Semantic search results not available"
       fi
+
+      # 检查是否有任何模块产生了有效结果
+      ANY_DATA="false"
+      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ]; then
+        ANY_DATA="true"
+      fi
+
+      echo "[INFO] [AI Coordinator] Any data available: $ANY_DATA"
 
       # 创建聚合结果文件
       cat > {{Output}}/ai-analysis/aggregated-results.json << EOF
       {
         "aggregation_timestamp": "$(date -Iseconds)",
+        "any_data_available": $ANY_DATA,
         "components": {
           "vuln_validation": {
             "status": "$VULN_STATUS",
@@ -208,6 +220,7 @@ steps:
       EOF
 
       echo "[AI Coordinator] Results aggregation complete"
+      echo "[AI Coordinator] Summary: Vuln=$CONFIRMED_VULNS confirmed, Chains=$TOTAL_CHAINS, Phases=$TOTAL_PHASES"
 
   - name: generate-unified-config
     type: bash
