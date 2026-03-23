@@ -1,0 +1,198 @@
+# =============================================================================
+# QUICK VULN CHECK - Fast Vulnerability Validation Workflow
+# =============================================================================
+# 
+# 快速漏洞验证工作流 - 针对已有扫描结果的快速分析
+# 特点：
+# - 跳过完整侦察，直接验证已知漏洞
+# - 快速 AI 验证 + 报告生成
+# - 适合日常巡检
+#
+# Usage:
+#   osmedeus run -f quick-vuln-check -t example.com --vuln-file /path/to/nuclei-results.txt
+# =============================================================================
+
+kind: flow
+name: quick-vuln-check
+description: Quick vulnerability validation for known findings
+tags: "vuln, quick, validation, fast"
+
+params:
+  # 输入文件（支持外部传入）
+  - name: vulnFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+    description: "Nuclei scan results file"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+
+  # 输出
+  - name: reportDir
+    default: "{{Output}}/report"
+  - name: vulnDbFile
+    default: "{{Output}}/report/vuln.db"
+
+  # AI 配置
+  - name: enableAiValidation
+    type: bool
+    default: true
+    description: "Enable AI validation"
+  - name: enableDetailedReport
+    type: bool
+    default: true
+    description: "Generate detailed HTML report"
+
+  # 扫描配置
+  - name: nucleiSeverity
+    type: string
+    default: "critical,high,medium"
+  - name: maxVulns
+    type: integer
+    default: 100
+    description: "Maximum vulnerabilities to process"
+
+modules:
+  # ===========================================================================
+  # Step 1: Validate Input
+  # ===========================================================================
+  - name: validate-input
+    type: bash
+    command: |
+      echo "[QuickCheck] Validating input..."
+      if [ ! -f "{{vulnFile}}" ] || [ ! -s "{{vulnFile}}" ]; then
+        echo "[ERROR] Vulnerability file not found or empty: {{vulnFile}}"
+        echo "[ERROR] Please run a nuclei scan first or provide valid vuln file"
+        exit 1
+      fi
+      VULN_COUNT=$(wc -l < "{{vulnFile}}" 2>/dev/null || echo 0)
+      echo "[OK] Found $VULN_COUNT vulnerabilities"
+      echo "[QuickCheck] Target: {{Target}}"
+      echo "[QuickCheck] Vuln File: {{vulnFile}}"
+
+  # ===========================================================================
+  # Step 2: Quick Statistics
+  # ===========================================================================
+  - name: quick-stats
+    type: bash
+    command: |
+      echo "[Stats] Generating quick statistics..."
+      
+      CRITICAL=$(grep -c '"critical"' "{{vulnFile}}" 2>/dev/null || echo 0)
+      HIGH=$(grep -c '"high"' "{{vulnFile}}" 2>/dev/null || echo 0)
+      MEDIUM=$(grep -c '"medium"' "{{vulnFile}}" 2>/dev/null || echo 0)
+      LOW=$(grep -c '"low"\|"info"' "{{vulnFile}}" 2>/dev/null || echo 0)
+      TOTAL=$(wc -l < "{{vulnFile}}" 2>/dev/null || echo 0)
+      
+      echo "========================================"
+      echo "       Quick Vulnerability Stats"
+      echo "========================================"
+      echo "Target: {{Target}}"
+      echo "----------------------------------------"
+      printf "%-10s : %s\n" "Critical" "$CRITICAL"
+      printf "%-10s : %s\n" "High" "$HIGH"
+      printf "%-10s : %s\n" "Medium" "$MEDIUM"
+      printf "%-10s : %s\n" "Low/Info" "$LOW"
+      echo "----------------------------------------"
+      printf "%-10s : %s\n" "Total" "$TOTAL"
+      echo "========================================"
+
+  # ===========================================================================
+  # Step 3: Build SQLite Database
+  # ===========================================================================
+  - name: build-db
+    type: bash
+    command: |
+      mkdir -p {{reportDir}}
+      sqlite3 {{vulnDbFile}} "CREATE TABLE IF NOT EXISTS vulns (id INTEGER PRIMARY KEY, cve_id TEXT, title TEXT, severity TEXT, url TEXT, host TEXT);"
+      sqlite3 {{vulnDbFile}} "DELETE FROM vulns;"
+      
+      COUNT=0
+      while IFS= read -r line && [ $COUNT -lt {{maxVulns}} ]; do
+        CVE=$(echo "$line" | jq -r '.info.cve_id // "N/A"' 2>/dev/null)
+        TITLE=$(echo "$line" | jq -r '.info.title // "Unknown"' 2>/dev/null | sed "s/'/''/g")
+        SEV=$(echo "$line" | jq -r '.info.severity // "info"' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        URL=$(echo "$line" | jq -r '.matched_at // "N/A"' 2>/dev/null | sed "s/'/''/g")
+        sqlite3 {{vulnDbFile}} "INSERT INTO vulns (cve_id, title, severity, url) VALUES ('$CVE', '$TITLE', '$SEV', '$URL');"
+        COUNT=$((COUNT + 1))
+      done < "{{vulnFile}}"
+      
+      sqlite3 {{vulnDbFile}} "DELETE FROM vulns WHERE id NOT IN (SELECT MIN(id) FROM vulns GROUP BY url, title);"
+      UNIQUE=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;")
+      echo "[DB] Stored $UNIQUE unique vulnerabilities"
+
+  # ===========================================================================
+  # Step 4: AI Validation (Optional)
+  # ===========================================================================
+  - name: ai-validation
+    path: fragments/do-ai-vuln-validation.yaml
+    pre_condition: "{{enableAiValidation}}"
+
+  # ===========================================================================
+  # Step 5: Generate Quick Report
+  # ===========================================================================
+  - name: quick-report
+    type: bash
+    command: |
+      mkdir -p {{reportDir}}
+      
+      CRITICAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='critical';")
+      HIGH=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='high';")
+      TOTAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;")
+      
+      # Generate Markdown Report
+      cat > "{{reportDir}}/quick-report-{{TargetSpace}}.md" << 'EOF'
+      # Quick Vulnerability Report
+      
+      ## Target
+      TARGET_PLACEHOLDER
+      
+      ## Generated
+      TIMESTAMP_PLACEHOLDER
+      
+      ## Summary
+      EOF
+      
+      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      sed -i "s|TIMESTAMP_PLACEHOLDER|$(date '+%Y-%m-%d %H:%M:%S')|g" "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      
+      echo "" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "| Severity | Count |" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "|----------|-------|" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      printf "| Critical | %s |\n" "$CRITICAL" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      printf "| High | %s |\n" "$HIGH" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      printf "| **Total** | **%s** |\n" "$TOTAL" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      
+      echo "" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "## Critical & High Findings" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "| CVE | Title | URL |" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "|-----|-------|-----|" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      
+      sqlite3 {{vulnDbFile}} "SELECT '| ' || cve_id || ' | ' || substr(title,1,50) || ' | ' || substr(url,1,60) || ' |' FROM vulns WHERE severity IN ('critical','high') LIMIT 50;" >> "{{reportDir}}/quick-report-{{TargetSpace}}.md"
+      
+      # Export CSV
+      sqlite3 {{vulnDbFile}} -header -csv "SELECT cve_id, severity, title, url FROM vulns;" > "{{reportDir}}/vulns-{{TargetSpace}}.csv"
+      
+      echo "[Report] Generated:"
+      echo "   - {{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "   - {{reportDir}}/vulns-{{TargetSpace}}.csv"
+      echo "   - {{reportDir}}/vuln.db"
+
+  # ===========================================================================
+  # Step 6: Print Summary
+  # ===========================================================================
+  - name: print-summary
+    type: bash
+    command: |
+      echo ""
+      echo "========================================"
+      echo "       Quick Check Complete"
+      echo "========================================"
+      echo "Target: {{Target}}"
+      echo ""
+      echo "Next steps:"
+      echo "1. Review: {{reportDir}}/quick-report-{{TargetSpace}}.md"
+      echo "2. Export: {{reportDir}}/vulns-{{TargetSpace}}.csv"
+      echo "3. Database: {{reportDir}}/vuln.db"
+      echo "========================================"

@@ -1,0 +1,110 @@
+# Enhanced Report Module
+kind: module
+name: generate-final-report-enhanced
+description: Enhanced report with Mermaid visualization and SQLite vulnerability management
+tags: report, visualization
+
+params:
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: nucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: reportDir
+    default: "{{Output}}/report"
+  - name: vulnDbFile
+    default: "{{Output}}/report/vuln.db"
+
+steps:
+  - name: prepare-report
+    type: function
+    functions:
+      - 'create_folder("{{reportDir}}")'
+      - 'log_info("Generating enhanced report for {{Target}}")'
+
+  - name: init-vuln-db
+    type: bash
+    command: |
+      mkdir -p {{reportDir}}
+      sqlite3 {{vulnDbFile}} "CREATE TABLE IF NOT EXISTS vulns (id INTEGER PRIMARY KEY, cve_id TEXT, title TEXT, severity TEXT, url TEXT, host TEXT, matched_at TEXT);"
+      sqlite3 {{vulnDbFile}} "CREATE INDEX IF NOT EXISTS idx_sev ON vulns(severity);"
+      echo "[DB] Database initialized"
+
+  - name: import-vulns
+    type: bash
+    command: |
+      COUNT=0
+      if [ -f "{{nucleiFile}}" ] && [ -s "{{nucleiFile}}" ]; then
+        while IFS= read -r line; do
+          CVE=$(echo "$line" | jq -r '.info.cve_id // "N/A"' 2>/dev/null)
+          TITLE=$(echo "$line" | jq -r '.info.title // "Unknown"' 2>/dev/null | sed "s/'/''/g")
+          SEV=$(echo "$line" | jq -r '.info.severity // "info"' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+          URL=$(echo "$line" | jq -r '.matched_at // "N/A"' 2>/dev/null | sed "s/'/''/g")
+          sqlite3 {{vulnDbFile}} "INSERT INTO vulns (cve_id, title, severity, url) VALUES ('$CVE', '$TITLE', '$SEV', '$URL');"
+          COUNT=$((COUNT + 1))
+        done < "{{nucleiFile}}"
+      fi
+      echo "[DB] Imported $COUNT vulns"
+
+  - name: deduplicate
+    type: bash
+    command: |
+      sqlite3 {{vulnDbFile}} "DELETE FROM vulns WHERE id NOT IN (SELECT MIN(id) FROM vulns GROUP BY url, title);"
+      TOTAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;")
+      echo "[DB] Unique vulns: $TOTAL"
+
+  - name: stats
+    type: bash
+    command: |
+      echo "=== Vulnerability Stats ==="
+      sqlite3 {{vulnDbFile}} "SELECT upper(severity), COUNT(*) FROM vulns GROUP BY severity;"
+      echo "============================"
+
+  - name: export-csv
+    type: bash
+    command: |
+      sqlite3 {{vulnDbFile}} -header -csv "SELECT cve_id, severity, title, url FROM vulns;" > "{{reportDir}}/vulns-{{TargetSpace}}.csv"
+      echo "[CSV] Exported to {{reportDir}}/vulns-{{TargetSpace}}.csv"
+
+  - name: mermaid-distribution
+    type: bash
+    command: |
+      CRITICAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='critical';")
+      HIGH=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='high';")
+      MEDIUM=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='medium';")
+      LOW=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity IN ('low','info');")
+      echo "pie title Vuln Distribution" > "{{reportDir}}/vuln-dist.mmd"
+      [ "$CRITICAL" -gt 0 ] && echo "  \"Critical ($CRITICAL)\" : $CRITICAL" >> "{{reportDir}}/vuln-dist.mmd"
+      [ "$HIGH" -gt 0 ] && echo "  \"High ($HIGH)\" : $HIGH" >> "{{reportDir}}/vuln-dist.mmd"
+      [ "$MEDIUM" -gt 0 ] && echo "  \"Medium ($MEDIUM)\" : $MEDIUM" >> "{{reportDir}}/vuln-dist.mmd"
+      [ "$LOW" -gt 0 ] && echo "  \"Low ($LOW)\" : $LOW" >> "{{reportDir}}/vuln-dist.mmd"
+      echo "[Mermaid] Distribution chart done"
+
+  - name: mermaid-topology
+    type: bash
+    command: |
+      SUBS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
+      HTTP=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      echo "graph TB" > "{{reportDir}}/topology.mmd"
+      echo "  subgraph \"{{Target}}\"" >> "{{reportDir}}/topology.mmd"
+      echo "    A[Subdomains: $SUBS]" >> "{{reportDir}}/topology.mmd"
+      echo "    B[HTTP: $HTTP]" >> "{{reportDir}}/topology.mmd"
+      echo "  end" >> "{{reportDir}}/topology.mmd"
+      echo "  A --> B" >> "{{reportDir}}/topology.mmd"
+      echo "[Mermaid] Topology done"
+
+  - name: log-complete
+    type: function
+    functions:
+      - 'log_info("Enhanced report completed")'
