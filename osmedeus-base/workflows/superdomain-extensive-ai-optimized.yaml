@@ -190,10 +190,16 @@ modules:
   # ===========================================================================
   # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
   # ===========================================================================
-  # 注意：AI 分析依赖 vuln-suite 生成的 nuclei 扫描结果
 
-  # AI 语义搜索 - RAG 功能，依赖 http-probe 可并行执行
-  # 注意：早期索引时漏洞数据可能较少，模块内部会处理这种情况
+  # 加载安全测试技能库 - 为 AI 分析提供专业知识参考
+  - name: ai-skills-loader
+    path: fragments/do-skills-system.yaml
+    depends_on: [vuln-suite]
+    params:
+      vulnTypes: "sql-injection,xss-testing,ssrf-testing,rce-testing,lfi-testing,api-security"
+    pre_condition: "{{enableLlmAnalysis}}"
+
+  # AI 语义搜索 - RAG 功能 + 知识库搜索
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [http-probe]
@@ -213,11 +219,17 @@ modules:
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
-  # AI 漏洞验证 - 依赖 vuln-suite 的 nuclei 扫描结果
+  # AI 漏洞验证 - 依赖 vuln-suite 的 nuclei 扫描结果 + skills
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation.yaml
-    depends_on: [vuln-suite]
+    depends_on: [vuln-suite, ai-skills-loader]
     pre_condition: "{{enableVulnValidation}}"
+
+  # AI 攻击链可视化 - 依赖攻击链分析输出
+  - name: ai-attack-chain-viz
+    path: fragments/do-attack-chain-visualization.yaml
+    depends_on: [ai-attack-chain]
+    pre_condition: "{{enableAttackChain}}"
 
   # AI 攻击链分析 - 依赖 ai-vuln-validation 的输出
   - name: ai-attack-chain
@@ -234,7 +246,7 @@ modules:
   # AI 协调器 - 汇总所有 AI 分析结果
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
-    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
+    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-skills-loader]
     pre_condition: "{{enableLlmAnalysis}}"
 
   # ===========================================================================

@@ -219,18 +219,23 @@ steps:
       - 每个漏洞必须有置信度评分
       - 提供可执行的验证命令
       - 只分析提供的数据，不要虚构漏洞
+      
+      你可以使用以下安全测试技能库作为参考：
+      - SQL 注入测试：{{Output}}/ai-analysis/skills-combined.md
+      - 知识库参考：{{Output}}/ai-analysis/knowledge-base-results.md
     query: |
       请验证以下漏洞发现，判断其真实性并识别假阳性：
 
+      ## 安全测试技能参考
+      请使用 read_file 工具读取：
+      - {{Output}}/ai-analysis/skills-combined.md - 安全测试技能库
+      - {{Output}}/ai-analysis/knowledge-base-results.md - 知识库参考
+      
       ## CVE 参考数据（可选）
       {% if enableCvePreQuery %}
       请使用 read_lines 工具读取以下文件获取 CVE 参考：
-      - {{Output}}/ai-analysis/cve/tech-cve.txt - 技术栈相关 CVE（格式：CVE编号|评分|描述）
+      - {{Output}}/ai-analysis/cve/tech-cve.txt - 技术栈相关 CVE
       - {{Output}}/ai-analysis/cve/vuln-type-cve.txt - 漏洞类型相关 CVE
-      
-      如发现匹配的 CVE，请关联到对应漏洞的 cve 和 cvss 字段。
-      {% else %}
-      如有需要，可自行搜索 CVE 数据库进行关联。
       {% endif %}
 
       ## 数据文件（已截断以优化处理）

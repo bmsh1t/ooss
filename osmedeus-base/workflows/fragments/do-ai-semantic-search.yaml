@@ -540,6 +540,57 @@ steps:
         echo '{"status": "error", "results": [], "error": "JSON validation failed"}' > {{searchResultsOutput}}
       fi
 
+  - name: knowledge-base-search
+    type: bash
+    pre_condition: "{{enableSemanticSearch}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      SKILLS_DIR="{{OsmedeusBase}}/osmedeus-base/skills"
+      KB_OUTPUT="{{Output}}/ai-analysis/knowledge-base-results.md"
+      echo "[Knowledge Base] Searching security knowledge..."
+      echo "# Security Knowledge Base Results" > "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      echo "Target: {{Target}}" >> "$KB_OUTPUT"
+      echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      echo "---" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      
+      # Check for SQL injection skills
+      if [ -f "$SKILLS_DIR/sql-injection/SKILL.md" ]; then
+        echo "## SQL Injection Testing" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        tail -n +20 "$SKILLS_DIR/sql-injection/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
+        echo "" >> "$KB_OUTPUT"
+      fi
+      
+      # Check for XSS skills
+      if [ -f "$SKILLS_DIR/xss-testing/SKILL.md" ]; then
+        echo "## XSS Testing" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        tail -n +20 "$SKILLS_DIR/xss-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
+        echo "" >> "$KB_OUTPUT"
+      fi
+      
+      # Check for SSRF skills
+      if [ -f "$SKILLS_DIR/ssrf-testing/SKILL.md" ]; then
+        echo "## SSRF Testing" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        tail -n +20 "$SKILLS_DIR/ssrf-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
+        echo "" >> "$KB_OUTPUT"
+      fi
+      
+      # Check for RCE skills
+      if [ -f "$SKILLS_DIR/rce-testing/SKILL.md" ]; then
+        echo "## RCE Testing" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        tail -n +20 "$SKILLS_DIR/rce-testing/SKILL.md" 2>/dev/null | head -25 >> "$KB_OUTPUT" || true
+        echo "" >> "$KB_OUTPUT"
+      fi
+      
+      KB_LINES=$(wc -l < "$KB_OUTPUT" 2>/dev/null || echo 0)
+      echo "[Knowledge Base] Results saved: $KB_OUTPUT ($KB_LINES lines)"
+
   - name: extract-semantic-highlights
     type: bash
     pre_condition: "{{enableSemanticSearch}}"
