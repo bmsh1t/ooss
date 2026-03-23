@@ -206,16 +206,54 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # 保存原始结果
-      echo '{{path_planning_json}}' > {{pathPlanningOutput}} 2>/dev/null || echo '{"error": "no data"}' > {{pathPlanningOutput}}
+      # Step 1: 保存原始结果，清理 markdown 代码块
+      echo '{{path_planning_json}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//' > {{pathPlanningOutput}}.raw 2>/dev/null || true
 
-      if jq empty {{pathPlanningOutput}} 2>/dev/null; then
-        PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null)
-        TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null)
-        echo "[INFO] [Path Planning] Total phases: $PHASES, Est. time: $TIME"
-      else
-        echo "[INFO] [Path Planning] Invalid JSON output"
+      # Step 2: 检查是否为空
+      if [ ! -s "{{pathPlanningOutput}}.raw" ] || [ "$(cat {{pathPlanningOutput}}.raw | tr -d ' \n')" = "" ]; then
+        echo "[WARN] Empty response from AI, generating fallback"
+        echo '{"error": "empty_response", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}.raw
       fi
+
+      # Step 3: 验证 JSON 格式
+      if jq empty {{pathPlanningOutput}}.raw 2>/dev/null; then
+        echo "[OK] Valid JSON from AI"
+        mv {{pathPlanningOutput}}.raw {{pathPlanningOutput}}
+      else
+        echo "[WARN] Invalid JSON, attempting to extract..."
+        EXTRACTED=$(cat {{pathPlanningOutput}}.raw | grep -o '{.*}' | head -1)
+        if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
+          echo "$EXTRACTED" > {{pathPlanningOutput}}
+          echo "[OK] Extracted valid JSON"
+        else
+          echo "[ERROR] Could not extract valid JSON, using fallback"
+          echo '{"error": "invalid_json", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}
+        fi
+      fi
+
+      # Step 4: 验证必需字段
+      for field in plan_summary execution_phases verification_checklist rollback_plan contingency; do
+        if ! jq -e "has(\"$field\")" {{pathPlanningOutput}} > /dev/null 2>&1; then
+          echo "[WARN] Missing field: $field, adding default"
+          case $field in
+            plan_summary) jq '.plan_summary = {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+            execution_phases) jq '.execution_phases = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+            verification_checklist) jq '.verification_checklist = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+            rollback_plan) jq '.rollback_plan = "no_data"' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+            contingency) jq '.contingency = "no_data"' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+          esac
+        fi
+      done
+
+      # Step 5: 提取统计信息
+      PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null)
+      TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null)
+      ERROR_STATUS=$(jq -r '.error // "none"' {{pathPlanningOutput}} 2>/dev/null)
+
+      echo "[RESULT] Status: $ERROR_STATUS"
+      echo "[RESULT] Total phases: $PHASES, Est. time: $TIME"
+
+      rm -f {{pathPlanningOutput}}.raw 2>/dev/null || true
 
   - name: generate-attack-plan-markdown
     type: bash

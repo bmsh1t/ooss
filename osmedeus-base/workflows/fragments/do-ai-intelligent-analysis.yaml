@@ -254,8 +254,8 @@ steps:
 
       # 从漏洞验证结果中提取配置
       if [ -f "$VULN_FILE" ] && jq empty "$VULN_FILE" 2>/dev/null; then
-        RISK=$(jq -r '.validation_summary.risk_level // "中"' "$VULN_FILE" 2>/dev/null)
-        CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' "$VULN_FILE" 2>/dev/null)
+        RISK=$(jq -r '.risk_level // "中"' "$VULN_FILE" 2>/dev/null)
+        CONFIRMED=$(jq -r '.confirmed_real // 0' "$VULN_FILE" 2>/dev/null)
 
         # 根据确认漏洞数量调整配置
         if [ "$CONFIRMED" -gt 10 ]; then
@@ -268,10 +268,17 @@ steps:
           SEVERITY="critical,high"
           THREADS=12
           RATE_LIMIT=40
+          TIMEOUT="6h"
           REASONING="Moderate confirmed findings ($CONFIRMED), balanced scan"
         else
           REASONING="Low confirmed findings ($CONFIRMED), focused scan"
         fi
+
+        # 更新 reasoning 包含风险等级
+        if [ "$RISK" != "null" ] && [ -n "$RISK" ]; then
+          REASONING="$REASONING (risk: $RISK)"
+        fi
+      fi
       fi
 
       # 从语义搜索结果获取高优先级发现
@@ -419,6 +426,182 @@ steps:
       EOF
 
       echo "[AI Memory] Context saved to {{memoryOutput}}"
+
+  - name: generate-ai-status-report
+    type: bash
+    pre_condition: "{{enableIntelligentAnalysis}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      
+      REPORT_FILE="{{Output}}/ai-analysis/ai-execution-status.json"
+      MARKDOWN_FILE="{{Output}}/ai-analysis/ai-execution-status.md"
+      
+      echo "[AI Status] Generating execution status report..."
+      
+      # 收集各模块状态
+      check_module() {
+        local name="$1"
+        local file="$2"
+        local size=0
+        local status="not_run"
+        local error=""
+        
+        if [ -f "$file" ]; then
+          size=$(wc -c < "$file" 2>/dev/null || echo 0)
+          if [ "$size" -gt 50 ]; then
+            if jq empty "$file" 2>/dev/null; then
+              status="completed"
+              error=$(jq -r '.error // "none"' "$file" 2>/dev/null)
+              if [ "$error" = "none" ] || [ -z "$error" ]; then
+                error=""
+              fi
+            else
+              status="invalid_json"
+              error="JSON validation failed"
+            fi
+          else
+            status="empty_output"
+            error="Output too small"
+          fi
+        else
+          status="file_not_found"
+          error="Module output file not found"
+        fi
+        
+        echo "$name|$status|$size|$error"
+      }
+      
+      # 检查各模块
+      VULN_RESULT=$(check_module "vuln-validation" "{{vulnValidationFile}}")
+      CHAIN_RESULT=$(check_module "attack-chain" "{{attackChainFile}}")
+      PLAN_RESULT=$(check_module "path-planning" "{{pathPlanningFile}}")
+      SEMANTIC_RESULT=$(check_module "semantic-search" "{{semanticSearchFile}}")
+      
+      # 生成 JSON 报告
+      generate_json_report() {
+        cat > "$REPORT_FILE" << 'HEADER'
+      {
+        "report_generated": "TIMESTAMP_PLACEHOLDER",
+        "target": "TARGET_PLACEHOLDER",
+        "overall_status": "PARTIAL",
+        "modules": {
+      HEADER
+        
+        # 添加各模块状态
+        local first=true
+        for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
+          IFS='|' read -r name status size error <<< "$result"
+          if [ "$first" = true ]; then
+            first=false
+          else
+            echo "," >> "$REPORT_FILE"
+          fi
+          echo "          \"$name\": {\"status\": \"$status\", \"size\": $size, \"error\": \"$error\"}" >> "$REPORT_FILE"
+        done
+        
+        cat >> "$REPORT_FILE" << 'FOOTER'
+        },
+        "recommendations": []
+      }
+      FOOTER
+        
+        # 替换占位符
+        sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" "$REPORT_FILE"
+        sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" "$REPORT_FILE"
+      }
+      
+      # 生成 Markdown 报告
+      generate_markdown_report() {
+        cat > "$MARKDOWN_FILE" << 'EOF'
+      # AI 模块执行状态报告
+      
+      ## 目标
+      TARGET_PLACEHOLDER
+      
+      ## 生成时间
+      TIMESTAMP_PLACEHOLDER
+      
+      ---
+      
+      ## 模块执行状态
+      
+      | 模块 | 状态 | 大小 | 备注 |
+      |------|------|------|------|
+      
+      ---
+      
+      ## 执行摘要
+      
+      ---
+      
+      ## 建议
+      
+      EOF
+        
+        sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" "$MARKDOWN_FILE"
+        sed -i "s|TIMESTAMP_PLACEHOLDER|$(date '+%Y-%m-%d %H:%M:%S')|g" "$MARKDOWN_FILE"
+        
+        # 添加模块状态表格
+        for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
+          IFS='|' read -r name status size error <<< "$result"
+          local status_icon=""
+          case $status in
+            completed) status_icon="[OK]" ;;
+            failed) status_icon="[FAIL]" ;;
+            invalid_json) status_icon="[WARN]" ;;
+            empty_output) status_icon="[EMPTY]" ;;
+            not_run) status_icon="[SKIP]" ;;
+            *) status_icon="[?]" ;;
+          esac
+          echo "| $name | $status_icon $status | $size bytes | $error |" >> "$MARKDOWN_FILE"
+        done
+        
+        # 添加执行摘要
+        local completed_count=0
+        local failed_count=0
+        local skipped_count=0
+        
+        for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
+          IFS='|' read -r name status size error <<< "$result"
+          case $status in
+            completed) completed_count=$((completed_count + 1)) ;;
+            failed|invalid_json) failed_count=$((failed_count + 1)) ;;
+            empty_output|not_run) skipped_count=$((skipped_count + 1)) ;;
+          esac
+        done
+        
+        echo "" >> "$MARKDOWN_FILE"
+        echo "**执行摘要**: $completed_count 成功, $failed_count 失败, $skipped_count 跳过/空" >> "$MARKDOWN_FILE"
+        echo "" >> "$MARKDOWN_FILE"
+        
+        # 添加建议
+        if [ "$failed_count" -gt 0 ]; then
+          echo "**建议**: 部分模块执行失败，建议检查日志文件获取详细信息。" >> "$MARKDOWN_FILE"
+        fi
+        if [ "$skipped_count" -gt 2 ]; then
+          echo "**注意**: 多个模块未产生有效输出，可能是前置扫描未完成或数据不足。" >> "$MARKDOWN_FILE"
+        fi
+      }
+      
+      # 生成报告
+      generate_json_report
+      generate_markdown_report
+      
+      echo "[AI Status] Report saved to $REPORT_FILE"
+      echo "[AI Status] Markdown report saved to $MARKDOWN_FILE"
+      
+      # 输出汇总信息
+      echo ""
+      echo "========== AI 执行状态汇总 =========="
+      echo "目标: {{Target}}"
+      echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+      echo ""
+      echo "模块状态:"
+      for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
+        IFS='|' read -r name status size error <<< "$result"
+        printf "  %-20s %-15s (%s bytes)\n" "$name" "$status" "$size"
+      done
+      echo "=========================================="
 
   - name: log-analysis-complete
     type: function

@@ -145,6 +145,58 @@ steps:
       echo "CRITICAL_COUNT=$CRITICAL_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
       echo "HIGH_COUNT=$HIGH_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
 
+  - name: truncate-large-files
+    type: bash
+    pre_condition: '{{enableVulnValidation}} && !file_exists("{{Output}}/ai-analysis/.vuln-validation-skip")'
+    command: |
+      mkdir -p {{Output}}/ai-analysis/validation
+      mkdir -p {{Output}}/ai-analysis/.truncated
+      
+      # 配置文件大小限制（单位：字节）
+      # 50KB = 51200 字节，对应约 12K tokens
+      MAX_FILE_SIZE=51200
+      
+      truncate_file() {
+        local src="$1"
+        local dst="$2"
+        local max_size=$3
+        local filename=$(basename "$src")
+        
+        if [ ! -f "$src" ]; then
+          echo "[TRUNCATE] File not found: $src"
+          return 1
+        fi
+        
+        local size=$(wc -c < "$src" 2>/dev/null || echo 0)
+        
+        if [ "$size" -gt "$max_size" ]; then
+          echo "[TRUNCATE] File $filename is ${size} bytes, truncating to ${max_size} bytes"
+          
+          # 保留文件头部（通常包含最重要的信息）
+          head -c "$max_size" "$src" > "$dst"
+          
+          local truncated_size=$(wc -c < "$dst" 2>/dev/null || echo 0)
+          echo "[TRUNCATE] Truncated: $src -> ${truncated_size} bytes"
+          return 0
+        else
+          echo "[TRUNCATE] File $filename is ${size} bytes, no truncation needed"
+          cp "$src" "$dst"
+          return 0
+        fi
+      }
+      
+      # 截断漏洞文件
+      truncate_file "{{nucleiCriticalFile}}" "{{Output}}/ai-analysis/.truncated/critical.txt" "$MAX_FILE_SIZE"
+      truncate_file "{{nucleiHighFile}}" "{{Output}}/ai-analysis/.truncated/high.txt" "$MAX_FILE_SIZE"
+      truncate_file "{{secretsFile}}" "{{Output}}/ai-analysis/.truncated/secrets.txt" "$MAX_FILE_SIZE"
+      truncate_file "{{ssrfFile}}" "{{Output}}/ai-analysis/.truncated/ssrf.txt" "$MAX_FILE_SIZE"
+      truncate_file "{{sqliFile}}" "{{Output}}/ai-analysis/.truncated/sqli.txt" "$MAX_FILE_SIZE"
+      truncate_file "{{takeoverFile}}" "{{Output}}/ai-analysis/.truncated/takeover.txt" "$MAX_FILE_SIZE"
+      
+      # 记录截断后的文件信息
+      echo "[TRUNCATE] Files prepared in {{Output}}/ai-analysis/.truncated/"
+      ls -la {{Output}}/ai-analysis/.truncated/ 2>/dev/null || true
+
   - name: ai-validate-vulns
     type: agent
     pre_condition: '{{enableVulnValidation}} && !file_exists("{{Output}}/ai-analysis/.vuln-validation-skip")'
@@ -181,15 +233,15 @@ steps:
       如有需要，可自行搜索 CVE 数据库进行关联。
       {% endif %}
 
-      ## 数据文件
+      ## 数据文件（已截断以优化处理）
       请使用 read_lines 工具读取以下文件获取详细信息：
       - {{fingerprintFile}} - 技术栈背景
-      - {{nucleiCriticalFile}} - Critical 漏洞
-      - {{nucleiHighFile}} - High 漏洞
-      - {{secretsFile}} - Secrets 发现
-      - {{ssrfFile}} - SSRF 发现
-      - {{sqliFile}} - SQLi 发现
-      - {{takeoverFile}} - Takeover 发现
+      - {{Output}}/ai-analysis/.truncated/critical.txt - Critical 漏洞（已截断）
+      - {{Output}}/ai-analysis/.truncated/high.txt - High 漏洞（已截断）
+      - {{Output}}/ai-analysis/.truncated/secrets.txt - Secrets 发现（已截断）
+      - {{Output}}/ai-analysis/.truncated/ssrf.txt - SSRF 发现（已截断）
+      - {{Output}}/ai-analysis/.truncated/sqli.txt - SQLi 发现（已截断）
+      - {{Output}}/ai-analysis/.truncated/takeover.txt - Takeover 发现（已截断）
 
       请输出 JSON 格式的验证结果：
       ```json
@@ -240,44 +292,68 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/validation
 
-      # 保存原始验证结果
-      echo '{{validation_json}}' > {{vulnValidationOutput}} 2>/dev/null || echo '{"error": "no data"}' > {{vulnValidationOutput}}
+      # Step 1: 保存原始验证结果，清理 markdown 代码块
+      echo '{{validation_json}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//' > {{vulnValidationOutput}}.raw 2>/dev/null || true
 
-      # 验证 JSON 格式
-      if ! jq empty {{vulnValidationOutput}} 2>/dev/null; then
-        echo "[ERROR] Invalid JSON format"
-        echo '{"error": "invalid_json", "risk_level": "中", "findings": [], "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0}' > {{vulnValidationOutput}}
-        echo "[WARN] JSON reset to default structure"
+      # Step 2: 检查是否为空
+      if [ ! -s "{{vulnValidationOutput}}.raw" ] || [ "$(cat {{vulnValidationOutput}}.raw | tr -d ' \n')" = "" ]; then
+        echo "[WARN] Empty response from AI, generating fallback"
+        echo '{"error": "empty_response", "risk_level": "中", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}.raw
       fi
 
-      # 验证必需字段
-      for field in risk_level findings confirmed_real false_positives needs_manual_verification; do
+      # Step 3: 尝试修复常见问题
+      sed -i 's/```json//g; s/```/ /g' {{vulnValidationOutput}}.raw
+      sed -i '/^"*[^{]/d' {{vulnValidationOutput}}.raw 2>/dev/null || true
+
+      # Step 4: 验证 JSON 格式
+      if jq empty {{vulnValidationOutput}}.raw 2>/dev/null; then
+        echo "[OK] Valid JSON from AI"
+        mv {{vulnValidationOutput}}.raw {{vulnValidationOutput}}
+      else
+        echo "[WARN] Invalid JSON, attempting to extract valid JSON..."
+        EXTRACTED=$(cat {{vulnValidationOutput}}.raw | grep -o '{.*}' | head -1)
+        if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
+          echo "$EXTRACTED" > {{vulnValidationOutput}}
+          echo "[OK] Extracted valid JSON"
+        else
+          echo "[ERROR] Could not extract valid JSON, using fallback"
+          echo '{"error": "invalid_json", "risk_level": "中", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}
+        fi
+      fi
+
+      # Step 5: 验证必需字段并填充默认值
+      for field in risk_level findings confirmed_real false_positives needs_manual_verification high_priority_items verification_commands; do
         if ! jq -e "has(\"$field\")" {{vulnValidationOutput}} > /dev/null 2>&1; then
           echo "[WARN] Missing field: $field, adding default"
           case $field in
-            risk_level) jq ".risk_level = \"中\" | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            findings) jq ".findings = [] | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            confirmed_real) jq ".confirmed_real = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            false_positives) jq ".false_positives = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            needs_manual_verification) jq ".needs_manual_verification = 0 | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            risk_level) jq '.risk_level = "中"' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            findings) jq '.findings = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            high_priority_items) jq '.high_priority_items = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            verification_commands) jq '.verification_commands = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            confirmed_real) jq '.confirmed_real = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            false_positives) jq '.false_positives = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            needs_manual_verification) jq '.needs_manual_verification = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
           esac
         fi
       done
 
-      # 验证 findings 数组格式
+      # Step 6: 验证 findings 数组格式
       if ! jq -e '.findings | type == "array"' {{vulnValidationOutput}} > /dev/null 2>&1; then
-        echo "[WARN] findings is not an array, resetting"
-        jq ".findings = [] | ." {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}}
+        echo "[WARN] findings is not an array, fixing"
+        jq '.findings = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}}
       fi
 
-      # 提取统计信息
+      # Step 7: 提取统计信息
       CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null)
       FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null)
       MANUAL=$(jq -r '.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null)
       TOTAL=$(jq -r '.findings | length' {{vulnValidationOutput}} 2>/dev/null)
+      ERROR_STATUS=$(jq -r '.error // "none"' {{vulnValidationOutput}} 2>/dev/null)
 
-      echo "[OK] JSON validation passed"
-      echo "[INFO] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL, Total Findings: $TOTAL"
+      echo "[RESULT] Status: $ERROR_STATUS"
+      echo "[RESULT] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL, Total Findings: $TOTAL"
+
+      rm -f {{vulnValidationOutput}}.raw 2>/dev/null || true
 
   - name: extract-validation-data
     type: bash

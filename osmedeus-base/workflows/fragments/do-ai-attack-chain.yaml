@@ -232,16 +232,53 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # 保存原始结果
-      echo '{{attack_chain_json}}' > {{attackChainOutput}} 2>/dev/null || echo '{"error": "no data"}' > {{attackChainOutput}}
+      # Step 1: 保存原始结果，清理 markdown 代码块
+      echo '{{attack_chain_json}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//' > {{attackChainOutput}}.raw 2>/dev/null || true
 
-      if jq empty {{attackChainOutput}} 2>/dev/null; then
-        CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null)
-        CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null)
-        echo "[INFO] [Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
-      else
-        echo "[INFO] [Attack Chain] Invalid JSON output"
+      # Step 2: 检查是否为空
+      if [ ! -s "{{attackChainOutput}}.raw" ] || [ "$(cat {{attackChainOutput}}.raw | tr -d ' \n')" = "" ]; then
+        echo "[WARN] Empty response from AI, generating fallback"
+        echo '{"error": "empty_response", "attack_chain_summary": {"total_chains": 0, "critical_chains": 0, "high_impact_chains": 0, "most_likely_entry_points": []}, "attack_chains": [], "critical_paths": [], "defense_recommendations": []}' > {{attackChainOutput}}.raw
       fi
+
+      # Step 3: 验证 JSON 格式
+      if jq empty {{attackChainOutput}}.raw 2>/dev/null; then
+        echo "[OK] Valid JSON from AI"
+        mv {{attackChainOutput}}.raw {{attackChainOutput}}
+      else
+        echo "[WARN] Invalid JSON, attempting to extract..."
+        EXTRACTED=$(cat {{attackChainOutput}}.raw | grep -o '{.*}' | head -1)
+        if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
+          echo "$EXTRACTED" > {{attackChainOutput}}
+          echo "[OK] Extracted valid JSON"
+        else
+          echo "[ERROR] Could not extract valid JSON, using fallback"
+          echo '{"error": "invalid_json", "attack_chain_summary": {"total_chains": 0, "critical_chains": 0, "high_impact_chains": 0, "most_likely_entry_points": []}, "attack_chains": [], "critical_paths": [], "defense_recommendations": []}' > {{attackChainOutput}}
+        fi
+      fi
+
+      # Step 4: 验证必需字段
+      for field in attack_chain_summary attack_chains critical_paths defense_recommendations; do
+        if ! jq -e "has(\"$field\")" {{attackChainOutput}} > /dev/null 2>&1; then
+          echo "[WARN] Missing field: $field, adding default"
+          case $field in
+            attack_chain_summary) jq '.attack_chain_summary = {"total_chains": 0, "critical_chains": 0, "high_impact_chains": 0, "most_likely_entry_points": []}' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
+            attack_chains) jq '.attack_chains = []' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
+            critical_paths) jq '.critical_paths = []' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
+            defense_recommendations) jq '.defense_recommendations = []' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
+          esac
+        fi
+      done
+
+      # Step 5: 提取统计信息
+      CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null)
+      CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null)
+      ERROR_STATUS=$(jq -r '.error // "none"' {{attackChainOutput}} 2>/dev/null)
+
+      echo "[RESULT] Status: $ERROR_STATUS"
+      echo "[RESULT] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
+
+      rm -f {{attackChainOutput}}.raw 2>/dev/null || true
 
   - name: extract-attack-chain-data
     type: bash
