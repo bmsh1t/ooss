@@ -314,7 +314,7 @@ steps:
   # ---------------------------------------------------------------------------
   - name: llm-executive-summary
     type: llm
-    pre_condition: '{{enableLlmReport}}'
+    pre_condition: '{{enableLlmReport}} && file_exists("{{jsonStatsFile}}")'
     log: "Generating executive summary with LLM"
     timeout: 300
     on_error:
@@ -335,11 +335,14 @@ steps:
         content: |
           Generate an executive summary for security assessment of {{Target}}.
           
-          Subdomains discovered: 0
-          Live hosts: 0
-          URLs collected: 0
+          ## Scan Statistics
+          {{readFile("{{jsonStatsFile}}")}}
           
-          No vulnerability data
+          ## Critical Vulnerabilities
+          {{readFile("{{nucleiCriticalFile}}")}}
+          
+          ## High Vulnerabilities
+          {{readFile("{{nucleiHighFile}}")}}
     exports:
       executive_summary: "{{llm_executive_summary_content}}"
 
@@ -377,11 +380,11 @@ steps:
         content: |
           Generate risk assessment for {{Target}}:
           
-          Vulnerability scan results:
+          ## Vulnerability scan results
           {{readFile("{{nucleiFile}}")}}
           
-          Fingerprint data:
-          No fingerprint data
+          ## Fingerprint data
+          {{readFile("{{fingerprintFile}}")}}
     exports:
       risk_assessment: "{{llm_risk_assessment_content}}"
 
@@ -399,7 +402,7 @@ steps:
 
   - name: llm-recommendations
     type: llm
-    pre_condition: '{{enableLlmReport}}'
+    pre_condition: '{{enableLlmReport}} && file_exists("{{nucleiFile}}")'
     log: "Generating remediation recommendations with LLM"
     timeout: 300
     on_error:
@@ -419,14 +422,14 @@ steps:
         content: |
           Generate remediation recommendations for {{Target}}:
           
-          Vulnerabilities:
-          No vulnerability data
+          ## Vulnerabilities
+          {{readFile("{{nucleiFile}}")}}
           
-          Secrets found:
-          No secrets data
+          ## Secrets found
+          {{readFile("{{secretFile}}")}}
           
-          Misconfigurations:
-          No misconfig data
+          ## Misconfigurations
+          {{readFile("{{websocketMisconfigFile}}")}}
     exports:
       recommendations: "{{llm_recommendations_content}}"
 
@@ -447,7 +450,7 @@ steps:
   # ===========================================================================
   - name: llm-attack-surface-analysis
     type: llm
-    pre_condition: '{{enableLlmAttackSurface}}'
+    pre_condition: '{{enableLlmAttackSurface}} && (file_exists("{{nucleiFile}}") || file_exists("{{fingerprintFile}}"))'
     log: "Generating attack surface analysis with LLM"
     timeout: 300
     on_error:
@@ -494,26 +497,22 @@ steps:
         content: |
           Generate security surface analysis for {{Target}}:
           
-          Subdomains discovered:
-          No subdomains
+          ## Subdomains
+          {{readFile("{{subdomainFile}}")}}
           
-          HTTP services:
-          No HTTP services
+          ## HTTP services
+          {{readFile("{{httpFile}}")}}
           
-          Technologies detected:
-          No fingerprint data
+          ## Technologies detected
+          {{readFile("{{fingerprintFile}}")}}
           
-          Vulnerabilities found:
-          No vulnerabilities
+          ## Vulnerabilities
+          {{readFile("{{nucleiFile}}")}}
           
-          Secrets/credentials:
-          No secrets
-          
-          WAF/CDN:
-          No WAF data
+          ## Secrets/credentials
+          {{readFile("{{secretFile}}")}}
           
           Provide a comprehensive security surface analysis with risk areas.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       attack_surface: "{{llm_attack_surface_analysis_content}}"
 

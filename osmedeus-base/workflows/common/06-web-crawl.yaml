@@ -840,13 +840,17 @@ steps:
         content: |
           Analyze these URLs with parameters for {{Target}}:
           
-          No URLs
+          ## URLs with Parameters
+          {{readFile("{{urlNoDupesFile}}")}}
           
-          Additional context from GF patterns:
-          No SQLi patterns
-          No XSS patterns
-          No LFI patterns
-          No SSRF patterns
+          ## Additional context from GF patterns
+          {{readFile("{{Output}}/gf/sqli-{{TargetSpace}}.txt")}}
+          
+          {{readFile("{{Output}}/gf/xss-{{TargetSpace}}.txt")}}
+          
+          {{readFile("{{Output}}/gf/lfi-{{TargetSpace}}.txt")}}
+          
+          {{readFile("{{Output}}/gf/ssrf-{{TargetSpace}}.txt")}}
           
           Provide security testing candidates analysis with recommended approaches.
     exports:

@@ -226,7 +226,7 @@ steps:
   # ===========================================================================
   - name: llm-tech-attack-suggestions
     type: llm
-    pre_condition: '{{enableLlmTechAttack}} && file_exists("{{httpFingerprintFile}}")'
+    pre_condition: '{{enableLlmTechAttack}} && file_exists("{{httpFingerprintFile}}") && file_length("{{httpFingerprintFile}}") > 100'
     log: "Generating tech stack attack suggestions with LLM"
     timeout: 300
     on_error:
@@ -258,14 +258,14 @@ steps:
         content: |
           Analyze the detected technology stack for {{Target}} and provide security recommendations:
           
-          Fingerprint data:
-          No fingerprint data
+          ## Fingerprint Data
+          {{readFile("{{httpFingerprintFile}}")}}
           
-          WAF detection:
-          No WAF detected
+          ## WAF Detection
+          {{readFile("{{wafOutput}}")}}
           
-          CMS detection:
-          No CMS detected
+          ## CMS Detection
+          {{readFile("{{cmsOutput}}")}}
           
           Provide specific security recommendations with CVEs and hardening techniques.
           Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.

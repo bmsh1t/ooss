@@ -640,7 +640,7 @@ steps:
   # ===========================================================================
   - name: llm-secrets-analysis
     type: llm
-    pre_condition: '{{enableLlmSecretsAnalysis}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}"))'
+    pre_condition: '{{enableLlmSecretsAnalysis}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}")) && (file_length("{{jsSecretsFile}}") > 0 || file_length("{{jsSecretsJsmapFile}}") > 0)'
     log: "Analyzing discovered secrets with LLM"
     timeout: 300
     on_error:
@@ -661,11 +661,11 @@ steps:
         content: |
           Analyze these discovered secrets from JavaScript analysis for {{Target}}:
           
-          Secrets from JS files:
-          No secrets found
+          ## Secrets from JS files
+          {{readFile("{{jsSecretsFile}}")}}
           
-          Secrets from Source maps:
-          No secrets found
+          ## Secrets from Source maps
+          {{readFile("{{jsSecretsJsmapFile}}")}}
           
           Provide a risk assessment and prioritize findings.
           Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
@@ -708,8 +708,12 @@ steps:
           Focus on evidence-based findings only. Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
       - role: user
         content: |
-          Review JavaScript files discovered for {{Target}}.
-          No endpoints data
+          Review JavaScript files discovered for {{Target}}:
+          
+          ## JS URLs to analyze
+          {{readFile("{{jsUrlsFile}}")}}
+          
+          Provide security findings and recommendations.
     exports:
       code_review: "{{llm_code_review_content}}"
 
@@ -784,7 +788,7 @@ steps:
   # ===========================================================================
   - name: llm-sensitive-context-analysis
     type: llm
-    pre_condition: '{{enableLlmSensitiveContext}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}"))'
+    pre_condition: '{{enableLlmSensitiveContext}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}") || file_exists("{{jsEndpointsFile}}"))'
     log: "Analyzing sensitive info context with LLM"
     timeout: 300
     on_error:
@@ -809,14 +813,14 @@ steps:
         content: |
           Analyze security findings for {{Target}} and provide assessment recommendations:
           
-          Secrets from JS files:
-          No secrets found
+          ## Secrets from JS files
+          {{readFile("{{jsSecretsFile}}")}}
           
-          Secrets from Source maps:
-          No secrets found
+          ## Secrets from Source maps
+          {{readFile("{{jsSecretsJsmapFile}}")}}
           
-          Known endpoints context:
-          No endpoints data
+          ## Known endpoints context
+          {{readFile("{{jsEndpointsFile}}")}}
           
           Provide a defensive security analysis focusing on remediation steps.
           Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.

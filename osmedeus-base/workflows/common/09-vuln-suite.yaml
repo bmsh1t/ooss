@@ -1132,7 +1132,7 @@ steps:
   # ===========================================================================
   - name: llm-waf-bypass-strategy
     type: llm
-    pre_condition: '{{enableLlmWafBypass}} && file_exists("{{wafDetectionFile}}")'
+    pre_condition: '{{enableLlmWafBypass}} && file_exists("{{wafDetectionFile}}") && file_length("{{wafDetectionFile}}") > 0'
     log: "Generating WAF assessment with LLM"
     timeout: 300
     on_error:
@@ -1171,16 +1171,13 @@ steps:
         content: |
           Generate WAF security assessment for {{Target}}:
           
-          WAF Detection Results:
-          No WAF detected
+          ## WAF Detection Results
+          {{readFile("{{wafDetectionFile}}")}}
           
-          Blocked requests patterns (if any):
-          No blocked request data
+          ## Known vulnerabilities found
+          {{readFile("{{nucleiOutputJsonl}}")}}
           
-          Known vulnerabilities to test:
-          No vulnerability data
-          
-          Provide specific bypass techniques for this target.
+          Provide specific bypass techniques and security recommendations for this target.
           Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
     exports:
       waf_bypass_strategy: "{{llm_waf_bypass_strategy_content}}"
