@@ -1,11 +1,10 @@
 # =============================================================================
-# AI 攻击路径规划模块
+# AI 攻击路径规划模块 - 优化版
 # =============================================================================
-# 功能：
-# - 基于攻击链分析生成详细攻击计划
-# - 分解攻击步骤为可执行命令
-# - 生成时间线和资源需求
-# - 提供防御建议
+# 优化点：
+# - JSON 输出稳定性：使用 Markdown + JSON 代码块格式
+# - Token 优化：max_iterations 从 4 降到 3
+# - 输入精简：只传递必要数据
 # =============================================================================
 
 kind: module
@@ -27,14 +26,6 @@ params:
     default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
   - name: entryPointsFile
     default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
-  - name: confirmedUrlsFile
-    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
-  - name: fingerprintFile
-    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
-  - name: osintFile
-    default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
-  - name: wafFile
-    default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
 
   # 配置
   - name: enablePathPlanning
@@ -50,153 +41,130 @@ steps:
       - 'create_folder("{{Output}}/ai-analysis")'
       - 'log_info("Starting AI attack path planning for {{Target}}")'
 
-  - name: collect-planning-data
+  - name: prepare-input-data
     type: bash
     pre_condition: "{{enablePathPlanning}}"
     command: |
-      mkdir -p {{Output}}/ai-analysis
+      mkdir -p {{Output}}/ai-analysis/.input
 
-      # 优先使用攻击链分析结果
+      # 提取关键数据
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
-        echo "[INFO] [Path Planning] Using attack chain analysis data"
-      else
-        echo "[INFO] [Path Planning] No attack chain data, generating standalone plan"
-        cat > {{attackChainFile}} << 'EOF'
-        {
-          "error": "no_attack_chain_data"
-        }
-        EOF
+        echo "[Path Planning] Using attack chain data"
+        
+        # 提取攻击链摘要
+        jq -r '.attack_chains[0:3]' "{{attackChainFile}}" > {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || true
+        
+        # 提取入口点
+        jq -r '.attack_chain_summary.most_likely_entry_points[]' "{{attackChainFile}}" 2>/dev/null > {{Output}}/ai-analysis/.input/entry-points.txt || true
       fi
+      
+      CHAIN_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || echo 0)
+      echo "[Path Planning] Input prepared: $CHAIN_SIZE bytes"
 
   - name: check-path-planning-data
     type: bash
     pre_condition: "{{enablePathPlanning}}"
     command: |
-      echo "[INFO] [Path Planning] Checking data availability..."
+      CHAIN_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || echo 0)
       
-      # 检查关键数据文件
-      ATTACK_CHAIN_SIZE=0
-      
-      if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
-        ATTACK_CHAIN_SIZE=$(wc -c < "{{attackChainFile}}" 2>/dev/null || echo 0)
-      fi
-      
-      echo "[INFO] [Path Planning] Data check: attack_chain=$ATTACK_CHAIN_SIZE bytes"
-      
-      # 如果没有数据，生成空结果
-      if [ "$ATTACK_CHAIN_SIZE" -lt 50 ]; then
-        echo "[WARN] [Path Planning] Insufficient data for path planning"
-        mkdir -p {{Output}}/ai-analysis
-        echo '{"error": "no_data", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}
+      if [ "$CHAIN_SIZE" -lt 50 ]; then
+        echo "[WARN] Insufficient data for path planning"
+        echo '{"error": "no_data", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.path-planning-skip
         exit 0
       fi
       
       rm -f {{Output}}/ai-analysis/.path-planning-skip 2>/dev/null || true
-      echo "[INFO] [Path Planning] Data available, proceeding with planning"
+      echo "[Path Planning] Proceeding with planning"
 
   - name: ai-generate-attack-plan
     type: agent
     pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
-    max_iterations: 4
+    max_iterations: 3
     timeout: 600
     on_error:
       - action: continue
     system_prompt: |
-      你是一个资深红队行动规划专家，专注于攻击执行规划。
-      你的任务是将攻击链转化为详细的、可执行的行动计划。
+      你是一个红队行动规划专家，将攻击链转化为可执行计划。
       
-      规划原则：
-      1. 每个步骤必须有明确的执行命令
-      2. 考虑实际操作环境和限制
-      3. 提供备选方案和回退策略
-      4. 评估执行风险和成功概率
+      输出格式：
+      先用文字描述执行计划，然后用 JSON 代码块输出。
       
-      重要约束：
-      - 必须返回结构化的 JSON 输出
-      - 每个阶段必须有具体的时间估计
-      - 提供验证步骤确认攻击成功
-    query: |
-      请基于以下攻击链分析，生成详细的执行计划：
-
-      ## 攻击链分析结果
-      请使用 read_lines 工具读取 {{attackChainFile}}
-
-      ## 已验证漏洞
-      请使用 read_lines 工具读取 {{vulnValidationFile}}
-
-      ## 入口点
-      请使用 read_lines 工具读取 {{entryPointsFile}}
-
-      ## 技术栈
-      请使用 read_lines 工具读取 {{fingerprintFile}}
-
-      ## WAF 状态
-      请使用 read_lines 工具读取 {{wafFile}}
-
-      请输出 JSON 格式的攻击计划：
+      ## 示例输出
+      
+      ### 执行计划摘要
+      目标：通过 SQL 注入获取数据库访问
+      成功率：85%
+      预计时间：2 小时
+      风险等级：中
+      
+      ### Phase 1: 漏洞验证
+      - 验证 SQL 注入可利用
+      - 执行 payloads 获取数据
+      
+      ### Phase 2: 数据提取
+      - 提取数据库版本
+      - 枚举表和列
+      - 导出用户数据
+      
       ```json
       {
         "plan_summary": {
-          "total_phases": 0,
-          "estimated_total_time": "总耗时",
+          "total_phases": 2,
+          "estimated_total_time": "2小时",
           "success_probability": 0.85,
-          "risk_level": "高/中/低",
-          "resources_needed": ["工具1", "工具2"]
+          "risk_level": "中",
+          "resources_needed": ["sqlmap", "curl"]
         },
         "execution_phases": [
           {
             "phase": 1,
-            "phase_name": "阶段名称（如：信息收集）",
-            "objectives": ["目标1", "目标2"],
+            "phase_name": "漏洞验证",
             "actions": [
               {
-                "action_id": "action-1",
-                "description": "操作描述",
-                "command": "具体执行命令",
-                "expected_result": "预期结果",
-                "verification": "如何验证成功",
-                "timeout": "超时时间",
-                "retry_on_failure": true,
-                "fallback": "失败时的备选方案"
+                "action_id": "verify-1",
+                "description": "验证 SQL 注入",
+                "command": "sqlmap -u 'http://target.com/api?id=1' --batch",
+                "expected_result": "确认存在注入",
+                "timeout": "5m"
               }
             ],
-            "tools_required": ["工具列表"],
-            "estimated_time": "预计耗时",
-            "risk_factors": ["风险因素"],
-            "success_criteria": "成功标准"
+            "estimated_time": "10分钟",
+            "success_criteria": "sqlmap 确认注入"
           }
         ],
-        "execution_order": {
-          "sequence": ["phase1", "phase2"],
-          "dependencies": {
-            "phase2": ["phase1"],
-            "phase3": ["phase2"]
-          },
-          "parallelizable": ["phase1"]
-        },
         "verification_checklist": [
           {
             "step": 1,
-            "verification_point": "验证点描述",
-            "command": "验证命令",
-            "expected": "预期结果",
-            "critical": true
+            "verification_point": "SQL 注入可利用",
+            "command": "curl 'http://target.com/api?id=1'",
+            "expected": "数据库错误信息"
           }
         ],
-        "rollback_plan": "如果失败如何回退",
-        "contingency": "备选方案描述"
+        "rollback_plan": "如验证失败，尝试其他注入点",
+        "contingency": "备用：使用手动注入"
       }
       ```
-
-      只输出 JSON，确保格式完全正确。
+      
+      重要：
+      1. 每个 action 必须有具体 command
+      2. 提供验证步骤确认成功
+      3. 包含回退计划
+    query: |
+      基于攻击链为 {{Target}} 生成详细执行计划。
+      
+      攻击链数据：{{Output}}/ai-analysis/.input/chains.json
+      
+      请读取数据，生成执行计划。
+      
+      输出格式：
+      1. 文字计划
+      2. JSON 代码块
     agent_tools:
       - preset: read_file
-      - preset: read_lines
       - preset: file_exists
       - preset: bash
       - preset: save_content
-      - preset: http_request
     exports:
       path_planning_json: "{{agent_content}}"
 
@@ -206,54 +174,32 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # Step 1: 保存原始结果，清理 markdown 代码块
-      echo '{{path_planning_json}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//' > {{pathPlanningOutput}}.raw 2>/dev/null || true
-
-      # Step 2: 检查是否为空
-      if [ ! -s "{{pathPlanningOutput}}.raw" ] || [ "$(cat {{pathPlanningOutput}}.raw | tr -d ' \n')" = "" ]; then
-        echo "[WARN] Empty response from AI, generating fallback"
-        echo '{"error": "empty_response", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}.raw
-      fi
-
-      # Step 3: 验证 JSON 格式
-      if jq empty {{pathPlanningOutput}}.raw 2>/dev/null; then
-        echo "[OK] Valid JSON from AI"
-        mv {{pathPlanningOutput}}.raw {{pathPlanningOutput}}
+      RAW='{{path_planning_json}}'
+      
+      # 提取 markdown 代码块中的 JSON
+      JSON_CONTENT=$(echo "$RAW" | sed -n '/```json/,/```/p' | sed '1d;$d' | sed 's/^[[:space:]]*//')
+      
+      if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
+        echo "$JSON_CONTENT" > {{pathPlanningOutput}}
+        echo "[OK] Valid JSON extracted"
       else
-        echo "[WARN] Invalid JSON, attempting to extract..."
-        EXTRACTED=$(cat {{pathPlanningOutput}}.raw | grep -o '{.*}' | head -1)
-        if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
-          echo "$EXTRACTED" > {{pathPlanningOutput}}
-          echo "[OK] Extracted valid JSON"
-        else
-          echo "[ERROR] Could not extract valid JSON, using fallback"
-          echo '{"error": "invalid_json", "plan_summary": {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}, "execution_phases": [], "verification_checklist": [], "rollback_plan": "no_data", "contingency": "no_data"}' > {{pathPlanningOutput}}
-        fi
+        echo '{"error": "parse_failed", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
+        echo "[WARN] Using fallback"
       fi
-
-      # Step 4: 验证必需字段
-      for field in plan_summary execution_phases verification_checklist rollback_plan contingency; do
+      
+      # 验证必需字段
+      for field in plan_summary execution_phases verification_checklist; do
         if ! jq -e "has(\"$field\")" {{pathPlanningOutput}} > /dev/null 2>&1; then
-          echo "[WARN] Missing field: $field, adding default"
           case $field in
-            plan_summary) jq '.plan_summary = {"total_phases": 0, "estimated_total_time": "unknown", "success_probability": 0, "risk_level": "unknown", "resources_needed": []}' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
+            plan_summary) jq '.plan_summary = {"total_phases": 0}' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
             execution_phases) jq '.execution_phases = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
             verification_checklist) jq '.verification_checklist = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
-            rollback_plan) jq '.rollback_plan = "no_data"' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
-            contingency) jq '.contingency = "no_data"' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
           esac
         fi
       done
-
-      # Step 5: 提取统计信息
+      
       PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null)
-      TIME=$(jq -r '.plan_summary.estimated_total_time // "unknown"' {{pathPlanningOutput}} 2>/dev/null)
-      ERROR_STATUS=$(jq -r '.error // "none"' {{pathPlanningOutput}} 2>/dev/null)
-
-      echo "[RESULT] Status: $ERROR_STATUS"
-      echo "[RESULT] Total phases: $PHASES, Est. time: $TIME"
-
-      rm -f {{pathPlanningOutput}}.raw 2>/dev/null || true
+      echo "[RESULT] Total phases: $PHASES"
 
   - name: generate-attack-plan-markdown
     type: bash
@@ -264,64 +210,28 @@ steps:
       TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
       # 生成 Markdown 格式的攻击计划
-      cat > {{attackPlanFile}} << 'HEADER'
-      # AI 攻击执行计划
-      ## 目标
-      TARGET_PLACEHOLDER
-      
-      ## 生成时间
-      TIMESTAMP_PLACEHOLDER
-      
-      ---
-      
-      ## 执行摘要
-      HEADER
+      {
+        echo "# AI 攻击执行计划"
+        echo "## 目标: {{Target}}"
+        echo "## 生成时间: $TIMESTAMP"
+        echo ""
+        echo "---"
+        echo ""
+        echo "## 执行摘要"
+        jq -r '.plan_summary | "**总阶段数:** \(.total_phases)\n**预计时间:** \(.estimated_total_time)\n**成功率:** \(.success_probability)\n**风险等级:** \(.risk_level)"' {{pathPlanningOutput}} 2>/dev/null || true
+        echo ""
+        echo "---"
+        echo ""
+        echo "## 执行阶段"
+        echo ""
+        jq -r '.execution_phases[] | "### Phase \(.phase): \(.phase_name)\n\n**时间:** \(.estimated_time)\n\n" + (.actions | .[] | "- **\(.action_id):** \(.description)\n  - Command: `\(.command)`\n  - Expected: \(.expected_result)\n")' {{pathPlanningOutput}} 2>/dev/null || true
+        echo ""
+        echo "---"
+        echo ""
+        echo "*此计划由 AI 自动生成*"
+      } > {{attackPlanFile}}
 
-      sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" {{attackPlanFile}}
-      sed -i "s|TIMESTAMP_PLACEHOLDER|$TIMESTAMP|g" {{attackPlanFile}}
-
-      # 添加摘要信息
-      jq -r '.plan_summary | "**总阶段数:** \(.total_phases)\n**预计时间:** \(.estimated_total_time)\n**成功率:** \(.success_probability)\n**风险等级:** \(.risk_level)\n**所需资源:** \(.resources_needed | join(", "))"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
-
-      echo "" >> {{attackPlanFile}}
-      echo "---" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-      echo "## 执行阶段" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-
-      # 添加各阶段详情
-      jq -r '.execution_phases[] | "### Phase \(.phase): \(.phase_name)\n\n**目标:** \(.objectives | join(", "))\n**预计时间:** \(.estimated_time)\n**所需工具:** \(.tools_required | join(", "))\n**成功标准:** \(.success_criteria)\n\n**操作步骤:**\n" + (.actions | .[] | "- **[\(.action_id)]** \(.description)\n  - Command: `\(.command)`\n  - Expected: \(.expected_result)\n  - Verification: \(.verification)\n  - Timeout: \(.timeout)\n")' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
-
-      echo "" >> {{attackPlanFile}}
-      echo "---" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-      echo "## 验证清单" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-
-      jq -r '.verification_checklist[] | "\(.step). [CRITICAL] " * (.critical | if . then "**" else "" end) + "\(.verification_point)\n   Command: `\(.command)`\n   Expected: \(.expected)\n"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
-
-      echo "" >> {{attackPlanFile}}
-      echo "---" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-      echo "## 回退计划" >> {{attackPlanFile}}
-      echo "" >> {{attackPlanFile}}
-      jq -r '.rollback_plan' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
-
-      echo "" >> {{attackPlanFile}}
-      echo "*此计划由 AI 攻击路径规划模块自动生成*" >> {{attackPlanFile}}
-
-      echo "[INFO] [Path Planning] Attack plan saved to {{attackPlanFile}}"
-
-  - name: generate-execution-checklist
-    type: bash
-    pre_condition: "{{enablePathPlanning}}"
-    command: |
-      mkdir -p {{Output}}/ai-analysis
-
-      # 生成可执行的检查清单
-      jq -r '.verification_checklist[] | "\(.step). [\(.critical ? "CRITICAL" : "OPTIONAL")] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
-
-      echo "[INFO] [Path Planning] Execution checklist saved"
+      echo "[Path Planning] Plan saved to {{attackPlanFile}}"
 
   - name: log-path-planning-complete
     type: function

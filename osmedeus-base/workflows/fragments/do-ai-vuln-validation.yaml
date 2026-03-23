@@ -1,11 +1,11 @@
 # =============================================================================
-# AI 漏洞验证模块
+# AI 漏洞验证模块 - 优化版
 # =============================================================================
-# 功能：
-# - 验证 Nuclei 发现的漏洞是否真实
-# - 识别假阳性
-# - 生成手动验证命令
-# - 风险评估和优先级排序
+# 优化点：
+# - JSON 输出稳定性：使用 Markdown + JSON 代码块格式
+# - Token 优化：max_iterations 从 6 降到 3
+# - 验证能力：让 agent 真正执行验证命令
+# - Prompt 优化：添加 few-shot 示例
 # =============================================================================
 
 kind: module
@@ -67,7 +67,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/cve
       
-      echo "[INFO] [INFO] [CVE] Starting NVD API pre-query..."
+      echo "[CVE] Starting NVD API pre-query..."
       
       # 提取技术栈关键词
       TECH_KEYWORDS=$(cat {{fingerprintFile}} 2>/dev/null | jq -r '.tech // [] | .[0:5][]' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
@@ -76,7 +76,7 @@ steps:
         TECH_KEYWORDS="apache,nginx,wordpress,jetty,django"
       fi
       
-      echo "[INFO] [INFO] [CVE] Tech keywords: $TECH_KEYWORDS"
+      echo "[CVE] Tech keywords: $TECH_KEYWORDS"
       
       # 初始化 CVE 文件
       > {{Output}}/ai-analysis/cve/tech-cve.txt
@@ -84,7 +84,6 @@ steps:
       
       # 查询技术栈相关 CVE（CVSS >= 7.0）
       for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
-        echo "[INFO] [INFO] [CVE] Querying: $tech"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
@@ -93,7 +92,6 @@ steps:
       
       # 查询通用漏洞类型 CVE
       for vuln_type in "sql injection" "xss" "remote code execution" "ssrf" "ssti"; do
-        echo "[INFO] [INFO] [CVE] Querying vuln type: $vuln_type"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
         jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
@@ -103,15 +101,14 @@ steps:
       TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
       VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
       
-      echo "[INFO] [INFO] [CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
+      echo "[CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
   - name: check-vuln-data
     type: bash
     pre_condition: "{{enableVulnValidation}}"
     command: |
-      echo "[INFO] [Vuln Validation] Checking data availability..."
+      echo "[Vuln Validation] Checking data availability..."
       
-      # 检查关键数据文件
       NUCLEI_JSONL_SIZE=0
       CRITICAL_SIZE=0
       HIGH_SIZE=0
@@ -126,167 +123,130 @@ steps:
         HIGH_SIZE=$(wc -l < "{{nucleiHighFile}}" 2>/dev/null || echo 0)
       fi
       
-      echo "[INFO] [Vuln Validation] Data check: nuclei_jsonl=$NUCLEI_JSONL_SIZE bytes, critical=$CRITICAL_SIZE, high=$HIGH_SIZE"
+      echo "[Vuln Validation] Data: nuclei_jsonl=$NUCLEI_JSONL_SIZE bytes, critical=$CRITICAL_SIZE, high=$HIGH_SIZE"
       
-      # 如果没有数据，生成空结果并标记跳过
       if [ "$NUCLEI_JSONL_SIZE" -lt 100 ] && [ "$CRITICAL_SIZE" -eq 0 ] && [ "$HIGH_SIZE" -eq 0 ]; then
-        echo "[WARN] [Vuln Validation] No vulnerability data found, generating empty results"
+        echo "[WARN] No vulnerability data found, generating empty results"
         mkdir -p {{Output}}/ai-analysis/validation
-        echo '{"error": "no_data", "risk_level": "低", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}
+        echo '{"error": "no_data", "risk_level": "低", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": []}' > {{vulnValidationOutput}}
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.vuln-validation-skip
         exit 0
       fi
       
       rm -f {{Output}}/ai-analysis/.vuln-validation-skip 2>/dev/null || true
-      
-      # 收集数据统计
-      echo "[INFO] [Vuln Validation] Data available, proceeding with validation"
-      echo "NUCLEI_JSONL_SIZE=$NUCLEI_JSONL_SIZE" > {{Output}}/ai-analysis/.vuln-validation-stats
-      echo "CRITICAL_COUNT=$CRITICAL_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
-      echo "HIGH_COUNT=$HIGH_SIZE" >> {{Output}}/ai-analysis/.vuln-validation-stats
+      echo "[Vuln Validation] Proceeding with validation"
 
-  - name: truncate-large-files
+  - name: prepare-input-data
     type: bash
     pre_condition: '{{enableVulnValidation}} && !file_exists("{{Output}}/ai-analysis/.vuln-validation-skip")'
     command: |
+      mkdir -p {{Output}}/ai-analysis/.input
       mkdir -p {{Output}}/ai-analysis/validation
-      mkdir -p {{Output}}/ai-analysis/.truncated
       
-      # 配置文件大小限制（单位：字节）
-      # 50KB = 51200 字节，对应约 12K tokens
-      MAX_FILE_SIZE=51200
+      # 合并漏洞数据到单个文件（限制大小）
+      : > {{Output}}/ai-analysis/.input/vuln-data.txt
       
-      truncate_file() {
-        local src="$1"
-        local dst="$2"
-        local max_size=$3
-        local filename=$(basename "$src")
-        
-        if [ ! -f "$src" ]; then
-          echo "[TRUNCATE] File not found: $src"
-          return 1
-        fi
-        
-        local size=$(wc -c < "$src" 2>/dev/null || echo 0)
-        
-        if [ "$size" -gt "$max_size" ]; then
-          echo "[TRUNCATE] File $filename is ${size} bytes, truncating to ${max_size} bytes"
-          
-          # 保留文件头部（通常包含最重要的信息）
-          head -c "$max_size" "$src" > "$dst"
-          
-          local truncated_size=$(wc -c < "$dst" 2>/dev/null || echo 0)
-          echo "[TRUNCATE] Truncated: $src -> ${truncated_size} bytes"
-          return 0
-        else
-          echo "[TRUNCATE] File $filename is ${size} bytes, no truncation needed"
-          cp "$src" "$dst"
-          return 0
-        fi
-      }
+      # Critical 漏洞（前 20 条）
+      if [ -f "{{nucleiCriticalFile}}" ]; then
+        echo "## CRITICAL VULNERABILITIES" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+        head -20 "{{nucleiCriticalFile}}" >> {{Output}}/ai-analysis/.input/vuln-data.txt 2>/dev/null || true
+        echo "" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+      fi
       
-      # 截断漏洞文件
-      truncate_file "{{nucleiCriticalFile}}" "{{Output}}/ai-analysis/.truncated/critical.txt" "$MAX_FILE_SIZE"
-      truncate_file "{{nucleiHighFile}}" "{{Output}}/ai-analysis/.truncated/high.txt" "$MAX_FILE_SIZE"
-      truncate_file "{{secretsFile}}" "{{Output}}/ai-analysis/.truncated/secrets.txt" "$MAX_FILE_SIZE"
-      truncate_file "{{ssrfFile}}" "{{Output}}/ai-analysis/.truncated/ssrf.txt" "$MAX_FILE_SIZE"
-      truncate_file "{{sqliFile}}" "{{Output}}/ai-analysis/.truncated/sqli.txt" "$MAX_FILE_SIZE"
-      truncate_file "{{takeoverFile}}" "{{Output}}/ai-analysis/.truncated/takeover.txt" "$MAX_FILE_SIZE"
+      # High 漏洞（前 15 条）
+      if [ -f "{{nucleiHighFile}}" ]; then
+        echo "## HIGH VULNERABILITIES" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+        head -15 "{{nucleiHighFile}}" >> {{Output}}/ai-analysis/.input/vuln-data.txt 2>/dev/null || true
+        echo "" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+      fi
       
-      # 记录截断后的文件信息
-      echo "[TRUNCATE] Files prepared in {{Output}}/ai-analysis/.truncated/"
-      ls -la {{Output}}/ai-analysis/.truncated/ 2>/dev/null || true
+      # 技术栈
+      if [ -f "{{fingerprintFile}}" ]; then
+        echo "## TECHNOLOGY STACK" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+        head -5 "{{fingerprintFile}}" | jq -r '.tech // [] | .[0:10][]' 2>/dev/null | head -20 >> {{Output}}/ai-analysis/.input/vuln-data.txt || true
+        echo "" >> {{Output}}/ai-analysis/.input/vuln-data.txt
+      fi
+      
+      INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/vuln-data.txt 2>/dev/null || echo 0)
+      echo "[Vuln Validation] Input prepared: $INPUT_SIZE bytes"
 
   - name: ai-validate-vulns
     type: agent
     pre_condition: '{{enableVulnValidation}} && !file_exists("{{Output}}/ai-analysis/.vuln-validation-skip")'
-    max_iterations: 6
+    max_iterations: 3
     timeout: 600
     on_error:
       - action: continue
     system_prompt: |
-      你是一个资深渗透测试专家，专注于漏洞验证。
-      你的任务是对扫描结果进行验证，判断漏洞是否真实存在，识别假阳性。
+      你是一个渗透测试专家，负责验证漏洞发现并识别假阳性。
       
-      验证原则：
-      1. 每个漏洞必须有明确的验证状态（真实/假阳性/需手动验证）
-      2. 对于真实漏洞，提供具体的验证方法和命令
-      3. 对于假阳性，说明原因
-      4. 按风险等级排序输出
+      输出格式：
+      先用文字分析发现的漏洞，然后用 JSON 代码块输出结构化结果。
       
-      重要约束：
-      - 必须返回结构化的 JSON 输出
-      - 每个漏洞必须有置信度评分
-      - 提供可执行的验证命令
-      - 只分析提供的数据，不要虚构漏洞
+      ## 分析示例
       
-      你可以使用以下安全测试技能库作为参考：
-      - SQL 注入测试：{{Output}}/ai-analysis/skills-combined.md
-      - 知识库参考：{{Output}}/ai-analysis/knowledge-base-results.md
-    query: |
-      请验证以下漏洞发现，判断其真实性并识别假阳性：
-
-      ## 安全测试技能参考
-      请使用 read_file 工具读取：
-      - {{Output}}/ai-analysis/skills-combined.md - 安全测试技能库
-      - {{Output}}/ai-analysis/knowledge-base-results.md - 知识库参考
+      ### 已验证的真实漏洞
+      - CVE-2021-44228 (Log4j): http://target.com - 返回正确的 JNDI 响应，确认可利用
+      - SQL Injection: http://api.target.com/api?id=1 - 执行了测试 payloads，确认存在
       
-      ## CVE 参考数据（可选）
-      {% if enableCvePreQuery %}
-      请使用 read_lines 工具读取以下文件获取 CVE 参考：
-      - {{Output}}/ai-analysis/cve/tech-cve.txt - 技术栈相关 CVE
-      - {{Output}}/ai-analysis/cve/vuln-type-cve.txt - 漏洞类型相关 CVE
-      {% endif %}
-
-      ## 数据文件（已截断以优化处理）
-      请使用 read_lines 工具读取以下文件获取详细信息：
-      - {{fingerprintFile}} - 技术栈背景
-      - {{Output}}/ai-analysis/.truncated/critical.txt - Critical 漏洞（已截断）
-      - {{Output}}/ai-analysis/.truncated/high.txt - High 漏洞（已截断）
-      - {{Output}}/ai-analysis/.truncated/secrets.txt - Secrets 发现（已截断）
-      - {{Output}}/ai-analysis/.truncated/ssrf.txt - SSRF 发现（已截断）
-      - {{Output}}/ai-analysis/.truncated/sqli.txt - SQLi 发现（已截断）
-      - {{Output}}/ai-analysis/.truncated/takeover.txt - Takeover 发现（已截断）
-
-      请输出 JSON 格式的验证结果：
+      ### 识别假阳性
+      - Path Traversal on /static/files - 响应是 404，非漏洞
+      - Self-XSS on comment field - 需要受害者互动，无实际危害
+      
+      ### 需要进一步验证
+      - DOM XSS on /search - 需要复现步骤
+      
       ```json
       {
-        "risk_level": "高/中/低",
-        "total_validated": 0,
-        "confirmed_real": 0,
-        "false_positives": 0,
-        "needs_manual_verification": 0,
+        "risk_level": "高",
+        "confirmed_real": 2,
+        "false_positives": 2,
+        "needs_manual_verification": 1,
         "findings": [
           {
-            "severity": "critical/high/medium",
-            "type": "漏洞类型",
-            "finding": "漏洞描述",
-            "url": "目标URL",
-            "template": "nuclei模板名",
-            "cve": "CVE-XXXX-XXXX（如有）",
-            "cvss": 9.8（如有）",
-            "status": "confirmed/false_positive/needs_verification",
+            "severity": "critical",
+            "type": "log4j-rce",
+            "url": "http://target.com",
+            "status": "confirmed",
             "confidence": 0.95,
-            "false_positive_reason": "如果是假阳性，说明原因",
-            "verification_command": "curl命令",
-            "verification_expected": "预期响应",
-            "tools_needed": ["工具1"],
-            "remediation": "修复建议"
+            "reason": "返回正确的 JNDI lookup 响应",
+            "evidence": "DNS 回调成功"
+          },
+          {
+            "severity": "high",
+            "type": "sql-injection",
+            "url": "http://api.target.com/api?id=1",
+            "status": "confirmed",
+            "confidence": 0.90,
+            "reason": "测试 payload 成功执行",
+            "verification_command": "curl -X POST 'http://api.target.com/api?id=1' ..."
           }
         ],
-        "high_priority_items": ["需要立即处理的项目"],
-        "verification_commands": ["可执行的验证命令"]
+        "high_priority_items": ["CVE-2021-44228 on http://target.com"]
       }
       ```
-
-      只输出 JSON，确保格式完全正确。
+      
+      重要：
+      1. 优先对 Critical/High 漏洞进行验证
+      2. 每个 findings 必须有 confidence (0.0-1.0)
+      3. confirmed 状态的漏洞必须有验证证据
+      4. false_positive 必须说明原因
+      5. 使用 bash 工具执行验证命令，不要只生成命令
+    query: |
+      验证 {{Target}} 的漏洞发现。
+      
+      数据文件：{{Output}}/ai-analysis/.input/vuln-data.txt
+      
+      请读取数据文件，分析每个漏洞，对于可疑漏洞使用 bash 执行 curl 命令验证。
+      
+      输出格式：
+      1. 先写分析（哪些是真实的，哪些是假阳性）
+      2. 然后用 JSON 代码块输出结构化结果
     agent_tools:
       - preset: read_file
-      - preset: read_lines
       - preset: file_exists
-      - preset: http_get
-      - preset: http_request
       - preset: bash
+      - preset: http_request
       - preset: save_content
     exports:
       validation_json: "{{agent_content}}"
@@ -297,44 +257,41 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/validation
 
-      # Step 1: 保存原始验证结果，清理 markdown 代码块
-      echo '{{validation_json}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//' > {{vulnValidationOutput}}.raw 2>/dev/null || true
-
-      # Step 2: 检查是否为空
-      if [ ! -s "{{vulnValidationOutput}}.raw" ] || [ "$(cat {{vulnValidationOutput}}.raw | tr -d ' \n')" = "" ]; then
-        echo "[WARN] Empty response from AI, generating fallback"
-        echo '{"error": "empty_response", "risk_level": "中", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}.raw
+      # 从 Markdown 中提取 JSON（更稳定）
+      RAW='{{validation_json}}'
+      
+      # 提取 markdown 代码块中的 JSON
+      JSON_CONTENT=$(echo "$RAW" | sed -n '/```json/,/```/p' | sed '1d;$d' | sed 's/^[[:space:]]*//')
+      
+      if [ -z "$JSON_CONTENT" ] || [ "$JSON_CONTENT" = "```json" ] || [ "$JSON_CONTENT" = "```" ]; then
+        # 尝试直接解析
+        JSON_CONTENT=$(echo "$RAW" | grep -o '{.*}' | head -1)
       fi
-
-      # Step 3: 尝试修复常见问题
-      sed -i 's/```json//g; s/```/ /g' {{vulnValidationOutput}}.raw
-      sed -i '/^"*[^{]/d' {{vulnValidationOutput}}.raw 2>/dev/null || true
-
-      # Step 4: 验证 JSON 格式
-      if jq empty {{vulnValidationOutput}}.raw 2>/dev/null; then
-        echo "[OK] Valid JSON from AI"
-        mv {{vulnValidationOutput}}.raw {{vulnValidationOutput}}
+      
+      if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
+        echo "$JSON_CONTENT" > {{vulnValidationOutput}}
+        echo "[OK] Valid JSON extracted from markdown"
       else
-        echo "[WARN] Invalid JSON, attempting to extract valid JSON..."
-        EXTRACTED=$(cat {{vulnValidationOutput}}.raw | grep -o '{.*}' | head -1)
+        echo "[WARN] JSON extraction failed, trying alternative methods..."
+        
+        # 尝试提取 {...} 模式
+        EXTRACTED=$(echo "$RAW" | grep -oP '\{[^}]*"findings"[^}]*\}' | head -1)
         if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
           echo "$EXTRACTED" > {{vulnValidationOutput}}
-          echo "[OK] Extracted valid JSON"
+          echo "[OK] Extracted using pattern match"
         else
-          echo "[ERROR] Could not extract valid JSON, using fallback"
-          echo '{"error": "invalid_json", "risk_level": "中", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": [], "verification_commands": []}' > {{vulnValidationOutput}}
+          # Fallback
+          echo '{"error": "parse_failed", "risk_level": "中", "total_validated": 0, "confirmed_real": 0, "false_positives": 0, "needs_manual_verification": 0, "findings": [], "high_priority_items": []}' > {{vulnValidationOutput}}
+          echo "[ERROR] Using fallback empty result"
         fi
       fi
-
-      # Step 5: 验证必需字段并填充默认值
-      for field in risk_level findings confirmed_real false_positives needs_manual_verification high_priority_items verification_commands; do
+      
+      # 验证必需字段
+      for field in risk_level findings confirmed_real false_positives needs_manual_verification; do
         if ! jq -e "has(\"$field\")" {{vulnValidationOutput}} > /dev/null 2>&1; then
-          echo "[WARN] Missing field: $field, adding default"
           case $field in
             risk_level) jq '.risk_level = "中"' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
             findings) jq '.findings = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            high_priority_items) jq '.high_priority_items = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
-            verification_commands) jq '.verification_commands = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
             confirmed_real) jq '.confirmed_real = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
             false_positives) jq '.false_positives = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
             needs_manual_verification) jq '.needs_manual_verification = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
@@ -342,23 +299,11 @@ steps:
         fi
       done
 
-      # Step 6: 验证 findings 数组格式
-      if ! jq -e '.findings | type == "array"' {{vulnValidationOutput}} > /dev/null 2>&1; then
-        echo "[WARN] findings is not an array, fixing"
-        jq '.findings = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}}
-      fi
-
-      # Step 7: 提取统计信息
       CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null)
       FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null)
-      MANUAL=$(jq -r '.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null)
       TOTAL=$(jq -r '.findings | length' {{vulnValidationOutput}} 2>/dev/null)
-      ERROR_STATUS=$(jq -r '.error // "none"' {{vulnValidationOutput}} 2>/dev/null)
-
-      echo "[RESULT] Status: $ERROR_STATUS"
-      echo "[RESULT] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL, Total Findings: $TOTAL"
-
-      rm -f {{vulnValidationOutput}}.raw 2>/dev/null || true
+      
+      echo "[RESULT] Confirmed: $CONFIRMED, False Positives: $FP, Total: $TOTAL"
 
   - name: extract-validation-data
     type: bash
@@ -367,17 +312,13 @@ steps:
       mkdir -p {{Output}}/ai-analysis/validation
 
       # 提取假阳性列表
-      jq -r '.findings[] | select(.status == "false_positive") | "\(.url) - \(.finding) - \(.false_positive_reason)"' {{vulnValidationOutput}} 2>/dev/null > {{falsePositivesFile}} || true
+      jq -r '.findings[] | select(.status == "false_positive") | "\(.url // .finding // "unknown") - \(.reason // "no reason provided")"' {{vulnValidationOutput}} 2>/dev/null > {{falsePositivesFile}} || true
 
-      # 提取手动验证命令
-      jq -r '.findings[] | select(.status == "needs_verification") | "# \(.severity): \(.finding)\n# URL: \(.url)\n\(.verification_command)\n# Expected: \(.verification_expected)\n"' {{vulnValidationOutput}} 2>/dev/null > {{manualVerifyCommandsFile}} || true
+      # 提取已验证漏洞列表
+      jq -r '.findings[] | select(.status == "confirmed") | .url // empty' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
 
-      chmod +x {{manualVerifyCommandsFile}} 2>/dev/null || true
-
-      # 提取已验证漏洞列表（用于后续攻击链分析）
-      jq -r '.findings[] | select(.status == "confirmed") | .url' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
-
-      echo "[INFO] [INFO] [Vuln Validation] Extraction complete"
+      CONFIRMED_COUNT=$(wc -l < {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
+      echo "[Vuln Validation] Extracted $CONFIRMED_COUNT confirmed URLs"
 
   - name: log-validation-complete
     type: function

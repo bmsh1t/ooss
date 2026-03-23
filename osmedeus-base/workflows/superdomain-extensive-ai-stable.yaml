@@ -200,8 +200,11 @@ modules:
     depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
   # ===========================================================================
-  # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
+  # Phase 8: AI 智能分析 (并行执行，独立模块)
   # ===========================================================================
+  # 优化：AI 模块改为并行执行，减少等待时间
+  # - vuln-validation, attack-chain, path-planning 独立并行
+  # - intelligent-analysis 最后汇总
 
   # AI 预扫描决策 - agent-acp 版本 (可并行，依赖较早阶段)
   - name: ai-pre-scan-decision
@@ -223,25 +226,27 @@ modules:
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
-  # AI 漏洞验证 - agent-acp 版本 (flowcli)
+  # AI 漏洞验证 - 优化版 (LLM，直接分析)
   - name: ai-vuln-validation
-    path: fragments/do-ai-vuln-validation-acp.yaml
+    path: fragments/do-ai-vuln-validation.yaml
     depends_on: [vuln-suite]
     pre_condition: "{{enableVulnValidation}}"
 
-  # AI 攻击链分析 - agent-acp 版本 (flowcli)
+  # AI 攻击链分析 - 优化版 (LLM，直接分析)
+  # 注意：改为依赖 vuln-suite，实现并行执行
   - name: ai-attack-chain
-    path: fragments/do-ai-attack-chain-acp.yaml
-    depends_on: [ai-vuln-validation]
+    path: fragments/do-ai-attack-chain.yaml
+    depends_on: [vuln-suite]
     pre_condition: "{{enableAttackChain}}"
 
-  # AI 攻击路径规划 - agent-acp 版本 (flowcli)
+  # AI 攻击路径规划 - 优化版 (LLM，直接分析)
+  # 注意：改为依赖 vuln-suite，实现并行执行
   - name: ai-path-planning
-    path: fragments/do-ai-path-planning-acp.yaml
-    depends_on: [ai-attack-chain]
+    path: fragments/do-ai-path-planning.yaml
+    depends_on: [vuln-suite]
     pre_condition: "{{enablePathPlanning}}"
 
-  # AI 协调器 - 汇总分析结果 (bash，不调用 LLM)
+  # AI 协调器 - 汇总分析结果 (在所有 AI 模块完成后执行)
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search]
