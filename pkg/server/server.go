@@ -297,6 +297,13 @@ func (s *Server) setupRoutes() {
 	// Jobs (group of runs from same request)
 	api.Get("/jobs/:id", handlers.GetJobStatus(s.config))
 
+	// Campaigns (batch operations over queued runs)
+	api.Get("/campaigns", handlers.ListCampaigns(s.config))
+	api.Post("/campaigns", handlers.CreateCampaign(s.config))
+	api.Get("/campaigns/:id", handlers.GetCampaignStatus(s.config))
+	api.Post("/campaigns/:id/rerun-failed", handlers.RerunFailedCampaignTargets(s.config))
+	api.Post("/campaigns/:id/deep-scan", handlers.QueueCampaignDeepScan(s.config))
+
 	// File uploads
 	api.Post("/upload-file", handlers.UploadFile(s.config))
 	api.Post("/workflow-upload", handlers.UploadWorkflow(s.config))
@@ -330,9 +337,15 @@ func (s *Server) setupRoutes() {
 	api.Get("/vulnerabilities", handlers.ListVulnerabilities(s.config))
 	api.Get("/vulnerabilities/diff", handlers.GetVulnerabilityDiff(s.config))
 	api.Get("/vulnerabilities/diffs", handlers.ListVulnDiffSnapshots(s.config))
+	api.Get("/vulnerabilities/board", handlers.GetVulnerabilityBoard(s.config))
 	api.Get("/vulnerabilities/summary", handlers.GetVulnerabilitySummary(s.config))
+	api.Get("/attack-chains", handlers.ListAttackChains(s.config))
+	api.Get("/attack-chains/:id", handlers.GetAttackChain(s.config))
+	api.Post("/attack-chains/import", handlers.ImportAttackChain(s.config))
 	api.Get("/vulnerabilities/:id", handlers.GetVulnerability(s.config))
 	api.Post("/vulnerabilities", handlers.CreateVulnerability(s.config))
+	api.Patch("/vulnerabilities/:id", handlers.UpdateVulnerability(s.config))
+	api.Post("/vulnerabilities/:id/retest", handlers.RetestVulnerability(s.config))
 	api.Delete("/vulnerabilities/:id", handlers.DeleteVulnerability(s.config))
 
 	// Stats
@@ -376,6 +389,12 @@ func (s *Server) setupRoutes() {
 
 	// Agent ACP endpoints (OpenAI-compatible)
 	api.Post("/agent/chat/completions", handlers.AgentChat(s.config))
+
+	// Local knowledge base endpoints
+	api.Get("/knowledge/documents", handlers.ListKnowledgeDocuments(s.config))
+	api.Post("/knowledge/ingest", handlers.IngestKnowledge(s.config))
+	api.Post("/knowledge/search", handlers.SearchKnowledge(s.config))
+	api.Post("/knowledge/learn", handlers.LearnKnowledge(s.config))
 
 	// Distributed endpoints (only available when running in master mode)
 	if s.options.Master != nil {

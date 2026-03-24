@@ -17,6 +17,8 @@ params:
     default: "{{Output}}/ai-analysis/pre-scan-decision-{{TargetSpace}}.json"
   - name: priorityListOutput
     default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+  - name: aiDecisionOutput
+    default: "{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
   - name: memoryOutput
     default: "{{Output}}/ai-analysis/memory-pre-scan-{{TargetSpace}}.json"
   - name: subdomainFile
@@ -143,7 +145,12 @@ steps:
       mkdir -p {{Output}}/ai-analysis
       
       # 保存原始结果
-      echo '{{pre_scan_json}}' > {{preScanOutput}} 2>/dev/null || echo '{}' > {{preScanOutput}}
+      cat > {{preScanOutput}} << 'AIEOF'
+      {{pre_scan_json}}
+      AIEOF
+      if ! jq empty {{preScanOutput}} 2>/dev/null; then
+        echo '{}' > {{preScanOutput}}
+      fi
       
       # 验证并提取优先级目标
       if jq empty {{preScanOutput}} 2>/dev/null; then
@@ -176,10 +183,17 @@ steps:
       if [ -f "{{preScanOutput}}" ]; then
         TECH_STACK=$(jq -r '.predicted_tech_stack[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' | sed 's/,$//')
         FOCUS=$(jq -r '.focus_areas[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        SKIP_REASONS=$(jq -r '[.skip_reasons[]?] | join(",")' {{preScanOutput}} 2>/dev/null || echo "")
+        REASONING=$(jq -r '.reasoning // "AI-generated"' {{preScanOutput}} 2>/dev/null || echo "AI-generated")
       else
         TECH_STACK=""
         FOCUS=""
+        SKIP_REASONS=""
+        REASONING="AI-generated"
       fi
+
+      ESC_SKIP=$(printf '%s' "$SKIP_REASONS" | sed 's/["\\]/\\&/g')
+      ESC_REASONING=$(printf '%s' "$REASONING" | sed 's/["\\]/\\&/g')
       
       # 生成预扫描配置
       cat > {{Output}}/ai-analysis/pre-scan-config.yaml << EOF
@@ -198,12 +212,55 @@ steps:
       priority_targets_file: "{{priorityListOutput}}"
       
       # Skip Reasons (targets to skip)
-      skip_reasons: $(jq -r '.skip_reasons[] // ""' {{preScanOutput}} 2>/dev/null | tr '\n' ',' || echo "")
+      skip_reasons: "$ESC_SKIP"
       
       # Reasoning
-      reasoning: $(jq -r '.reasoning // "AI-generated"' {{preScanOutput}} 2>/dev/null || echo "AI-generated")
+      reasoning: "$ESC_REASONING"
       EOF
       
+      # 生成前置 AI 决策（供本轮 vuln-suite 在 final decision 缺失时回退读取）
+      PRIORITY_COUNT=$(wc -l < {{priorityListOutput}} 2>/dev/null || echo 0)
+      if [ "$PRIORITY_COUNT" -gt 30 ]; then
+        SEVERITY="critical,high,medium"
+        THREADS=15
+        RATE_LIMIT=50
+        TIMEOUT="8h"
+      elif [ "$PRIORITY_COUNT" -gt 10 ]; then
+        SEVERITY="critical,high"
+        THREADS=12
+        RATE_LIMIT=40
+        TIMEOUT="6h"
+      else
+        SEVERITY="critical,high"
+        THREADS=10
+        RATE_LIMIT=30
+        TIMEOUT="6h"
+      fi
+
+      FOCUS_AREAS_JSON='[]'
+      if [ -f "{{preScanOutput}}" ] && jq empty "{{preScanOutput}}" 2>/dev/null; then
+        FOCUS_AREAS_JSON=$(jq -c '.focus_areas // []' "{{preScanOutput}}" 2>/dev/null || echo '[]')
+      fi
+
+      jq -n \
+        --arg nuclei_severity "$SEVERITY" \
+        --argjson suggested_threads "$THREADS" \
+        --argjson suggested_rate_limit "$RATE_LIMIT" \
+        --arg recommended_timeout "$TIMEOUT" \
+        --argjson waf_bypass_needed false \
+        --argjson focus_areas "$FOCUS_AREAS_JSON" \
+        --arg reasoning "Pre-scan bootstrap decision: priority_targets=$PRIORITY_COUNT" \
+        '{
+          nuclei_severity: $nuclei_severity,
+          suggested_threads: $suggested_threads,
+          suggested_rate_limit: $suggested_rate_limit,
+          recommended_timeout: $recommended_timeout,
+          waf_bypass_needed: $waf_bypass_needed,
+          focus_areas: $focus_areas,
+          reasoning: $reasoning
+        }' > {{aiDecisionOutput}}
+
+      echo "[Pre-Scan] Bootstrap AI decision saved to {{aiDecisionOutput}}"
       echo "[Pre-Scan] Config saved"
 
   - name: save-memory-context

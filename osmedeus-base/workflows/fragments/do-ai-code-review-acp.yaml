@@ -23,7 +23,11 @@ params:
 
   # 输入文件
   - name: sourceCodeDir
-    default: "{{Output}}/source-code"
+    default: "{{Output}}/.tmp/github_repos"
+  - name: sourceCodeFallbackDir
+    default: "{{Output}}/code/github"
+  - name: sourceFilesList
+    default: "{{Output}}/ai-analysis/source-files-{{TargetSpace}}.txt"
   - name: vulnFindingsFile
     default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
 
@@ -43,6 +47,25 @@ steps:
       - 'create_folder("{{Output}}/ai-analysis")'
       - 'log_info("Starting AI code review for {{Target}}")'
 
+  - name: collect-source-files
+    type: bash
+    pre_condition: "{{enableLlmCodeReview}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      : > {{sourceFilesList}}
+
+      for d in "{{sourceCodeDir}}" "{{sourceCodeFallbackDir}}"; do
+        if [ -d "$d" ]; then
+          find "$d" -type f \
+            \( -name "*.go" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.rs" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" \) \
+            2>/dev/null | head -200 >> {{sourceFilesList}} || true
+        fi
+      done
+
+      sort -u {{sourceFilesList}} -o {{sourceFilesList}} 2>/dev/null || true
+      FILE_COUNT=$(wc -l < {{sourceFilesList}} 2>/dev/null || echo 0)
+      echo "[Code Review] Source files indexed: $FILE_COUNT"
+
   - name: ai-review-code
     type: agent-acp
     agent: flowcli
@@ -51,6 +74,7 @@ steps:
     allowed_paths:
       - "{{Output}}"
       - "{{sourceCodeDir}}"
+      - "{{sourceCodeFallbackDir}}"
     acp_config:
       write_enabled: true
     on_error:
@@ -79,6 +103,10 @@ steps:
 
           ## 已发现的漏洞
           请使用 read_lines 工具读取 {{vulnFindingsFile}}
+
+          ## 源码文件清单
+          请使用 read_lines 工具读取 {{sourceFilesList}}，然后对清单中的源码文件逐个使用 read_lines/read_file 进行审计。
+          若清单为空，请在输出中明确标记 files_reviewed=0，并给出无法审计源码的原因。
 
           请输出 JSON 格式的代码审查结果保存到 {{codeReviewOutput}}：
           ```json
@@ -121,7 +149,9 @@ steps:
 
       # 容错：处理可能的空输出
       if [ -n "{{code_review_json}}" ] && [ "{{code_review_json}}" != "null" ] && [ "{{code_review_json}}" != "{}" ]; then
-        echo '{{code_review_json}}' > {{codeReviewOutput}}
+        cat > {{codeReviewOutput}} << 'AIEOF'
+        {{code_review_json}}
+        AIEOF
         
         if jq empty {{codeReviewOutput}} 2>/dev/null; then
           TOTAL=$(jq -r '.code_review_summary.total_issues // 0' {{codeReviewOutput}} 2>/dev/null || echo 0)

@@ -103,6 +103,23 @@ func (e *ACPExecutor) Execute(ctx context.Context, step *core.Step, execCtx *cor
 		Exports:   make(map[string]interface{}),
 	}
 
+	if step.Timeout != "" {
+		timeout, err := step.Timeout.Duration()
+		if err != nil {
+			err = fmt.Errorf("agent-acp step '%s' has invalid timeout: %w", step.Name, err)
+			result.Status = core.StepStatusFailed
+			result.Error = err
+			result.EndTime = time.Now()
+			result.Duration = result.EndTime.Sub(result.StartTime)
+			return result, err
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
+
 	// Validate we have an agent
 	agentName := step.Agent
 	if agentName == "" {

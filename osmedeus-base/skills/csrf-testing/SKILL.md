@@ -1,7 +1,16 @@
 ---
-name: csrf-testing
+id: csrf-testing
+name: CSRF Testing
 description: CSRF跨站请求伪造测试的专业技能和方法论
 version: 1.0.0
+aliases:
+  - csrf
+tags:
+  - web
+  - session
+  - state-changing
+target_types:
+  - web
 ---
 
 # CSRF跨站请求伪造测试

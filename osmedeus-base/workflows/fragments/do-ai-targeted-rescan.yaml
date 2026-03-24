@@ -1,0 +1,223 @@
+# =============================================================================
+# AI 定向深扫模块
+# =============================================================================
+# 功能：
+# - 读取 AI 验证过的高置信度漏洞 URL
+# - 对这些目标做 nuclei critical/high 定向深扫
+# - 输出补充扫描结果，与原始结果合并
+#
+# 设计原则：
+# - 不重跑全量 vuln-suite（代价太高）
+# - 只针对 AI confirmed 的目标做补充验证
+# - 读取 ai-decision 中的 nuclei_severity/threads/rate_limit 建议
+# =============================================================================
+
+kind: module
+name: ai-targeted-rescan
+description: AI-guided targeted rescan - run nuclei against AI-confirmed high-confidence targets
+
+params:
+  # 输入：AI 分析结果
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+
+  # 输出
+  - name: rescanOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-rescan-{{TargetSpace}}.jsonl"
+  - name: rescanCriticalFile
+    default: "{{Output}}/vulnscan/rescan-critical-{{TargetSpace}}.txt"
+  - name: rescanHighFile
+    default: "{{Output}}/vulnscan/rescan-high-{{TargetSpace}}.txt"
+  - name: rescanSummaryFile
+    default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+
+  # 扫描配置（默认值，会被 AI 决策覆盖）
+  - name: nucleiTemplateConfig
+    default: "~/nuclei-templates/"
+  - name: defaultSeverity
+    default: "critical,high"
+  - name: defaultThreads
+    type: integer
+    default: 15
+  - name: defaultRateLimit
+    type: integer
+    default: 30
+  - name: defaultTimeout
+    default: "8"
+  - name: scanTimeout
+    default: "90m"
+
+  # 开关
+  - name: enableTargetedRescan
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-rescan
+    type: function
+    pre_condition: "{{enableTargetedRescan}}"
+    log: "Preparing AI-guided targeted rescan"
+    functions:
+      - 'create_folder("{{Output}}/vulnscan")'
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Starting AI targeted rescan for {{Target}}")'
+
+  - name: check-confirmed-targets
+    type: bash
+    pre_condition: "{{enableTargetedRescan}}"
+    command: |
+      if [ ! -f "{{confirmedUrlsFile}}" ] || [ ! -s "{{confirmedUrlsFile}}" ]; then
+        echo "[Rescan] No confirmed targets from AI validation, skipping rescan"
+        touch "{{Output}}/ai-analysis/.rescan-skip"
+      else
+        TARGET_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
+        echo "[Rescan] Found $TARGET_COUNT AI-confirmed targets for deep scan"
+        rm -f "{{Output}}/ai-analysis/.rescan-skip"
+      fi
+
+  - name: load-ai-decision
+    type: bash
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
+    command: |
+      # 读取 AI 决策建议的扫描参数
+      SEVERITY="{{defaultSeverity}}"
+      THREADS={{defaultThreads}}
+      RATE_LIMIT={{defaultRateLimit}}
+      TIMEOUT="{{defaultTimeout}}"
+
+      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        AI_SEVERITY=$(jq -r '.nuclei_severity // ""' "{{aiDecisionFile}}" 2>/dev/null)
+        AI_THREADS=$(jq -r '.suggested_threads // 0' "{{aiDecisionFile}}" 2>/dev/null)
+        AI_RATE=$(jq -r '.suggested_rate_limit // 0' "{{aiDecisionFile}}" 2>/dev/null)
+        AI_TIMEOUT=$(jq -r '.recommended_timeout // ""' "{{aiDecisionFile}}" 2>/dev/null)
+
+        [ -n "$AI_SEVERITY" ] && SEVERITY="$AI_SEVERITY"
+        [ "$AI_THREADS" -gt 0 ] 2>/dev/null && THREADS=$AI_THREADS
+        [ "$AI_RATE" -gt 0 ] 2>/dev/null && RATE_LIMIT=$AI_RATE
+        # 去掉单位后缀，只保留数字（nuclei -timeout 单位为秒）
+        AI_TIMEOUT_NUM=$(echo "$AI_TIMEOUT" | tr -dc '0-9')
+        [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT="$AI_TIMEOUT_NUM"
+
+        echo "[Rescan] AI decision loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+      else
+        echo "[Rescan] No AI decision found, using defaults"
+      fi
+
+      # 保存到工作目录（避免 /tmp 在容器/并发场景下的竞态问题）
+      RESCAN_CFG="{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
+      {
+        printf 'export RESCAN_SEVERITY=%s\n' "$(printf '%s' "$SEVERITY" | sed 's/["\\]/\\&/g')"
+        printf 'export RESCAN_THREADS=%s\n' "$THREADS"
+        printf 'export RESCAN_RATE_LIMIT=%s\n' "$RATE_LIMIT"
+        printf 'export RESCAN_TIMEOUT=%s\n' "$(printf '%s' "$TIMEOUT" | sed 's/["\\]/\\&/g')"
+      } > "$RESCAN_CFG"
+
+      echo "[Rescan] Config saved to $RESCAN_CFG"
+
+  - name: run-targeted-nuclei
+    type: bash
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
+    timeout: "{{scanTimeout}}"
+    command: |
+      RESCAN_CFG="{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
+      source "$RESCAN_CFG" 2>/dev/null || true
+      SEVERITY=${RESCAN_SEVERITY:-"{{defaultSeverity}}"}
+      THREADS=${RESCAN_THREADS:-{{defaultThreads}}}
+      RATE_LIMIT=${RESCAN_RATE_LIMIT:-{{defaultRateLimit}}}
+      TIMEOUT=${RESCAN_TIMEOUT:-"{{defaultTimeout}}"}
+
+      TARGET_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
+      echo "[Rescan] Running nuclei on $TARGET_COUNT confirmed targets"
+      echo "[Rescan] Params: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+
+      nuclei \
+        -l "{{confirmedUrlsFile}}" \
+        -t "{{nucleiTemplateConfig}}" \
+        -severity "$SEVERITY" \
+        -c $THREADS \
+        -rl $RATE_LIMIT \
+        -timeout $TIMEOUT \
+        -jsonl \
+        -o "{{rescanOutputJsonl}}" \
+        -silent 2>/dev/null || true
+
+      rm -f "{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
+
+      FOUND=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+      echo "[Rescan] Nuclei completed: $FOUND findings"
+
+  - name: extract-rescan-findings
+    type: bash
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
+    command: |
+      if [ ! -f "{{rescanOutputJsonl}}" ] || [ ! -s "{{rescanOutputJsonl}}" ]; then
+        echo "[Rescan] No new findings from targeted rescan"
+        exit 0
+      fi
+
+      # 提取 critical
+      jq -r 'select(.info.severity == "critical") | "[" + .info.severity + "] " + .host + " - " + .info.name' \
+        "{{rescanOutputJsonl}}" 2>/dev/null > "{{rescanCriticalFile}}" || true
+
+      # 提取 high
+      jq -r 'select(.info.severity == "high") | "[" + .info.severity + "] " + .host + " - " + .info.name' \
+        "{{rescanOutputJsonl}}" 2>/dev/null > "{{rescanHighFile}}" || true
+
+      CRITICAL=$(wc -l < "{{rescanCriticalFile}}" 2>/dev/null || echo 0)
+      HIGH=$(wc -l < "{{rescanHighFile}}" 2>/dev/null || echo 0)
+      echo "[Rescan] Extracted: critical=$CRITICAL high=$HIGH"
+
+  - name: generate-rescan-summary
+    type: bash
+    pre_condition: "{{enableTargetedRescan}}"
+    command: |
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+      SKIPPED=false
+      [ -f "{{Output}}/ai-analysis/.rescan-skip" ] && SKIPPED=true
+
+      {
+        echo "# AI 定向深扫结果"
+        echo "## 目标: {{Target}}"
+        echo "## 时间: $TIMESTAMP"
+        echo ""
+
+        if [ "$SKIPPED" = "true" ]; then
+          echo "> AI 验证无高置信度目标，跳过定向深扫"
+        else
+          CRITICAL=$(wc -l < "{{rescanCriticalFile}}" 2>/dev/null || echo 0)
+          HIGH=$(wc -l < "{{rescanHighFile}}" 2>/dev/null || echo 0)
+          TOTAL=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+
+          echo "## 扫描统计"
+          echo "- 扫描目标数: $(wc -l < \"{{confirmedUrlsFile}}\" 2>/dev/null || echo 0)"
+          echo "- Critical 新发现: $CRITICAL"
+          echo "- High 新发现: $HIGH"
+          echo "- 总计新发现: $TOTAL"
+          echo ""
+
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "## Critical 发现"
+            cat "{{rescanCriticalFile}}" 2>/dev/null
+            echo ""
+          fi
+
+          if [ "$HIGH" -gt 0 ]; then
+            echo "## High 发现"
+            cat "{{rescanHighFile}}" 2>/dev/null
+            echo ""
+          fi
+        fi
+
+        echo "---"
+        echo "*由 AI 定向深扫模块生成*"
+      } > "{{rescanSummaryFile}}"
+
+      echo "[Rescan] Summary saved to {{rescanSummaryFile}}"
+
+  - name: log-rescan-complete
+    type: function
+    pre_condition: "{{enableTargetedRescan}}"
+    functions:
+      - 'log_info("AI targeted rescan completed for {{Target}}")'

@@ -168,6 +168,64 @@ type EventLog struct {
 	CreatedAt time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
+// KnowledgeDocument stores a normalized source document for the local knowledge base.
+type KnowledgeDocument struct {
+	bun.BaseModel `bun:"table:knowledge_documents,alias:kd"`
+
+	ID          int64     `bun:"id,pk,autoincrement" json:"id"`
+	Workspace   string    `bun:"workspace,notnull" json:"workspace"`
+	SourcePath  string    `bun:"source_path,notnull" json:"source_path"`
+	SourceType  string    `bun:"source_type,notnull,default:'file'" json:"source_type"`
+	DocType     string    `bun:"doc_type,notnull" json:"doc_type"`
+	Title       string    `bun:"title,notnull" json:"title"`
+	ContentHash string    `bun:"content_hash,notnull" json:"content_hash"`
+	Status      string    `bun:"status,notnull,default:'ready'" json:"status"`
+	ChunkCount  int       `bun:"chunk_count,default:0" json:"chunk_count"`
+	TotalBytes  int64     `bun:"total_bytes,default:0" json:"total_bytes"`
+	Metadata    string    `bun:"metadata_json" json:"metadata,omitempty"`
+	Error       string    `bun:"error_message" json:"error,omitempty"`
+	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt   time.Time `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+}
+
+// KnowledgeChunk stores an individual searchable chunk from a knowledge document.
+type KnowledgeChunk struct {
+	bun.BaseModel `bun:"table:knowledge_chunks,alias:kc"`
+
+	ID          int64     `bun:"id,pk,autoincrement" json:"id"`
+	DocumentID  int64     `bun:"document_id,notnull" json:"document_id"`
+	Workspace   string    `bun:"workspace,notnull" json:"workspace"`
+	ChunkIndex  int       `bun:"chunk_index,notnull" json:"chunk_index"`
+	Section     string    `bun:"section" json:"section,omitempty"`
+	Content     string    `bun:"content,notnull" json:"content"`
+	ContentHash string    `bun:"content_hash,notnull" json:"content_hash"`
+	Metadata    string    `bun:"metadata_json" json:"metadata,omitempty"`
+	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// Campaign stores batch-operation metadata for grouped queued runs.
+type Campaign struct {
+	bun.BaseModel `bun:"table:campaigns,alias:cp"`
+
+	ID                   string                 `bun:"id,pk,type:text" json:"id"`
+	Name                 string                 `bun:"name,notnull" json:"name"`
+	WorkflowName         string                 `bun:"workflow_name,notnull" json:"workflow_name"`
+	WorkflowKind         string                 `bun:"workflow_kind,notnull" json:"workflow_kind"`
+	Status               string                 `bun:"status,notnull,default:'queued'" json:"status"`
+	Role                 string                 `bun:"role" json:"role,omitempty"`
+	Strategy             string                 `bun:"strategy" json:"strategy,omitempty"`
+	Skills               []string               `bun:"skills,type:json" json:"skills,omitempty"`
+	Params               map[string]interface{} `bun:"params,type:json" json:"params,omitempty"`
+	DeepScanWorkflow     string                 `bun:"deep_scan_workflow" json:"deep_scan_workflow,omitempty"`
+	DeepScanWorkflowKind string                 `bun:"deep_scan_workflow_kind" json:"deep_scan_workflow_kind,omitempty"`
+	AutoDeepScan         bool                   `bun:"auto_deep_scan,default:false" json:"auto_deep_scan"`
+	HighRiskSeverities   []string               `bun:"high_risk_severities,type:json" json:"high_risk_severities,omitempty"`
+	TargetCount          int                    `bun:"target_count,default:0" json:"target_count"`
+	Notes                string                 `bun:"notes" json:"notes,omitempty"`
+	CreatedAt            time.Time              `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt            time.Time              `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+}
+
 // Schedule represents a workflow schedule
 type Schedule struct {
 	bun.BaseModel `bun:"table:schedules,alias:sch"`
@@ -340,25 +398,62 @@ type WorkflowMeta struct {
 type Vulnerability struct {
 	bun.BaseModel `bun:"table:vulnerabilities,alias:vl"`
 
-	ID                 int64    `bun:"id,pk,autoincrement" json:"id"`
-	Workspace          string   `bun:"workspace,notnull" json:"workspace"`
-	VulnInfo           string   `bun:"vuln_info" json:"vuln_info"`
-	VulnTitle          string   `bun:"vuln_title" json:"vuln_title"`
-	VulnDesc           string   `bun:"vuln_desc" json:"vuln_desc"`
-	VulnPOC            string   `bun:"vuln_poc" json:"vuln_poc"`
-	Severity           string   `bun:"severity" json:"severity"`
-	Confidence         string   `bun:"confidence" json:"confidence"` // Certain, Firm, Tentative, Manual Review Required
-	AssetType          string   `bun:"asset_type" json:"asset_type"`
-	AssetValue         string   `bun:"asset_value" json:"asset_value"`
-	Tags               []string `bun:"tags,type:json" json:"tags,omitempty"`
-	DetailHTTPRequest  string   `bun:"detail_http_request" json:"detail_http_request"`
-	DetailHTTPResponse string   `bun:"detail_http_response" json:"detail_http_response"`
-	RawVulnJSON        string   `bun:"raw_vuln_json" json:"raw_vuln_json"`
+	ID                 int64      `bun:"id,pk,autoincrement" json:"id"`
+	Workspace          string     `bun:"workspace,notnull" json:"workspace"`
+	VulnInfo           string     `bun:"vuln_info" json:"vuln_info"`
+	VulnTitle          string     `bun:"vuln_title" json:"vuln_title"`
+	VulnDesc           string     `bun:"vuln_desc" json:"vuln_desc"`
+	VulnPOC            string     `bun:"vuln_poc" json:"vuln_poc"`
+	Severity           string     `bun:"severity" json:"severity"`
+	Confidence         string     `bun:"confidence" json:"confidence"` // Certain, Firm, Tentative, Manual Review Required
+	AssetType          string     `bun:"asset_type" json:"asset_type"`
+	AssetValue         string     `bun:"asset_value" json:"asset_value"`
+	Tags               []string   `bun:"tags,type:json" json:"tags,omitempty"`
+	DetailHTTPRequest  string     `bun:"detail_http_request" json:"detail_http_request"`
+	DetailHTTPResponse string     `bun:"detail_http_response" json:"detail_http_response"`
+	RawVulnJSON        string     `bun:"raw_vuln_json" json:"raw_vuln_json"`
+	VulnStatus         string     `bun:"vuln_status,notnull,default:'new'" json:"vuln_status"`
+	SourceRunUUID      string     `bun:"source_run_uuid" json:"source_run_uuid,omitempty"`
+	AIVerdict          string     `bun:"ai_verdict" json:"ai_verdict,omitempty"`
+	AISummary          string     `bun:"ai_summary" json:"ai_summary,omitempty"`
+	AnalystVerdict     string     `bun:"analyst_verdict" json:"analyst_verdict,omitempty"`
+	AnalystNotes       string     `bun:"analyst_notes" json:"analyst_notes,omitempty"`
+	RetestStatus       string     `bun:"retest_status" json:"retest_status,omitempty"`
+	RetestRunUUID      string     `bun:"retest_run_uuid" json:"retest_run_uuid,omitempty"`
+	AttackChainRef     string     `bun:"attack_chain_ref" json:"attack_chain_ref,omitempty"`
+	RelatedAssets      []string   `bun:"related_assets,type:json" json:"related_assets,omitempty"`
+	ReportRefs         []string   `bun:"report_refs,type:json" json:"report_refs,omitempty"`
+	VerifiedAt         *time.Time `bun:"verified_at" json:"verified_at,omitempty"`
+	ClosedAt           *time.Time `bun:"closed_at" json:"closed_at,omitempty"`
 
 	// Timestamps
 	CreatedAt  time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt  time.Time `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 	LastSeenAt time.Time `bun:"last_seen_at" json:"last_seen_at,omitempty"`
+}
+
+// AttackChainReport stores normalized attack-chain analysis results for API/workbench consumption.
+type AttackChainReport struct {
+	bun.BaseModel `bun:"table:attack_chain_reports,alias:acr"`
+
+	ID                     int64     `bun:"id,pk,autoincrement" json:"id"`
+	Workspace              string    `bun:"workspace,notnull" json:"workspace"`
+	Target                 string    `bun:"target" json:"target,omitempty"`
+	RunUUID                string    `bun:"run_uuid" json:"run_uuid,omitempty"`
+	SourcePath             string    `bun:"source_path,notnull" json:"source_path"`
+	SourceHash             string    `bun:"source_hash,notnull" json:"source_hash"`
+	Status                 string    `bun:"status,notnull,default:'ready'" json:"status"`
+	TotalChains            int       `bun:"total_chains,default:0" json:"total_chains"`
+	CriticalChains         int       `bun:"critical_chains,default:0" json:"critical_chains"`
+	HighImpactChains       int       `bun:"high_impact_chains,default:0" json:"high_impact_chains"`
+	MostLikelyEntryPoints  []string  `bun:"most_likely_entry_points,type:json" json:"most_likely_entry_points,omitempty"`
+	AttackChainsJSON       string    `bun:"attack_chains_json" json:"attack_chains_json,omitempty"`
+	CriticalPathsJSON      string    `bun:"critical_paths_json" json:"critical_paths_json,omitempty"`
+	DefenseRecommendations []string  `bun:"defense_recommendations,type:json" json:"defense_recommendations,omitempty"`
+	MermaidPath            string    `bun:"mermaid_path" json:"mermaid_path,omitempty"`
+	TextPath               string    `bun:"text_path" json:"text_path,omitempty"`
+	CreatedAt              time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt              time.Time `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 }
 
 // AssetDiffSnapshot stores a point-in-time diff calculation for assets

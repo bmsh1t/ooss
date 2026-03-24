@@ -174,11 +174,18 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      RAW='{{path_planning_json}}'
-      
+      cat > /tmp/ai_plan_raw_$$.txt << 'AIEOF'
+      {{path_planning_json}}
+      AIEOF
+
       # 提取 markdown 代码块中的 JSON
-      JSON_CONTENT=$(echo "$RAW" | sed -n '/```json/,/```/p' | sed '1d;$d' | sed 's/^[[:space:]]*//')
+      JSON_CONTENT=$(sed -n '/```json/,/```/p' /tmp/ai_plan_raw_$$.txt | sed '1d;$d' | sed 's/^[[:space:]]*//')
       
+      if [ -z "$JSON_CONTENT" ]; then
+        JSON_CONTENT=$(grep -o '{.*}' /tmp/ai_plan_raw_$$.txt | head -1)
+      fi
+      rm -f /tmp/ai_plan_raw_$$.txt
+
       if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
         echo "$JSON_CONTENT" > {{pathPlanningOutput}}
         echo "[OK] Valid JSON extracted"

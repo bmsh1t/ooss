@@ -1,7 +1,18 @@
 ---
-name: xxe-testing
+id: xxe-testing
+name: XXE Testing
 description: XXE XML外部实体注入测试的专业技能和方法论
 version: 1.0.0
+aliases:
+  - xxe
+  - xml-external-entity
+tags:
+  - xxe
+  - xml
+  - parser
+target_types:
+  - web
+  - api
 ---
 
 # XXE XML外部实体注入测试

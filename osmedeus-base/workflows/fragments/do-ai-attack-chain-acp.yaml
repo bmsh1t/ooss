@@ -244,8 +244,12 @@ steps:
 
       # 容错：处理可能的空输出
       if [ -n "{{attack_chain_json}}" ] && [ "{{attack_chain_json}}" != "null" ] && [ "{{attack_chain_json}}" != "{}" ]; then
-        # 提取 markdown 代码块中的 JSON
-        echo '{{attack_chain_json}}' | sed 's/```json//g; s/```//g' | jq '.' > {{attackChainOutput}} 2>/dev/null || echo '{{attack_chain_json}}' > {{attackChainOutput}}
+        # 使用 heredoc 避免引号破坏 JSON 内容
+        cat > /tmp/ai_attack_chain_raw_$$.txt << 'AIEOF'
+        {{attack_chain_json}}
+        AIEOF
+        sed 's/```json//g; s/```//g' /tmp/ai_attack_chain_raw_$$.txt | jq '.' > {{attackChainOutput}} 2>/dev/null || cp /tmp/ai_attack_chain_raw_$$.txt {{attackChainOutput}}
+        rm -f /tmp/ai_attack_chain_raw_$$.txt
         
         if jq empty {{attackChainOutput}} 2>/dev/null; then
           CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
@@ -282,6 +286,12 @@ steps:
       fi
 
       echo "[INFO] [Attack Chain] Extraction complete"
+
+  - name: import-attack-chain-report
+    type: function
+    pre_condition: '{{enableAttackChain}} && file_exists("{{attackChainOutput}}")'
+    functions:
+      - 'db_import_attack_chain("{{TargetSpace}}", "{{attackChainOutput}}", "{{Target}}", "", "", "{{attackChainsFile}}")'
 
   - name: log-attack-chain-complete
     type: function

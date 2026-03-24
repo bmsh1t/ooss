@@ -13,11 +13,23 @@ description: Skill-based security testing knowledge system
 
 params:
   - name: skillsDir
-    default: "{{OsmedeusBase}}/osmedeus-base/skills"
+    default: "{{OsmedeusBase}}/skills"
   - name: skillName
     type: string
     default: ""
     description: "Name of the skill to load (e.g., sql-injection, xss-testing)"
+  - name: vulnTypes
+    type: string
+    default: ""
+    description: "Comma-separated vulnerability types for bulk skill loading"
+  - name: searchTerm
+    type: string
+    default: ""
+    description: "Keyword to search across all skills"
+  - name: targetType
+    type: string
+    default: "{{TargetType}}"
+    description: "Target type used when generating a testing guide"
   - name: skillOutput
     default: "{{Output}}/ai-analysis/skill-content-{{TargetSpace}}.md"
     description: "Output file for skill content"
@@ -30,6 +42,22 @@ steps:
       echo ""
       
       SKILLS_DIR="{{skillsDir}}"
+
+      read_meta_value() {
+        local key="$1"
+        local file="$2"
+        awk -F': ' -v wanted="$key" '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { exit }
+          in_fm && $1 == wanted {
+            sub(/^[^:]+:[[:space:]]*/, "", $0)
+            gsub(/^"/, "", $0)
+            gsub(/"$/, "", $0)
+            print
+            exit
+          }
+        ' "$file"
+      }
       
       if [ ! -d "$SKILLS_DIR" ]; then
         echo "Skills directory not found: $SKILLS_DIR"
@@ -45,9 +73,11 @@ steps:
           skill_file="$skill_dir/SKILL.md"
           
           if [ -f "$skill_file" ]; then
-            # Get first line as description
-            description=$(head -1 "$skill_file" 2>/dev/null | sed 's/^# //' || echo "No description")
-            echo "  [$skill_name] - $description"
+            title=$(read_meta_value "name" "$skill_file" || true)
+            description=$(read_meta_value "description" "$skill_file" || true)
+            [ -z "$title" ] && title="$skill_name"
+            [ -z "$description" ] && description="No description"
+            echo "  [$skill_name] $title - $description"
           else
             echo "  [$skill_name] - (no SKILL.md found)"
           fi
@@ -65,6 +95,30 @@ steps:
       SKILLS_DIR="{{skillsDir}}"
       SKILL_NAME="{{skillName}}"
       SKILL_FILE="$SKILLS_DIR/$SKILL_NAME/SKILL.md"
+
+      strip_frontmatter() {
+        awk '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { in_fm = 0; next }
+          !in_fm { print }
+        ' "$1"
+      }
+
+      read_meta_value() {
+        local key="$1"
+        local file="$2"
+        awk -F': ' -v wanted="$key" '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { exit }
+          in_fm && $1 == wanted {
+            sub(/^[^:]+:[[:space:]]*/, "", $0)
+            gsub(/^"/, "", $0)
+            gsub(/"$/, "", $0)
+            print
+            exit
+          }
+        ' "$file"
+      }
       
       mkdir -p {{Output}}/ai-analysis
       
@@ -83,10 +137,15 @@ steps:
       fi
       
       echo "[INFO] Loading skill: $SKILL_NAME"
-      echo "# Skill: $SKILL_NAME" > {{skillOutput}}
-      echo "# Loaded: $(date)" >> {{skillOutput}}
-      echo "" >> {{skillOutput}}
-      cat "$SKILL_FILE" >> {{skillOutput}}
+      SKILL_TITLE=$(read_meta_value "name" "$SKILL_FILE" || true)
+      [ -z "$SKILL_TITLE" ] && SKILL_TITLE="$SKILL_NAME"
+
+      {
+        printf '# Skill: %s\n' "$SKILL_TITLE"
+        printf '# Skill ID: %s\n' "$SKILL_NAME"
+        printf '# Loaded: %s\n\n' "$(date)"
+        strip_frontmatter "$SKILL_FILE"
+      } > {{skillOutput}}
       
       lines=$(wc -l < "$SKILL_FILE")
       size=$(wc -c < "$SKILL_FILE")
@@ -103,6 +162,30 @@ steps:
       # Load multiple skills based on vulnerability types
       VULN_TYPES="{{vulnTypes}}"
       SKILLS_DIR="{{skillsDir}}"
+
+      strip_frontmatter() {
+        awk '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { in_fm = 0; next }
+          !in_fm { print }
+        ' "$1"
+      }
+
+      read_meta_value() {
+        local key="$1"
+        local file="$2"
+        awk -F': ' -v wanted="$key" '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { exit }
+          in_fm && $1 == wanted {
+            sub(/^[^:]+:[[:space:]]*/, "", $0)
+            gsub(/^"/, "", $0)
+            gsub(/"$/, "", $0)
+            print
+            exit
+          }
+        ' "$file"
+      }
       
       if [ -z "$VULN_TYPES" ] || [ "$VULN_TYPES" = "{{vulnTypes}}" ]; then
         echo "[INFO] No vulnTypes specified, using default skills"
@@ -115,17 +198,18 @@ steps:
       COMBINED_FILE="{{Output}}/ai-analysis/skills-combined.md"
       : > "$COMBINED_FILE"
       
-      for skill_name in $(echo "$VULN_TYPES" | tr ',' '\n'); do
+      for skill_name in $(printf '%s' "$VULN_TYPES" | tr ',' '\n' | sed '/^$/d' | sort -u); do
         SKILL_FILE="$SKILLS_DIR/$skill_name/SKILL.md"
         
         if [ -f "$SKILL_FILE" ]; then
           echo "Loading: $skill_name"
-          echo "" >> "$COMBINED_FILE"
-          echo "# $skill_name" >> "$COMBINED_FILE"
-          echo "" >> "$COMBINED_FILE"
-          cat "$SKILL_FILE" >> "$COMBINED_FILE"
-          echo "" >> "$COMBINED_FILE"
-          echo "---" >> "$COMBINED_FILE"
+          SKILL_TITLE=$(read_meta_value "name" "$SKILL_FILE" || true)
+          [ -z "$SKILL_TITLE" ] && SKILL_TITLE="$skill_name"
+          {
+            printf '\n# %s\n\n' "$SKILL_TITLE"
+            strip_frontmatter "$SKILL_FILE"
+            printf '\n---\n'
+          } >> "$COMBINED_FILE"
         else
           echo "Skipping: $skill_name (not found)"
         fi
@@ -159,7 +243,7 @@ steps:
       for skill_dir in "$SKILLS_DIR"/*/; do
         if [ -d "$skill_dir" ] && [ -f "$skill_dir/SKILL.md" ]; then
           skill_name=$(basename "$skill_dir")
-          matches=$(grep -n -i "$SEARCH_TERM" "$skill_dir/SKILL.md" 2>/dev/null || true)
+          matches=$(grep -n -i -F "$SEARCH_TERM" "$skill_dir/SKILL.md" 2>/dev/null || true)
           
           if [ -n "$matches" ]; then
             found=$((found + 1))
@@ -190,6 +274,14 @@ steps:
       
       SKILLS_DIR="{{skillsDir}}"
       TARGET_TYPE="{{targetType}}"
+
+      strip_frontmatter() {
+        awk '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { in_fm = 0; next }
+          !in_fm { print }
+        ' "$1"
+      }
       
       echo "=== Generating Security Testing Guide ==="
       echo ""
@@ -197,46 +289,44 @@ steps:
       GUIDE_FILE="{{Output}}/ai-analysis/security-testing-guide.md"
       : > "$GUIDE_FILE"
       
-      echo "# Security Testing Guide" >> "$GUIDE_FILE"
-      echo "" >> "$GUIDE_FILE"
-      echo "Target: {{Target}}" >> "$GUIDE_FILE"
-      echo "Generated: $(date)" >> "$GUIDE_FILE"
-      echo "" >> "$GUIDE_FILE"
-      echo "---\n" >> "$GUIDE_FILE"
+      {
+        printf '# Security Testing Guide\n\n'
+        printf 'Target: {{Target}}\n'
+        printf 'Generated: %s\n\n' "$(date)"
+        printf -- '---\n\n'
+      } >> "$GUIDE_FILE"
       
       # Add relevant skills based on target type
       case "$TARGET_TYPE" in
         web|Website)
-          echo "## Web Application Testing\n" >> "$GUIDE_FILE"
-          for skill in sql-injection xss-testing ssrf-testing lfi-testing; do
+          printf '## Web Application Testing\n\n' >> "$GUIDE_FILE"
+          for skill in sql-injection xss-testing ssrf-testing rce-testing; do
             if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
-              echo "### $skill\n" >> "$GUIDE_FILE"
-              tail -n +5 "$SKILLS_DIR/$skill/SKILL.md" | head -30 >> "$GUIDE_FILE"
-              echo "\n---\n" >> "$GUIDE_FILE"
+              printf '### %s\n\n' "$skill" >> "$GUIDE_FILE"
+              strip_frontmatter "$SKILLS_DIR/$skill/SKILL.md" | head -30 >> "$GUIDE_FILE"
+              printf '\n---\n\n' >> "$GUIDE_FILE"
             fi
           done
           ;;
         api|REST|GraphQL)
-          echo "## API Security Testing\n" >> "$GUIDE_FILE"
+          printf '## API Security Testing\n\n' >> "$GUIDE_FILE"
           if [ -f "$SKILLS_DIR/api-security/SKILL.md" ]; then
-            tail -n +5 "$SKILLS_DIR/api-security/SKILL.md" | head -40 >> "$GUIDE_FILE"
+            strip_frontmatter "$SKILLS_DIR/api-security/SKILL.md" | head -40 >> "$GUIDE_FILE"
           fi
           ;;
         cloud|AWS|GCP|Azure)
-          echo "## Cloud Security Testing\n" >> "$GUIDE_FILE"
-          if [ -f "$SKILLS_DIR/cloud-security/SKILL.md" ]; then
-            tail -n +5 "$SKILLS_DIR/cloud-security/SKILL.md" | head -30 >> "$GUIDE_FILE"
-          fi
+          printf '## Cloud Security Testing\n\n' >> "$GUIDE_FILE"
+          printf 'No dedicated cloud skill is installed yet. Reuse API, SSRF, and RCE skills as a baseline.\n' >> "$GUIDE_FILE"
           ;;
         *)
-          echo "## General Security Testing\n" >> "$GUIDE_FILE"
-          echo "Loading all available skills..." >> "$GUIDE_FILE"
+          printf '## General Security Testing\n\n' >> "$GUIDE_FILE"
+          printf 'Loading all available skills...\n' >> "$GUIDE_FILE"
           for skill_dir in "$SKILLS_DIR"/*/; do
             if [ -d "$skill_dir" ] && [ -f "$skill_dir/SKILL.md" ]; then
               skill_name=$(basename "$skill_dir")
-              echo "### $skill_name\n" >> "$GUIDE_FILE"
-              tail -n +5 "$skill_dir/SKILL.md" | head -15 >> "$GUIDE_FILE"
-              echo "\n" >> "$GUIDE_FILE"
+              printf '### %s\n\n' "$skill_name" >> "$GUIDE_FILE"
+              strip_frontmatter "$skill_dir/SKILL.md" | head -15 >> "$GUIDE_FILE"
+              printf '\n' >> "$GUIDE_FILE"
             fi
           done
           ;;

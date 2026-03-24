@@ -6,7 +6,7 @@
 # 特点：利用 LLM 的深度推理能力，适合 API 稳定时使用
 #
 # Usage:
-#   osmedeus run -f superdomain-extensive-ai-optimized -t example.com
+#   osmedeus run -f superdomain-extensive -t example.com
 # =============================================================================
 
 kind: flow
@@ -45,7 +45,7 @@ params:
     description: "Enable AI-powered vulnerability analysis"
   - name: enablePreScanDecision
     type: bool
-    default: false
+    default: true
     description: "Enable AI pre-scan decision making"
   - name: enableSemanticSearch
     type: bool
@@ -188,30 +188,30 @@ modules:
     depends_on: [content-analysis, http-probe, dns-resolve, scan-content]
 
   # ===========================================================================
-  # Phase 8: AI 智能分析 (在 vuln-suite 之后执行)
+  # Phase 8: AI 预处理 (并行，依赖较早阶段数据，不阻塞 vuln-suite)
   # ===========================================================================
 
-  # 加载安全测试技能库 - 为 AI 分析提供专业知识参考
+  # AI 技能库 - 在指纹识别后立即加载，为后续所有 AI 模块提供知识支撑
   - name: ai-skills-loader
     path: fragments/do-skills-system.yaml
-    depends_on: [vuln-suite]
+    depends_on: [fingerprint]
     params:
-      vulnTypes: "sql-injection,xss-testing,ssrf-testing,rce-testing,lfi-testing,api-security"
+      vulnTypes: "sql-injection,xss-testing,ssrf-testing,command-injection-testing,rce-testing,api-security"
     pre_condition: "{{enableLlmAnalysis}}"
 
-  # AI 语义搜索 - RAG 功能 + 知识库搜索
-  - name: ai-semantic-search
-    path: fragments/do-ai-semantic-search.yaml
-    depends_on: [http-probe]
-    pre_condition: "{{enableSemanticSearch}}"
-    params:
-      searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
-
-  # AI 预扫描决策 - 依赖子域名枚举结果
+  # AI 预扫描决策 - 依赖子域名枚举 + DNS 结果，尽早产出优先级列表
   - name: ai-pre-scan-decision
     path: fragments/do-ai-pre-scan-decision.yaml
     depends_on: [subdomain, dns-resolve]
     pre_condition: "{{enablePreScanDecision}}"
+
+  # AI 语义搜索 - 依赖指纹识别结果（需要 tech stack 数据）
+  - name: ai-semantic-search
+    path: fragments/do-ai-semantic-search.yaml
+    depends_on: [fingerprint]
+    pre_condition: "{{enableSemanticSearch}}"
+    params:
+      searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
 
   # AI 实时 WAF 规避 - 依赖指纹识别结果
   - name: ai-waf-bypass
@@ -219,22 +219,31 @@ modules:
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
-  # AI 漏洞验证 - 依赖 vuln-suite 的 nuclei 扫描结果 + skills
+  # ===========================================================================
+  # NOTE
+  # ===========================================================================
+  # ai-pre-scan-decision 与 vuln-suite 并行执行，不强制阻塞 vuln-suite。
+
+  # ===========================================================================
+  # Phase 9: AI 深度分析 (依赖 vuln-suite 输出)
+  # ===========================================================================
+
+  # AI 漏洞验证 - 依赖 vuln-suite 扫描结果 + skills 知识库
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation.yaml
     depends_on: [vuln-suite, ai-skills-loader]
     pre_condition: "{{enableVulnValidation}}"
 
-  # AI 攻击链可视化 - 依赖攻击链分析输出
-  - name: ai-attack-chain-viz
-    path: fragments/do-attack-chain-visualization.yaml
-    depends_on: [ai-attack-chain]
-    pre_condition: "{{enableAttackChain}}"
-
   # AI 攻击链分析 - 依赖 ai-vuln-validation 的输出
   - name: ai-attack-chain
     path: fragments/do-ai-attack-chain.yaml
     depends_on: [ai-vuln-validation]
+    pre_condition: "{{enableAttackChain}}"
+
+  # AI 攻击链可视化 - 依赖攻击链分析输出
+  - name: ai-attack-chain-viz
+    path: fragments/do-attack-chain-visualization.yaml
+    depends_on: [ai-attack-chain]
     pre_condition: "{{enableAttackChain}}"
 
   # AI 攻击路径规划 - 依赖 ai-attack-chain 的输出
@@ -243,14 +252,20 @@ modules:
     depends_on: [ai-attack-chain]
     pre_condition: "{{enablePathPlanning}}"
 
-  # AI 协调器 - 汇总所有 AI 分析结果
+  # AI 协调器 - 汇总所有 AI 分析结果，生成决策配置
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-skills-loader]
     pre_condition: "{{enableLlmAnalysis}}"
 
+  # AI 决策应用 - 将 intelligent-analysis 产出的决策配置写入环境
+  - name: ai-apply-decision
+    path: fragments/do-ai-apply-decision.yaml
+    depends_on: [ai-intelligent-analysis]
+    pre_condition: "{{enableLlmAnalysis}}"
+
   # ===========================================================================
-  # Phase 9: Code Review
+  # Phase 10: Code Review
   # ===========================================================================
   - name: ai-code-review
     path: fragments/do-ai-code-review-enhanced.yaml
@@ -258,10 +273,18 @@ modules:
     pre_condition: "{{enableLlmCodeReview}}"
 
   # ===========================================================================
-  # Phase 10: Final Report
+  # Phase 11: AI 定向二次扫描 (基于 AI 分析结果)
+  # ===========================================================================
+  - name: ai-targeted-rescan
+    path: fragments/do-ai-targeted-rescan.yaml
+    depends_on: [ai-apply-decision]
+    pre_condition: "{{enableLlmAnalysis}}"
+
+  # ===========================================================================
+  # Phase 12: Final Report
   # ===========================================================================
   - name: report
     path: common/10-report.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
     on_error:
       - action: continue

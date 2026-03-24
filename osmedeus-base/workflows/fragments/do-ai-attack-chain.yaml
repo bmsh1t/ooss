@@ -57,8 +57,13 @@ steps:
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
         echo "[Attack Chain] Using validated vulnerability data"
         
-        # 提取 confirmed 漏洞
-        jq -r '.findings[] | select(.status == "confirmed") | "\(.type) | \(.url) | severity=\(.severity)"' "{{vulnValidationFile}}" 2>/dev/null > {{Output}}/ai-analysis/.input/confirmed-vulns.txt || true
+        # 提取 confirmed 漏洞（兼容两种 schema）
+        # 1) 非 ACP: .findings[] with .status == "confirmed"
+        # 2) ACP:    .validated_findings[] with .verification_status == "confirmed"
+        jq -r '(
+          [.findings[]? | select(.status == "confirmed") | "\(.type // .finding // "unknown") | \(.url // "unknown") | severity=\(.severity // "unknown")"] +
+          [.validated_findings[]? | select(.verification_status == "confirmed") | "\(.finding // "unknown") | \(.url // "unknown") | severity=\(.severity // "unknown")"]
+        )[]' "{{vulnValidationFile}}" 2>/dev/null > {{Output}}/ai-analysis/.input/confirmed-vulns.txt || true
         
         CONFIRMED_COUNT=$(wc -l < {{Output}}/ai-analysis/.input/confirmed-vulns.txt 2>/dev/null || echo 0)
         echo "[Attack Chain] Confirmed vulns: $CONFIRMED_COUNT"
@@ -196,11 +201,16 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      RAW='{{attack_chain_json}}'
-      
+      printf '%s' '{{attack_chain_json}}' > /tmp/ai_chain_raw_$$.txt
+
       # 提取 markdown 代码块中的 JSON
-      JSON_CONTENT=$(echo "$RAW" | sed -n '/```json/,/```/p' | sed '1d;$d' | sed 's/^[[:space:]]*//')
+      JSON_CONTENT=$(sed -n '/```json/,/```/p' /tmp/ai_chain_raw_$$.txt | sed '1d;$d' | sed 's/^[[:space:]]*//')
       
+      if [ -z "$JSON_CONTENT" ]; then
+        JSON_CONTENT=$(grep -o '{.*}' /tmp/ai_chain_raw_$$.txt | head -1)
+      fi
+      rm -f /tmp/ai_chain_raw_$$.txt
+
       if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
         echo "$JSON_CONTENT" > {{attackChainOutput}}
         echo "[OK] Valid JSON extracted"
@@ -232,6 +242,12 @@ steps:
       
       ENTRY_COUNT=$(wc -l < {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt 2>/dev/null || echo 0)
       echo "[Attack Chain] Extracted $ENTRY_COUNT entry points"
+
+  - name: import-attack-chain-report
+    type: function
+    pre_condition: '{{enableAttackChain}} && file_exists("{{attackChainOutput}}")'
+    functions:
+      - 'db_import_attack_chain("{{TargetSpace}}", "{{attackChainOutput}}", "{{Target}}")'
 
   - name: log-attack-chain-complete
     type: function

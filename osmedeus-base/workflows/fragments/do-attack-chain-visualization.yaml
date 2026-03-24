@@ -161,3 +161,9 @@ steps:
       echo "[OK] Output files:"
       echo "  - Mermaid: {{mermaidOutput}}"
       echo "  - Text: {{textOutput}}"
+
+  - name: import-attack-chain-visualization
+    type: function
+    pre_condition: 'file_exists("{{attackChainInput}}")'
+    functions:
+      - 'db_import_attack_chain("{{TargetSpace}}", "{{attackChainInput}}", "{{Target}}", "", "{{mermaidOutput}}", "{{textOutput}}")'

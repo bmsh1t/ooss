@@ -121,7 +121,9 @@ steps:
 
       # 容错：处理可能的空输出
       if [ -n "{{waf_bypass_json}}" ] && [ "{{waf_bypass_json}}" != "null" ] && [ "{{waf_bypass_json}}" != "{}" ]; then
-        echo '{{waf_bypass_json}}' > {{wafBypassOutput}}
+        cat > {{wafBypassOutput}} << 'AIEOF'
+        {{waf_bypass_json}}
+        AIEOF
       else
         echo '{"waf_analysis_summary":{"waf_detected":false},"bypass_techniques":[]}' > {{wafBypassOutput}}
       fi

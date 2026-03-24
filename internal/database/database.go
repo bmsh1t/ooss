@@ -187,9 +187,13 @@ func Migrate(ctx context.Context) error {
 		(*Workspace)(nil),
 		(*WorkflowMeta)(nil),
 		(*Vulnerability)(nil),
+		(*AttackChainReport)(nil),
 		(*AssetDiffSnapshot)(nil),
 		(*VulnDiffSnapshot)(nil),
 		(*AgentSession)(nil),
+		(*KnowledgeDocument)(nil),
+		(*KnowledgeChunk)(nil),
+		(*Campaign)(nil),
 	}
 
 	for _, model := range models {
@@ -227,8 +231,23 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Create indexes for AttackChainReport table
+	if err := createAttackChainIndexes(ctx); err != nil {
+		return err
+	}
+
 	// Create indexes for Workspace table
 	if err := createWorkspaceIndexes(ctx); err != nil {
+		return err
+	}
+
+	// Create indexes for KnowledgeDocument and KnowledgeChunk tables
+	if err := createKnowledgeIndexes(ctx); err != nil {
+		return err
+	}
+
+	// Create indexes for Campaign table
+	if err := createCampaignIndexes(ctx); err != nil {
 		return err
 	}
 
@@ -302,6 +321,11 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Add vulnerability lifecycle columns to vulnerabilities table if they don't exist
+	if err := addVulnerabilityLifecycleColumns(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -320,6 +344,44 @@ func createRunIndexes(ctx context.Context) error {
 	for _, idx := range indexes {
 		if _, err := db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// createKnowledgeIndexes creates indexes for local knowledge base tables.
+func createKnowledgeIndexes(ctx context.Context) error {
+	indexes := []string{
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_workspace_source_path ON knowledge_documents(workspace, source_path)",
+		"CREATE INDEX IF NOT EXISTS idx_knowledge_documents_workspace_updated_at ON knowledge_documents(workspace, updated_at)",
+		"CREATE INDEX IF NOT EXISTS idx_knowledge_documents_content_hash ON knowledge_documents(content_hash)",
+		"CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document_id ON knowledge_chunks(document_id)",
+		"CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_workspace ON knowledge_chunks(workspace)",
+		"CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_workspace_chunk_index ON knowledge_chunks(workspace, chunk_index)",
+	}
+
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create knowledge index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// createCampaignIndexes creates indexes for campaign batch operations.
+func createCampaignIndexes(ctx context.Context) error {
+	indexes := []string{
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_campaigns_name_created_at ON campaigns(name, created_at)",
+		"CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status)",
+		"CREATE INDEX IF NOT EXISTS idx_campaigns_workflow_name ON campaigns(workflow_name)",
+		"CREATE INDEX IF NOT EXISTS idx_campaigns_updated_at ON campaigns(updated_at)",
+	}
+
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create campaign index: %w", err)
 		}
 	}
 
@@ -599,6 +661,9 @@ func createVulnerabilityIndexes(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity ON vulnerabilities(severity)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_confidence ON vulnerabilities(confidence)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_asset_value ON vulnerabilities(asset_value)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_vuln_status ON vulnerabilities(vuln_status)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_status ON vulnerabilities(retest_status)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_run_uuid ON vulnerabilities(retest_run_uuid)",
 	}
 
 	for _, idx := range indexes {
@@ -607,6 +672,57 @@ func createVulnerabilityIndexes(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// createAttackChainIndexes creates indexes for attack-chain reports.
+func createAttackChainIndexes(ctx context.Context) error {
+	indexes := []string{
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_attack_chain_reports_workspace_source_path ON attack_chain_reports(workspace, source_path)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_workspace ON attack_chain_reports(workspace)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_run_uuid ON attack_chain_reports(run_uuid)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_updated_at ON attack_chain_reports(updated_at)",
+	}
+
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create attack chain index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// addVulnerabilityLifecycleColumns adds lifecycle and review metadata columns to vulnerabilities.
+func addVulnerabilityLifecycleColumns(ctx context.Context) error {
+	columns := []string{
+		"ALTER TABLE vulnerabilities ADD COLUMN vuln_status TEXT DEFAULT 'new'",
+		"ALTER TABLE vulnerabilities ADD COLUMN source_run_uuid TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN ai_verdict TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN ai_summary TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN analyst_verdict TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN analyst_notes TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN retest_status TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN retest_run_uuid TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN attack_chain_ref TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN related_assets TEXT DEFAULT '[]'",
+		"ALTER TABLE vulnerabilities ADD COLUMN report_refs TEXT DEFAULT '[]'",
+		"ALTER TABLE vulnerabilities ADD COLUMN verified_at TIMESTAMP NULL",
+		"ALTER TABLE vulnerabilities ADD COLUMN closed_at TIMESTAMP NULL",
+	}
+
+	for _, ddl := range columns {
+		_, err := db.ExecContext(ctx, ddl)
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "duplicate column") ||
+				strings.Contains(errStr, "already exists") ||
+				strings.Contains(errStr, "sqlstate 42701") {
+				continue
+			}
+			return fmt.Errorf("failed to add vulnerability lifecycle column: %w", err)
+		}
+	}
 	return nil
 }
 

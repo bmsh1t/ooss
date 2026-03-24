@@ -112,11 +112,6 @@ params:
     default: "{{Output}}/vulnscan/nuclei-overview-report-{{TargetSpace}}.md"
   - name: nucleiTemplateConfig
     default: "~/nuclei-templates/"
-  - name: nucleiThreads
-    default: "{{ threads * 10 }}"
-  - name: nucleiRatelimit
-    default: "150"
-    description: "Nuclei rate limit (requests per second)"
   - name: nucleiTimeout
     default: "8h"
   - name: nucleiSeverity
@@ -561,16 +556,24 @@ steps:
       # AI 决策配置加载 (新增 - 真正影响扫描)
       # ========================================
       AI_DECISION_FILE="{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+      PRE_AI_DECISION_FILE="{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
       AI_VARS_FILE="{{Output}}/ai-analysis/ai-vars.yaml"
+      ACTIVE_AI_DECISION_FILE=""
 
       if [ -f "$AI_DECISION_FILE" ]; then
-        echo "[NUCLEI] Loading AI decision config from $AI_DECISION_FILE"
-        AI_SEVERITY=$(jq -r '.nuclei_severity // empty' "$AI_DECISION_FILE" 2>/dev/null)
-        AI_THREADS=$(jq -r '.suggested_threads // empty' "$AI_DECISION_FILE" 2>/dev/null)
-        AI_RATE_LIMIT=$(jq -r '.suggested_rate_limit // empty' "$AI_DECISION_FILE" 2>/dev/null)
-        AI_TIMEOUT=$(jq -r '.recommended_timeout // empty' "$AI_DECISION_FILE" 2>/dev/null)
-        AI_WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' "$AI_DECISION_FILE" 2>/dev/null)
-        AI_REASONING=$(jq -r '.reasoning // "none"' "$AI_DECISION_FILE" 2>/dev/null)
+        ACTIVE_AI_DECISION_FILE="$AI_DECISION_FILE"
+      elif [ -f "$PRE_AI_DECISION_FILE" ]; then
+        ACTIVE_AI_DECISION_FILE="$PRE_AI_DECISION_FILE"
+      fi
+
+      if [ -n "$ACTIVE_AI_DECISION_FILE" ]; then
+        echo "[NUCLEI] Loading AI decision config from $ACTIVE_AI_DECISION_FILE"
+        AI_SEVERITY=$(jq -r '.nuclei_severity // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_THREADS=$(jq -r '.suggested_threads // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_RATE_LIMIT=$(jq -r '.suggested_rate_limit // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_TIMEOUT=$(jq -r '.recommended_timeout // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_REASONING=$(jq -r '.reasoning // "none"' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
 
         [ -n "$AI_SEVERITY" ] && echo "[NUCLEI] AI Decision: severity=$AI_SEVERITY"
         [ -n "$AI_THREADS" ] && echo "[NUCLEI] AI Decision: threads=$AI_THREADS"
@@ -617,6 +620,9 @@ steps:
       else
         TEMPLATES="{{nucleiTemplateConfig}}"
       fi
+
+      EFFECTIVE_TIMEOUT="{{nucleiTimeout}}"
+      [ -n "$AI_TIMEOUT" ] && EFFECTIVE_TIMEOUT="$AI_TIMEOUT"
       
       # User-Agent 轮换配置
       UA_OPTS=""
@@ -639,7 +645,7 @@ steps:
       if [ "{{enableAssetPrioritization}}" = "true" ] && [ -f "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
         # 先扫描高优先级资产
         echo "[NUCLEI] Scanning high-priority assets first..."
-        timeout -k 1m {{nucleiTimeout}} nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1 || true
+        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1 || true
         SCAN_FILE="{{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt"
         echo "[NUCLEI] Now scanning remaining assets..."
       fi
@@ -651,7 +657,7 @@ steps:
       fi
       
       # 执行扫描
-      timeout -k 1m {{nucleiTimeout}} nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1
+      timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1
       
       # 合并结果
       if [ -f "{{nucleiOutputJsonl}}.priority" ]; then
@@ -745,7 +751,7 @@ steps:
     functions:
       - 'exec_cmd(": > {{sqliOutputFile}}")'
       - 'exec_cmd("qsreplace FUZZ < \"{{gfSqliFile}}\" | sed \"/FUZZ/!d\" | anew -q {{vulnSuiteDir}}/tmp_sqli.txt 2>/dev/null || true")'
-      - 'exec_cmd("SQLMAP_CMD=$(command -v sqlmap 2>/dev/null || echo \"python3 {{toolsDir}}/sqlmap/sqlmap.py\") && [ -s \"{{vulnSuiteDir}}/tmp_sqli.txt\" ] && $SQLMAP_CMD -m {{vulnSuiteDir}}/tmp_sqli.txt -b -o --smart --batch --disable-coloring --random-agent --output-dir={{vulnSuiteDir}}/sqlmap/ 2>/dev/null || true && find {{vulnSuiteDir}}/sqlmap/ -name \"*.txt\" -exec cat {} \\; 2>/dev/null >> {{sqliOutputFile} || true")'
+      - 'exec_cmd("SQLMAP_CMD=$(command -v sqlmap 2>/dev/null || echo \"python3 {{toolsDir}}/sqlmap/sqlmap.py\") && [ -s \"{{vulnSuiteDir}}/tmp_sqli.txt\" ] && $SQLMAP_CMD -m {{vulnSuiteDir}}/tmp_sqli.txt -b -o --smart --batch --disable-coloring --random-agent --output-dir={{vulnSuiteDir}}/sqlmap/ 2>/dev/null || true && find {{vulnSuiteDir}}/sqlmap/ -name \"*.txt\" -exec cat {} \\; 2>/dev/null >> {{sqliOutputFile}} || true")'
     on_error:
       - action: continue
 
@@ -914,14 +920,14 @@ steps:
         url_count=$(wc -l < "$targets")
         if [ "$url_count" -le 1500 ]; then
           # 运行 Nuclei DAST
-          nuclei -l "$targets" -dast -nh -rl {{nucleiRatelimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
+          nuclei -l "$targets" -dast -nh -rl {{nucleiRateLimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
           
           if [ -s "{{nucleiDastJsonOutput}}" ]; then
             jq -r '["[" + .["template-id"] + "] [" + .info.severity + "] " + (.["matched-at"] // .host)] | join(" ")'  {{nucleiDastJsonOutput}} 2>/dev/null > {{nucleiDastOutput}} || true
           fi
         else
           echo "[nuclei-dast] Too many targets ($url_count), limiting to 1500"
-          head -n 1500 "$targets" | nuclei -dast -nh -rl {{nucleiRatelimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
+          head -n 1500 "$targets" | nuclei -dast -nh -rl {{nucleiRateLimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
         fi
       fi
     on_error:

@@ -25,6 +25,10 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Declarative YAML Workflows** - Define pipelines with hooks, decision routing, module exclusion, and conditional branching across multiple runners (host, Docker, SSH)
 - **Distributed Execution** - Redis-based master-worker pattern with queue system, webhook triggers, and file sync across workers
 - **Rich Function Library** - 80+ utility functions including nmap integration, tmux sessions, SSH execution, TypeScript/Python scripting, SARIF parsing, and CDN/WAF classification
+- **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), search them from CLI/API, and synthesize scan findings back into reusable workspace knowledge
+- **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
+- **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, and workspace risk boards
+- **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report
 - **Event-Driven Scheduling** - Cron, file-watch, and event triggers with filtering, deduplication, and delayed task queues
 - **Agentic LLM Steps** - Tool-calling agent loops with sub-agent orchestration, memory management, and structured output; plus ACP subprocess agents (Claude Code, Codex, OpenCode, Gemini)
 - **Cloud Infrastructure** - Provision and run scans across DigitalOcean, AWS, GCP, Linode, and Azure with cost controls and automatic cleanup
@@ -95,6 +99,11 @@ osmedeus run -f general -t example.com -X vuln    # Fuzzy exclude by substring
 osmedeus worker queue new -f general -t example.com   # Queue for later
 osmedeus worker queue run --concurrency 5              # Process queue
 
+# Local knowledge base
+osmedeus kb ingest -p ./notes -w example.com --recursive
+osmedeus kb search -q "jwt bypass" -w example.com
+osmedeus kb learn -w example.com
+
 # Worker management
 osmedeus worker status                          # Show workers
 osmedeus worker eval -e 'ssh_exec("host", "whoami")'  # Eval with distributed hooks
@@ -107,6 +116,27 @@ osmedeus agent --list
 # Show all usage examples
 osmedeus --usage-example
 ```
+
+## Recent Backend Additions
+
+- **Knowledge Base APIs and CLI**
+  - Ingest local files into a searchable workspace-scoped knowledge store
+  - Search/list stored documents from CLI and REST API
+  - Auto-learn scan results back into the knowledge base for later reuse
+- **Campaign APIs**
+  - `GET /osm/api/campaigns`
+  - `POST /osm/api/campaigns`
+  - `GET /osm/api/campaigns/:id`
+  - `POST /osm/api/campaigns/:id/rerun-failed`
+  - `POST /osm/api/campaigns/:id/deep-scan`
+- **Vulnerability Lifecycle APIs**
+  - `GET /osm/api/vulnerabilities/board`
+  - `PATCH /osm/api/vulnerabilities/:id`
+  - `POST /osm/api/vulnerabilities/:id/retest`
+- **Attack Chain Workbench APIs**
+  - `GET /osm/api/attack-chains`
+  - `GET /osm/api/attack-chains/:id`
+  - `POST /osm/api/attack-chains/import`
 
 ## Docker
 

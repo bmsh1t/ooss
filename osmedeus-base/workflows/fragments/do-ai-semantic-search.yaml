@@ -18,10 +18,18 @@ params:
     default: "{{Output}}/ai-analysis/semantic-index"
   - name: searchResultsOutput
     default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
+  - name: agentResultsOutput
+    default: "{{Output}}/ai-analysis/semantic-agent-results-{{TargetSpace}}.json"
   - name: embeddingsOutput
     default: "{{Output}}/ai-analysis/semantic-embeddings-{{TargetSpace}}.json"
   - name: semanticHighlightsOutput
     default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
+  - name: skillsDir
+    default: "{{OsmedeusBase}}/skills"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
 
   # Embeddings API 配置
   - name: enableSemanticSearch
@@ -36,7 +44,7 @@ params:
   - name: embeddingsProvider
     type: string
     default: "jina"
-    description: "Embeddings provider: jina, openai, azure, ollama"
+    description: "Embeddings provider: jina, openai"
   
   # Jina AI (默认)
   - name: jinaApiUrl
@@ -47,7 +55,7 @@ params:
     default: "jina-embeddings-v5-text-small"
   - name: jinaApiKey
     type: string
-    default: "{{JINA_API_KEY}}"
+    default: ""
   
   # OpenAI
   - name: openaiApiUrl
@@ -58,23 +66,7 @@ params:
     default: "text-embedding-3-small"
   - name: openaiApiKey
     type: string
-    default: "{{OPENAI_API_KEY}}"
-  
-  # Ollama (本地)
-  - name: ollamaApiUrl
-    type: string
-    default: "http://localhost:11434/api/embeddings"
-  - name: ollamaModel
-    type: string
-    default: "nomic-embed-text"
-  
-  # Azure OpenAI
-  - name: azureApiUrl
-    type: string
-    default: "{{AZURE_OPENAI_ENDPOINT}}"
-  - name: azureApiKey
-    type: string
-    default: "{{AZURE_OPENAI_API_KEY}}"
+    default: ""
   
   - name: indexExistingData
     type: bool
@@ -240,21 +232,13 @@ steps:
           API_URL="{{jinaApiUrl}}"
           MODEL="{{jinaModel}}"
           API_KEY="{{jinaApiKey}}"
+          [ -z "$API_KEY" ] && API_KEY="${JINA_API_KEY:-}"
           ;;
         openai)
           API_URL="{{openaiApiUrl}}"
           MODEL="{{openaiModel}}"
           API_KEY="{{openaiApiKey}}"
-          ;;
-        ollama)
-          API_URL="{{ollamaApiUrl}}"
-          MODEL="{{ollamaModel}}"
-          API_KEY=""
-          ;;
-        azure)
-          API_URL="{{azureApiUrl}}"
-          MODEL="{{jinaModel}}"
-          API_KEY="{{azureApiKey}}"
+          [ -z "$API_KEY" ] && API_KEY="${OPENAI_API_KEY:-}"
           ;;
         *)
           echo "[Semantic] Unknown provider: $PROVIDER"
@@ -266,14 +250,10 @@ steps:
       # 过滤掉常见的占位符格式
       API_KEY_ACTUAL="$API_KEY"
       if [ -z "$API_KEY_ACTUAL" ] || \
-         echo "$API_KEY_ACTUAL" | grep -qiE '^\{\{.*\}\}$' || \
-         [ "$API_KEY_ACTUAL" = "{{JINA_API_KEY}}" ] || \
-         [ "$API_KEY_ACTUAL" = "{{OPENAI_API_KEY}}" ] || \
-         [ "$API_KEY_ACTUAL" = "{{AZURE_OPENAI_API_KEY}}" ] || \
          [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
          [ "$API_KEY_ACTUAL" = "sk-" ]; then
         echo "[Semantic] API key not configured for $PROVIDER, skipping vector embeddings"
-        echo "[Semantic] Please set JINA_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_API_KEY environment variable"
+        echo "[Semantic] Please set JINA_API_KEY or OPENAI_API_KEY environment variable"
         exit 0
       fi
       
@@ -323,21 +303,13 @@ steps:
           API_URL="{{jinaApiUrl}}"
           MODEL="{{jinaModel}}"
           API_KEY="{{jinaApiKey}}"
+          [ -z "$API_KEY" ] && API_KEY="${JINA_API_KEY:-}"
           ;;
         openai)
           API_URL="{{openaiApiUrl}}"
           MODEL="{{openaiModel}}"
           API_KEY="{{openaiApiKey}}"
-          ;;
-        ollama)
-          API_URL="{{ollamaApiUrl}}"
-          MODEL="{{ollamaModel}}"
-          API_KEY=""
-          ;;
-        azure)
-          API_URL="{{azureApiUrl}}"
-          MODEL="{{jinaModel}}"
-          API_KEY="{{azureApiKey}}"
+          [ -z "$API_KEY" ] && API_KEY="${OPENAI_API_KEY:-}"
           ;;
         *)
           echo "[Semantic] Unknown provider: $PROVIDER"
@@ -348,10 +320,6 @@ steps:
       # 检查 API key - 确保不是占位符或空值
       API_KEY_ACTUAL="$API_KEY"
       if [ -z "$API_KEY_ACTUAL" ] || \
-         echo "$API_KEY_ACTUAL" | grep -qiE '^\{\{.*\}\}$' || \
-         [ "$API_KEY_ACTUAL" = "{{JINA_API_KEY}}" ] || \
-         [ "$API_KEY_ACTUAL" = "{{OPENAI_API_KEY}}" ] || \
-         [ "$API_KEY_ACTUAL" = "{{AZURE_OPENAI_API_KEY}}" ] || \
          [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
          [ "$API_KEY_ACTUAL" = "sk-" ]; then
         echo "[Semantic] API key not configured for $PROVIDER, will use LLM-based search"
@@ -391,7 +359,8 @@ steps:
       1. 先使用 read_lines 工具读取指定的索引文件
       2. 理解数据内容
       3. 根据用户查询进行语义匹配
-      4. 返回结构化的 JSON 结果
+      4. 在结束前使用 save_content 工具把最终 JSON 保存到指定文件
+      5. 返回结构化的 JSON 结果
 
       输出格式：
       - 必须返回有效的 JSON
@@ -413,14 +382,13 @@ steps:
       - 如果索引文件存在且有内容，进行语义分析
       - 如果没有数据，返回 {"error": "no_data", "results": [], "total_results": 0}
       - 按 relevance_score 降序排序
+      - 在最终回答前，调用 save_content 将 JSON 保存到 {{agentResultsOutput}}
       - 只输出 JSON，不要有其他文字
     agent_tools:
       - preset: read_file
       - preset: read_lines
       - preset: file_exists
       - preset: save_content
-    exports:
-      search_results: "{{agent_content}}"
 
   - name: save-search-results
     type: bash
@@ -428,6 +396,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
       cd {{Output}}/ai-analysis
+      AGENT_RESULTS_FILE="{{agentResultsOutput}}"
       
       # 收集统计数据
       VULNS_LINES=$(wc -l < semantic-index/vulns-index.txt 2>/dev/null || echo 0)
@@ -437,73 +406,74 @@ steps:
       
       echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES"
       
-      # 构建基础结果
-      cat > {{searchResultsOutput}} << 'EOF'
-      {
-        "query": "QUERY_PLACEHOLDER",
-        "timestamp": "TIMESTAMP_PLACEHOLDER",
-        "source": "llm_agent",
-        "vector_search_used": false,
-        "provider": "PROVIDER_PLACEHOLDER",
-        "index_stats": {
-          "vulns": INDEX_VULNS_PLACEHOLDER,
-          "tech": INDEX_TECH_PLACEHOLDER,
-          "subdomains": INDEX_SUBDOMAINS_PLACEHOLDER,
-          "http": INDEX_HTTP_PLACEHOLDER
-        },
-        "results": [],
-        "highlights": {
-          "critical_findings": [],
-          "immediate_actions": [],
-          "affected_systems": []
-        },
-        "insights": [],
-        "recommendations": [],
-        "status": "pending"
-      }
-      EOF
-      
-      sed -i "s|QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
-      sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" {{searchResultsOutput}}
-      sed -i "s|PROVIDER_PLACEHOLDER|{{embeddingsProvider}}|g" {{searchResultsOutput}}
-      sed -i "s|INDEX_VULNS_PLACEHOLDER|$VULNS_LINES|g" {{searchResultsOutput}}
-      sed -i "s|INDEX_TECH_PLACEHOLDER|$TECH_LINES|g" {{searchResultsOutput}}
-      sed -i "s|INDEX_SUBDOMAINS_PLACEHOLDER|$SUBDOMAIN_LINES|g" {{searchResultsOutput}}
-      sed -i "s|INDEX_HTTP_PLACEHOLDER|$HTTP_LINES|g" {{searchResultsOutput}}
+      # 构建基础结果（保证单一合法 JSON）
+      jq -n \
+        --arg query "{{searchQuery}}" \
+        --arg ts "$(date -Iseconds)" \
+        --arg provider "{{embeddingsProvider}}" \
+        --argjson vulns "$VULNS_LINES" \
+        --argjson tech "$TECH_LINES" \
+        --argjson subdomains "$SUBDOMAIN_LINES" \
+        --argjson http "$HTTP_LINES" \
+        '{
+          query: $query,
+          timestamp: $ts,
+          source: "llm_agent",
+          vector_search_used: false,
+          provider: $provider,
+          index_stats: {
+            vulns: $vulns,
+            tech: $tech,
+            subdomains: $subdomains,
+            http: $http
+          },
+          results: [],
+          highlights: {
+            critical_findings: [],
+            immediate_actions: [],
+            affected_systems: []
+          },
+          insights: [],
+          recommendations: [],
+          status: "pending"
+        }' > {{searchResultsOutput}}
       
       # 检查索引数据是否为空
       if [ "$VULNS_LINES" -eq 0 ] && [ "$TECH_LINES" -eq 0 ] && [ "$SUBDOMAIN_LINES" -eq 0 ]; then
         echo "[Semantic] WARNING: All index files are empty! Search results will be limited."
         echo "[Semantic] This is expected if vuln-suite hasn't completed yet."
-        cat > {{searchResultsOutput}} << 'EOF'
-        {
-          "query": "QUERY_PLACEHOLDER",
-          "timestamp": "TIMESTAMP_PLACEHOLDER",
-          "status": "no_index_data",
-          "message": "索引数据为空，请确保 vuln-suite 已完成执行",
-          "index_stats": {
-            "vulns": 0,
-            "tech": 0,
-            "subdomains": 0,
-            "http": 0
-          },
-          "results": [],
-          "highlights": {"critical_findings": [], "immediate_actions": [], "affected_systems": []},
-          "insights": ["索引数据为空，无法进行语义搜索"],
-          "recommendations": ["等待 vuln-suite 完成后再执行语义搜索"]
-        }
-        EOF
-        sed -i "s|QUERY_PLACEHOLDER|{{searchQuery}}|g" {{searchResultsOutput}}
-        sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" {{searchResultsOutput}}
+        jq -n \
+          --arg query "{{searchQuery}}" \
+          --arg ts "$(date -Iseconds)" \
+          '{
+            query: $query,
+            timestamp: $ts,
+            status: "no_index_data",
+            message: "索引数据为空，请确保 vuln-suite 已完成执行",
+            index_stats: {
+              vulns: 0,
+              tech: 0,
+              subdomains: 0,
+              http: 0
+            },
+            results: [],
+            highlights: {
+              critical_findings: [],
+              immediate_actions: [],
+              affected_systems: []
+            },
+            insights: ["索引数据为空，无法进行语义搜索"],
+            recommendations: ["等待 vuln-suite 完成后再执行语义搜索"]
+          }' > {{searchResultsOutput}}
         exit 0
       fi
       
       # 尝试合并 LLM agent 返回的结果
-      if [ -n "{{search_results}}" ] && [ "{{search_results}}" != "{}" ] && [ "{{search_results}}" != "[]" ]; then
+      if [ -s "$AGENT_RESULTS_FILE" ]; then
         echo "[Semantic] Processing LLM agent results..."
         
         # 清理 markdown 代码块
-        CLEANED=$(echo '{{search_results}}' | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//')
+        CLEANED=$(cat "$AGENT_RESULTS_FILE" | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//')
         
         # 验证是否为有效 JSON
         if echo "$CLEANED" | jq empty 2>/dev/null; then
@@ -517,19 +487,19 @@ steps:
           # 更新结果
           if [ "$TOTAL" -gt 0 ]; then
             echo "$CLEANED" | jq --arg insights "$INSIGHTS" --arg recs "$RECS" \
-              '.insights = [$insights] | .recommendations = [$recs] | .status = "completed"' >> {{searchResultsOutput}}
+              '.insights = [$insights] | .recommendations = [$recs] | .status = "completed"' > {{searchResultsOutput}}
             echo "[Semantic] Search completed with $TOTAL results"
           else
             echo "[Semantic] Agent returned no results"
-            echo '{"status": "no_results", "message": "LLM 未找到相关结果"}' >> {{searchResultsOutput}}
+            jq '.status = "no_results" | .message = "LLM 未找到相关结果"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
           fi
         else
           echo "[Semantic] WARNING: Agent returned invalid JSON, using default results"
-          echo '{"status": "invalid_json", "message": "LLM 输出格式错误"}' >> {{searchResultsOutput}}
+          jq '.status = "invalid_json" | .message = "LLM 输出格式错误"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
         fi
       else
         echo "[Semantic] No results from LLM agent"
-        echo '{"status": "no_agent_output", "message": "Agent 未返回有效结果"}' >> {{searchResultsOutput}}
+        jq '.status = "no_agent_output" | .message = "Agent 未返回有效结果"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
       fi
       
       # 最终验证
@@ -540,47 +510,81 @@ steps:
         echo '{"status": "error", "results": [], "error": "JSON validation failed"}' > {{searchResultsOutput}}
       fi
 
+      # 同步写入 highlights 结果文件，供下游模块稳定读取
+      jq '.highlights // {"critical_findings":[],"immediate_actions":[],"affected_systems":[]}' {{searchResultsOutput}} > {{semanticHighlightsOutput}} 2>/dev/null || echo '{"critical_findings":[],"immediate_actions":[],"affected_systems":[]}' > {{semanticHighlightsOutput}}
+
   - name: knowledge-base-search
     type: bash
     pre_condition: "{{enableSemanticSearch}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
-      SKILLS_DIR="{{OsmedeusBase}}/osmedeus-base/skills"
+      SKILLS_DIR="{{skillsDir}}"
       KB_OUTPUT="{{Output}}/ai-analysis/knowledge-base-results.md"
       SKILLS_COMBINED="{{Output}}/ai-analysis/skills-combined.md"
       echo "[Knowledge Base] Searching security knowledge..."
+
+      strip_frontmatter() {
+        awk '
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { in_fm = 0; next }
+          !in_fm { print }
+        ' "$1"
+      }
+
+      append_skill() {
+        local skill_id="$1"
+        local title="$2"
+        local skill_file="$SKILLS_DIR/$skill_id/SKILL.md"
+
+        [ -f "$skill_file" ] || return 0
+
+        echo "## $title" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        strip_frontmatter "$skill_file" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+        echo "---" >> "$KB_OUTPUT"
+        echo "" >> "$KB_OUTPUT"
+
+        echo "## $title" >> "$SKILLS_COMBINED"
+        echo "" >> "$SKILLS_COMBINED"
+        strip_frontmatter "$skill_file" >> "$SKILLS_COMBINED"
+        echo "" >> "$SKILLS_COMBINED"
+      }
       
       # 检测漏洞类型
       VULN_TYPES_FOUND=""
       if [ -f "{{nucleiFile}}" ]; then
-        if grep -qi "sql\|sqli\|injection" "{{nucleiFile}}" 2>/dev/null; then
+        if grep -Eqi "sql([ -]?injection)?|sqli|union([[:space:]]+all)?[[:space:]]+select|boolean-based|time-based|database error" "{{nucleiFile}}" 2>/dev/null; then
           VULN_TYPES_FOUND="$VULN_TYPES_FOUND sql-injection,"
         fi
         if grep -qi "xss\|cross.*site\|scripting" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xss,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xss-testing,"
         fi
-        if grep -qi "ssrf\|request.*forgery\|file.*inclusion" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ssrf,"
+        if grep -Eqi "ssrf|server.?side request forgery|metadata service" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ssrf-testing,"
         fi
-        if grep -qi "command\|rce\|remote.*code\|exec" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND command-injection,"
+        if grep -Eqi "command injection|cmdi|shell injection|os command" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND command-injection-testing,"
+        fi
+        if grep -Eqi "rce|remote.*code|code.*execution|remote command execution|arbitrary command execution" "{{nucleiFile}}" 2>/dev/null; then
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND rce-testing,"
         fi
         if grep -qi "csrf\|request.*forg" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND csrf,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND csrf-testing,"
         fi
         if grep -qi "upload\|file.*upload" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND file-upload,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND file-upload-testing,"
         fi
         if grep -qi "idor\|direct.*object\|authoriz" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND idor,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND idor-testing,"
         fi
         if grep -qi "xxe\|xml.*entity\|external.*entity" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xxe,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND xxe-testing,"
         fi
         if grep -qi "ldap" "{{nucleiFile}}" 2>/dev/null; then
-          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ldap-injection,"
+          VULN_TYPES_FOUND="$VULN_TYPES_FOUND ldap-injection-testing,"
         fi
-        if grep -qi "api\|rest\|graphql\|endpoint" "{{nucleiFile}}" 2>/dev/null; then
+        if grep -Eqi "graphql|openapi|swagger|rest api|api endpoint" "{{nucleiFile}}" 2>/dev/null; then
           VULN_TYPES_FOUND="$VULN_TYPES_FOUND api-security,"
         fi
       fi
@@ -589,7 +593,7 @@ steps:
       
       # 默认加载的技能
       if [ -z "$VULN_TYPES_FOUND" ]; then
-        VULN_TYPES_FOUND="sql-injection,xss-testing,ssrf-testing,command-injection,csrf-testing,file-upload-testing,idor-testing,xxe-testing,api-security-testing,ldap-injection-testing"
+        VULN_TYPES_FOUND="sql-injection,xss-testing,ssrf-testing,command-injection-testing,rce-testing,csrf-testing,file-upload-testing,idor-testing,xxe-testing,api-security,ldap-injection-testing"
       fi
       
       # 生成知识库搜索结果
@@ -609,111 +613,40 @@ steps:
       echo "" >> "$SKILLS_COMBINED"
       
       # 根据检测到的漏洞类型加载对应技能
-      for skill_type in $VULN_TYPES_FOUND; do
+      for skill_type in $(printf '%s' "$VULN_TYPES_FOUND" | tr ',' '\n' | sed '/^$/d' | sort -u); do
         case $skill_type in
           sql-injection|sql-injection-testing)
-            if [ -f "$SKILLS_DIR/sql-injection/SKILL.md" ]; then
-              echo "## SQL Injection Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/sql-injection/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "## SQL Injection Testing" >> "$SKILLS_COMBINED"
-              echo "" >> "$SKILLS_COMBINED"
-              tail -n +25 "$SKILLS_DIR/sql-injection/SKILL.md" >> "$SKILLS_COMBINED" || true
-              echo "" >> "$SKILLS_COMBINED"
-            fi
+            append_skill "sql-injection" "SQL Injection Testing"
             ;;
           xss|xss-testing)
-            if [ -f "$SKILLS_DIR/xss-testing/SKILL.md" ]; then
-              echo "## XSS Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/xss-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "xss-testing" "XSS Testing"
             ;;
-          ssrf)
-            if [ -f "$SKILLS_DIR/ssrf-testing/SKILL.md" ]; then
-              echo "## SSRF Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/ssrf-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+          ssrf|ssrf-testing)
+            append_skill "ssrf-testing" "SSRF Testing"
             ;;
           command-injection|command-injection-testing)
-            if [ -f "$SKILLS_DIR/command-injection-testing/SKILL.md" ]; then
-              echo "## Command Injection Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/command-injection-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "command-injection-testing" "Command Injection Testing"
+            ;;
+          rce|rce-testing|remote-code-execution)
+            append_skill "rce-testing" "Remote Code Execution Testing"
             ;;
           csrf|csrf-testing)
-            if [ -f "$SKILLS_DIR/csrf-testing/SKILL.md" ]; then
-              echo "## CSRF Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/csrf-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "csrf-testing" "CSRF Testing"
             ;;
           file-upload|file-upload-testing)
-            if [ -f "$SKILLS_DIR/file-upload-testing/SKILL.md" ]; then
-              echo "## File Upload Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/file-upload-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "file-upload-testing" "File Upload Testing"
             ;;
           idor|idor-testing)
-            if [ -f "$SKILLS_DIR/idor-testing/SKILL.md" ]; then
-              echo "## IDOR Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/idor-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "idor-testing" "IDOR Testing"
             ;;
           xxe|xxe-testing)
-            if [ -f "$SKILLS_DIR/xxe-testing/SKILL.md" ]; then
-              echo "## XXE Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/xxe-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "xxe-testing" "XXE Testing"
             ;;
           ldap|ldap-injection|ldap-injection-testing)
-            if [ -f "$SKILLS_DIR/ldap-injection-testing/SKILL.md" ]; then
-              echo "## LDAP Injection Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/ldap-injection-testing/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "ldap-injection-testing" "LDAP Injection Testing"
             ;;
           api|api-security|api-security-testing)
-            if [ -f "$SKILLS_DIR/api-security/SKILL.md" ]; then
-              echo "## API Security Testing" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              cat "$SKILLS_DIR/api-security/SKILL.md" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-              echo "---" >> "$KB_OUTPUT"
-              echo "" >> "$KB_OUTPUT"
-            fi
+            append_skill "api-security" "API Security Testing"
             ;;
         esac
       done

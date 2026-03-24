@@ -206,8 +206,12 @@ steps:
 
       # 容错：处理可能的空输出
       if [ -n "{{validation_json}}" ] && [ "{{validation_json}}" != "null" ] && [ "{{validation_json}}" != "{}" ]; then
-        # 提取 markdown 代码块中的 JSON
-        echo '{{validation_json}}' | sed 's/```json//g; s/```//g' | jq '.' > {{vulnValidationOutput}} 2>/dev/null || echo '{{validation_json}}' > {{vulnValidationOutput}}
+        # 使用 heredoc 避免引号破坏 JSON 内容
+        cat > /tmp/ai_vuln_validation_raw_$$.txt << 'AIEOF'
+        {{validation_json}}
+        AIEOF
+        sed 's/```json//g; s/```//g' /tmp/ai_vuln_validation_raw_$$.txt | jq '.' > {{vulnValidationOutput}} 2>/dev/null || cp /tmp/ai_vuln_validation_raw_$$.txt {{vulnValidationOutput}}
+        rm -f /tmp/ai_vuln_validation_raw_$$.txt
         
         # 验证 JSON 格式和必要字段
         if jq empty {{vulnValidationOutput}} 2>/dev/null; then

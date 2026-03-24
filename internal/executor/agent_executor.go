@@ -100,6 +100,18 @@ func (e *AgentExecutor) Execute(ctx context.Context, step *core.Step, execCtx *c
 		Exports:   make(map[string]interface{}),
 	}
 
+	if step.Timeout != "" {
+		timeout, err := step.Timeout.Duration()
+		if err != nil {
+			return e.fail(result, fmt.Errorf("agent step '%s' has invalid timeout: %w", step.Name, err))
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
+
 	// Validate config
 	if e.config == nil {
 		return e.fail(result, fmt.Errorf("agent executor config not set"))

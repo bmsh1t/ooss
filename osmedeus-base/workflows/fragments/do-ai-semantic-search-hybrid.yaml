@@ -21,6 +21,10 @@ params:
     default: "{{Output}}/ai-analysis/chroma_db"
   - name: collectionName
     default: "{{TargetSpace}}"
+  - name: nucleiFile
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: maxSearchResults
     type: integer
     default: 10
@@ -95,7 +99,7 @@ steps:
       fi
       
       # 验证脚本存在
-      SCRIPT_PATH="{{OsmedeusBase}}/osmedeus-base/scripts/chroma-hybrid-search.py"
+      SCRIPT_PATH="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
       if [ -f "$SCRIPT_PATH" ]; then
         echo "[Hybrid] Search script found: $SCRIPT_PATH"
       else
@@ -110,9 +114,9 @@ steps:
     command: |
       echo "[Hybrid] Indexing knowledge base..."
       
-      SKILLS_DIR="{{OsmedeusBase}}/osmedeus-base/skills"
+      SKILLS_DIR="{{OsmedeusBase}}/skills"
       COMBINED_KB="{{semanticIndexDir}}/knowledge-base-combined.txt"
-      SCRIPT="{{OsmedeusBase}}/osmedeus-base/scripts/chroma-hybrid-search.py"
+      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
       
       # 合并所有 skills 文件
       : > "$COMBINED_KB"
@@ -161,7 +165,7 @@ steps:
       echo "[Hybrid] Indexing scan data..."
       
       SCAN_DATA="{{semanticIndexDir}}/scan-data-combined.txt"
-      SCRIPT="{{OsmedeusBase}}/osmedeus-base/scripts/chroma-hybrid-search.py"
+      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
       : > "$SCAN_DATA"
       
       # 索引漏洞数据
@@ -216,7 +220,7 @@ steps:
       echo "[Hybrid] Query: {{searchQuery}}"
       echo "[Hybrid] Alpha (vector weight): {{hybridAlpha}}"
       
-      SCRIPT="{{OsmedeusBase}}/osmedeus-base/scripts/chroma-hybrid-search.py"
+      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
       
       # 搜索知识库
       echo "[Hybrid] Searching knowledge base..."

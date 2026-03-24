@@ -82,21 +82,27 @@ steps:
       > {{Output}}/ai-analysis/cve/tech-cve.txt
       > {{Output}}/ai-analysis/cve/vuln-type-cve.txt
       
-      # 查询技术栈相关 CVE（CVSS >= 7.0）
-      for tech in $(echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5); do
+      # 查询技术栈相关 CVE（CVSS >= 7.0，并发执行）
+      _query_tech_cve() {
+        local tech="$1"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${tech}&cvssV3Severity=HIGH&resultsPerPage=3" | \
-        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || true
-        sleep 0.3
-      done
-      
-      # 查询通用漏洞类型 CVE
-      for vuln_type in "sql injection" "xss" "remote code execution" "ssrf" "ssti"; do
+        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' 2>/dev/null || true
+      }
+      export -f _query_tech_cve
+      echo "$TECH_KEYWORDS" | tr ',' '\n' | head -5 | \
+        xargs -P5 -I{} bash -c '_query_tech_cve "$@"' _ {} >> {{Output}}/ai-analysis/cve/tech-cve.txt
+
+      # 查询通用漏洞类型 CVE（并发执行）
+      _query_vuln_cve() {
+        local vuln_type="$1"
         curl -s --connect-timeout 5 --max-time 10 \
           "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${vuln_type}&cvssV3Severity=HIGH&resultsPerPage=2" | \
-        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || true
-        sleep 0.3
-      done
+        jq -r '.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"' 2>/dev/null || true
+      }
+      export -f _query_vuln_cve
+      printf '%s\n' "sql injection" "xss" "remote code execution" "ssrf" "ssti" | \
+        xargs -P5 -I{} bash -c '_query_vuln_cve "$@"' _ {} >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt
       
       TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
       VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
@@ -258,24 +264,26 @@ steps:
       mkdir -p {{Output}}/ai-analysis/validation
 
       # 从 Markdown 中提取 JSON（更稳定）
-      RAW='{{validation_json}}'
-      
+      cat > /tmp/ai_vuln_raw_$$.txt << 'AIEOF'
+      {{validation_json}}
+      AIEOF
+
       # 提取 markdown 代码块中的 JSON
-      JSON_CONTENT=$(echo "$RAW" | sed -n '/```json/,/```/p' | sed '1d;$d' | sed 's/^[[:space:]]*//')
+      JSON_CONTENT=$(sed -n '/```json/,/```/p' /tmp/ai_vuln_raw_$$.txt | sed '1d;$d' | sed 's/^[[:space:]]*//')
       
       if [ -z "$JSON_CONTENT" ] || [ "$JSON_CONTENT" = "```json" ] || [ "$JSON_CONTENT" = "```" ]; then
         # 尝试直接解析
-        JSON_CONTENT=$(echo "$RAW" | grep -o '{.*}' | head -1)
+        JSON_CONTENT=$(grep -o '{.*}' /tmp/ai_vuln_raw_$$.txt | head -1)
       fi
-      
+
       if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
         echo "$JSON_CONTENT" > {{vulnValidationOutput}}
         echo "[OK] Valid JSON extracted from markdown"
       else
         echo "[WARN] JSON extraction failed, trying alternative methods..."
-        
+
         # 尝试提取 {...} 模式
-        EXTRACTED=$(echo "$RAW" | grep -oP '\{[^}]*"findings"[^}]*\}' | head -1)
+        EXTRACTED=$(grep -oP '\{[^}]*"findings"[^}]*\}' /tmp/ai_vuln_raw_$$.txt 2>/dev/null | head -1)
         if [ -n "$EXTRACTED" ] && echo "$EXTRACTED" | jq empty 2>/dev/null; then
           echo "$EXTRACTED" > {{vulnValidationOutput}}
           echo "[OK] Extracted using pattern match"
@@ -285,6 +293,7 @@ steps:
           echo "[ERROR] Using fallback empty result"
         fi
       fi
+      rm -f /tmp/ai_vuln_raw_$$.txt
       
       # 验证必需字段
       for field in risk_level findings confirmed_real false_positives needs_manual_verification; do

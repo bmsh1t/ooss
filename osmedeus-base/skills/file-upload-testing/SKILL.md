@@ -1,7 +1,18 @@
 ---
-name: file-upload-testing
+id: file-upload-testing
+name: File Upload Testing
 description: 文件上传漏洞测试的专业技能和方法论
 version: 1.0.0
+aliases:
+  - file-upload
+  - upload-testing
+tags:
+  - web
+  - file
+  - rce
+target_types:
+  - web
+  - api
 ---
 
 # 文件上传漏洞测试

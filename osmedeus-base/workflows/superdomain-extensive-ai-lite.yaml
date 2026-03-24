@@ -10,7 +10,7 @@
 # - 漏洞管理（SQLite 去重）
 #
 # Usage:
-#   osmedeus run -f superdomain-extensive-ai-lite -t example.com
+#   osmedeus run -f superdomain-extensive-lite -t example.com
 # =============================================================================
 
 kind: flow
@@ -45,6 +45,15 @@ params:
     type: bool
     default: true
     description: "Enable AI vulnerability validation and analysis"
+  # enableVulnValidation 是 do-ai-vuln-validation fragment 内部使用的参数名
+  - name: enableVulnValidation
+    type: bool
+    default: true
+    description: "Alias for enableLlmAnalysis used by vuln-validation fragment"
+  - name: enableIntelligentAnalysis
+    type: bool
+    default: true
+    description: "Enable AI intelligent analysis coordinator"
   - name: enableSemanticSearch
     type: bool
     default: false
@@ -164,17 +173,23 @@ modules:
   # 核心 AI 模块：
   # - ai-vuln-validation: 验证漏洞，识别假阳性
   # - ai-intelligent-analysis: 汇总结果，生成决策
+  # - ai-apply-decision: 应用决策配置
+  # - ai-targeted-rescan: 对确认目标深扫（轻量，闭环必要）
 
   - name: ai-vuln-validation
     path: fragments/do-ai-vuln-validation.yaml
     depends_on: [vuln-suite]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enableVulnValidation}}"
 
-  # 注意：ai-intelligent-analysis 不依赖 ai-vuln-validation
-  # 因为它有自己的数据源处理逻辑（即使没有 ai-vuln-validation 也能工作）
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
-    depends_on: [vuln-suite]
+    depends_on: [ai-vuln-validation]
+    pre_condition: "{{enableLlmAnalysis}}"
+
+  # AI 决策应用 - 将决策配置写入环境
+  - name: ai-apply-decision
+    path: fragments/do-ai-apply-decision.yaml
+    depends_on: [ai-intelligent-analysis]
     pre_condition: "{{enableLlmAnalysis}}"
 
   # ===========================================================================
@@ -186,12 +201,18 @@ modules:
     pre_condition: "{{enableLlmCodeReview}}"
 
   # ===========================================================================
-  # Phase 10: Report (增强版 - 可视化)
+  # Phase 10: AI 定向二次扫描 (基于 AI 决策结果，轻量但必要)
   # ===========================================================================
-  # 注意：report 依赖 ai-intelligent-analysis 和 ai-code-review
-  # 由于使用了 pre_condition，这些依赖在 AI 禁用时会自动满足
+  - name: ai-targeted-rescan
+    path: fragments/do-ai-targeted-rescan.yaml
+    depends_on: [ai-apply-decision]
+    pre_condition: "{{enableLlmAnalysis}}"
+
+  # ===========================================================================
+  # Phase 11: Report (增强版 - 可视化)
+  # ===========================================================================
   - name: report
     path: common/10-report-enhanced.yaml
-    depends_on: [vuln-suite]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
     on_error:
       - action: continue

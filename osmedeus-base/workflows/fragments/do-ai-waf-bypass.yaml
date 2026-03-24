@@ -129,7 +129,12 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
       
-      echo '{{waf_bypass_json}}' > {{wafBypassOutput}} 2>/dev/null || echo '{}' > {{wafBypassOutput}}
+      cat > {{wafBypassOutput}} << 'AIEOF'
+      {{waf_bypass_json}}
+      AIEOF
+      if ! jq empty {{wafBypassOutput}} 2>/dev/null; then
+        echo '{}' > {{wafBypassOutput}}
+      fi
       
       if jq empty {{wafBypassOutput}} 2>/dev/null; then
         WAF_TYPE=$(jq -r '.waf_type // "Unknown"' {{wafBypassOutput}} 2>/dev/null)
@@ -173,7 +178,7 @@ steps:
       waf_user_agent: "$USER_AGENT"
       
       # Bypass Techniques
-      bypass_techniques: $(jq -r '.bypass_techniques[].technique | join(", ")' {{wafBypassOutput}} 2>/dev/null || echo "")
+      bypass_techniques: $(jq -r '[.bypass_techniques[].technique] | join(", ")' {{wafBypassOutput}} 2>/dev/null || echo "")
       
       # Testing Commands
       testing_commands: $(jq -r '.testing_commands | join("; ")' {{wafBypassOutput}} 2>/dev/null || echo "")

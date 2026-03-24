@@ -224,8 +224,12 @@ steps:
 
       # 容错：处理可能的空输出
       if [ -n "{{path_planning_json}}" ] && [ "{{path_planning_json}}" != "null" ] && [ "{{path_planning_json}}" != "{}" ]; then
-        # 提取 markdown 代码块中的 JSON
-        echo '{{path_planning_json}}' | sed 's/```json//g; s/```//g' | jq '.' > {{pathPlanningOutput}} 2>/dev/null || echo '{{path_planning_json}}' > {{pathPlanningOutput}}
+        # 使用 heredoc 避免引号破坏 JSON 内容
+        cat > /tmp/ai_path_planning_raw_$$.txt << 'AIEOF'
+        {{path_planning_json}}
+        AIEOF
+        sed 's/```json//g; s/```//g' /tmp/ai_path_planning_raw_$$.txt | jq '.' > {{pathPlanningOutput}} 2>/dev/null || cp /tmp/ai_path_planning_raw_$$.txt {{pathPlanningOutput}}
+        rm -f /tmp/ai_path_planning_raw_$$.txt
         
         if jq empty {{pathPlanningOutput}} 2>/dev/null; then
           PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null || echo 0)
@@ -284,7 +288,7 @@ steps:
         echo "## 验证清单" >> {{attackPlanFile}}
         echo "" >> {{attackPlanFile}}
 
-        jq -r '.verification_checklist[] | "\(.step). [CRITICAL] " * (.critical | if . then "**" else "" end) + "\(.verification_point)\n   Command: `\(.command)`\n   Expected: \(.expected)\n"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
+        jq -r '.verification_checklist[] | "\(.step). [\((.critical // false) | if . then "CRITICAL" else "OPTIONAL" end)] \(.verification_point)\n   Command: `\(.command)`\n   Expected: \(.expected)\n"' {{pathPlanningOutput}} 2>/dev/null >> {{attackPlanFile}} || true
 
         echo "" >> {{attackPlanFile}}
         echo "---" >> {{attackPlanFile}}
@@ -310,7 +314,7 @@ steps:
       # 容错：检查文件是否存在
       if [ -f "{{pathPlanningOutput}}" ] && jq empty {{pathPlanningOutput}} 2>/dev/null; then
         # 生成可执行的检查清单
-        jq -r '.verification_checklist[] | "\(.step). [\(.critical ? "CRITICAL" : "OPTIONAL")] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
+        jq -r '.verification_checklist[] | "\(.step). [\((.critical // false) | if . then "CRITICAL" else "OPTIONAL" end)] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
       else
         echo "# No execution checklist available" > {{executionChecklistFile}}
       fi

@@ -1,7 +1,17 @@
 ---
-name: xss-testing
+id: xss-testing
+name: XSS Testing
 description: XSS跨站脚本攻击测试的专业技能
 version: 1.0.0
+aliases:
+  - xss
+  - cross-site-scripting
+tags:
+  - xss
+  - browser
+  - frontend
+target_types:
+  - web
 ---
 
 # XSS测试技能

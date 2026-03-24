@@ -304,6 +304,7 @@ func (r *GojaRuntime) registerFunctionsOnVM(vm *goja.Runtime) {
 	_ = vm.Set(FnNmapToJSONL, vf.nmapToJSONL)
 	_ = vm.Set(FnRunNmap, vf.runNmap)
 	_ = vm.Set(FnDBImportPortAssets, vf.dbImportPortAssets)
+	_ = vm.Set(FnDBImportAttackChain, vf.dbImportAttackChain)
 
 	// Database diff functions
 	_ = vm.Set(FnDBAssetDiff, vf.dbAssetDiff)

@@ -362,9 +362,10 @@ const (
 	FnConvertSARIFToMarkdown = "convert_sarif_to_markdown" // convert_sarif_to_markdown(input_path, output_path) -> bool
 
 	// Nmap/Port import functions
-	FnNmapToJSONL        = "nmap_to_jsonl"         // nmap_to_jsonl(input_path, output_path) -> bool
-	FnRunNmap            = "run_nmap"              // run_nmap(target, flags?, output?) -> string
-	FnDBImportPortAssets = "db_import_port_assets" // db_import_port_assets(workspace, file_path, source?) -> map (stats)
+	FnNmapToJSONL         = "nmap_to_jsonl"          // nmap_to_jsonl(input_path, output_path) -> bool
+	FnRunNmap             = "run_nmap"               // run_nmap(target, flags?, output?) -> string
+	FnDBImportPortAssets  = "db_import_port_assets"  // db_import_port_assets(workspace, file_path, source?) -> map (stats)
+	FnDBImportAttackChain = "db_import_attack_chain" // db_import_attack_chain(workspace, file_path, target?, run_uuid?, mermaid_path?, text_path?) -> map
 
 	// Diff functions - asset and vulnerability change tracking
 	FnDBAssetDiff       = "db_asset_diff"         // db_asset_diff(workspace) -> string (JSONL)
@@ -639,6 +640,7 @@ func AllFunctions() []string {
 		FnNmapToJSONL,
 		FnRunNmap,
 		FnDBImportPortAssets,
+		FnDBImportAttackChain,
 
 		// Diff functions
 		FnDBAssetDiff,
@@ -1001,6 +1003,7 @@ func FunctionRegistry() map[string][]FunctionInfo {
 			{FnDBImportCustomAsset, "db_import_custom_asset(workspace, file_path, [asset_type], [source])", "Import assets from JSONL file with direct field mapping; optional asset_type/source defaults apply when line has no value", "map", "db_import_custom_asset('{{TargetSpace}}', '{{Output}}/custom-assets.jsonl', 'subdomain', 'recon')"},
 			{FnDBImportSARIF, "db_import_sarif(workspace, file_path)", "Import vulnerabilities from SARIF file (Semgrep, Trivy, etc.)", "map", "db_import_sarif('{{TargetSpace}}', '{{Output}}/semgrep.sarif')"},
 			{FnDBImportPortAssets, "db_import_port_assets(workspace, file_path, [source])", "Import port scan data from JSONL (nmap_to_jsonl output) with asset_type=ip and source=portscan", "map", "db_import_port_assets('{{TargetSpace}}', '{{Output}}/nmap-scan.jsonl')"},
+			{FnDBImportAttackChain, "db_import_attack_chain(workspace, file_path, [target], [run_uuid], [mermaid_path], [text_path])", "Import AI attack-chain JSON into the local workbench store for API usage", "map", "db_import_attack_chain('{{TargetSpace}}', '{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json', '{{Target}}')"},
 			{FnDBAssetDiff, "db_asset_diff(workspace)", "Get asset diff as JSONL string", "string", "db_asset_diff('{{TargetSpace}}')"},
 			{FnDBVulnDiff, "db_vuln_diff(workspace)", "Get vulnerability diff as JSONL string", "string", "db_vuln_diff('{{TargetSpace}}')"},
 			{FnDBAssetDiffToFile, "db_asset_diff_to_file(workspace, dest)", "Write asset diff to JSONL file", "bool", "db_asset_diff_to_file('{{TargetSpace}}', '{{Output}}/asset-diff.jsonl')"},

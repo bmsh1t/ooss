@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/core"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
@@ -568,6 +569,8 @@ func executeQueuedTasks(ctx context.Context, cfg *config.Config, taskCh <-chan Q
 			exec.SetLoader(loader)
 			exec.SetDBRunUUID(task.RunUUID)
 
+			updateQueuedRunStatus(ctx, task.RunUUID, "running", "")
+
 			// Execute workflow
 			var result *core.WorkflowResult
 			if workflow.IsFlow() {
@@ -590,6 +593,7 @@ func executeQueuedTasks(ctx context.Context, cfg *config.Config, taskCh <-chan Q
 			} else {
 				p.Success("[worker-%d] Task completed for %s", workerNum, terminal.Green(task.Target))
 				updateQueuedRunStatus(ctx, task.RunUUID, "completed", "")
+				maybeQueueCampaignDeepScan(ctx, task.RunUUID)
 			}
 		}
 	}
@@ -601,6 +605,81 @@ func updateQueuedRunStatus(ctx context.Context, runUUID, status, errorMsg string
 		return
 	}
 	_ = database.UpdateRunStatus(ctx, runUUID, status, errorMsg)
+	_ = database.UpdateVulnerabilityRetestStatus(ctx, runUUID, status)
+}
+
+func maybeQueueCampaignDeepScan(ctx context.Context, runUUID string) {
+	run, err := database.GetRunByID(ctx, runUUID, false, false)
+	if err != nil || run == nil || strings.TrimSpace(run.RunGroupID) == "" || strings.TrimSpace(run.Workspace) == "" {
+		return
+	}
+	campaign, err := database.GetCampaignByID(ctx, run.RunGroupID)
+	if err != nil || campaign == nil || !campaign.AutoDeepScan || strings.TrimSpace(campaign.DeepScanWorkflow) == "" {
+		return
+	}
+	if run.TriggerType == "campaign-deep-scan" {
+		return
+	}
+
+	vulnSummary, err := database.GetVulnerabilitySummary(ctx, run.Workspace)
+	if err != nil || !campaignWorkspaceIsHighRisk(campaign.HighRiskSeverities, vulnSummary) {
+		return
+	}
+
+	exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+	if err != nil || exists {
+		return
+	}
+
+	params := cloneCampaignRunParams(run.Params)
+	params["campaign_stage"] = "deep_scan"
+	params["campaign_source_run_uuid"] = run.RunUUID
+
+	deepScanRun := &database.Run{
+		RunUUID:      uuid.New().String(),
+		WorkflowName: campaign.DeepScanWorkflow,
+		WorkflowKind: normalizeCampaignDeepScanKind(campaign.DeepScanWorkflowKind),
+		Target:       run.Target,
+		Params:       params,
+		Status:       "queued",
+		TriggerType:  "campaign-deep-scan",
+		RunGroupID:   campaign.ID,
+		RunPriority:  "critical",
+		RunMode:      "queue",
+		IsQueued:     true,
+		Workspace:    run.Workspace,
+	}
+	_ = database.CreateRun(ctx, deepScanRun)
+}
+
+func campaignWorkspaceIsHighRisk(severities []string, summary map[string]int) bool {
+	if len(severities) == 0 {
+		severities = []string{"critical", "high"}
+	}
+	for _, severity := range severities {
+		if summary[strings.ToLower(strings.TrimSpace(severity))] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneCampaignRunParams(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return map[string]interface{}{}
+	}
+	clone := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		clone[key] = value
+	}
+	return clone
+}
+
+func normalizeCampaignDeepScanKind(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), "flow") {
+		return "flow"
+	}
+	return "module"
 }
 
 // truncateUUID returns a truncated UUID for display

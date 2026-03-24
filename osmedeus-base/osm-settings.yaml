@@ -216,14 +216,6 @@ global_vars:
     value: ""
     as_env: true  # Exports as OPENAI_API_KEY
 
-  # Azure OpenAI credentials (for organizations using Azure)
-  AZURE_OPENAI_API_KEY:
-    value: ""
-    as_env: true  # Exports as AZURE_OPENAI_API_KEY
-  AZURE_OPENAI_ENDPOINT:
-    value: ""
-    as_env: true  # Exports as AZURE_OPENAI_ENDPOINT
-
   # Anthropic API key for Claude models
   ANTHROPIC_API_KEY:
     value: ""
@@ -514,7 +506,7 @@ embeddings_config:
   # Enable embeddings generation
   enabled: false
 
-  # Embeddings provider: "jina", "openai", "azure", "ollama"
+  # Embeddings provider: "jina", "openai"
   provider: jina
 
   # Jina AI (recommended for free tier)
@@ -528,18 +520,6 @@ embeddings_config:
     api_url: "https://api.openai.com/v1/embeddings"
     model: "text-embedding-3-small"
     api_key: ""  # Use OPENAI_API_KEY env var or set directly
-
-  # Azure OpenAI Embeddings
-  azure:
-    api_url: ""  # Your Azure endpoint
-    model: "text-embedding-3-small"
-    api_key: ""  # Use AZURE_OPENAI_API_KEY env var or set directly
-
-  # Ollama (local embeddings)
-  ollama:
-    api_url: "http://localhost:11434/api/embeddings"
-    model: "nomic-embed-text"
-    api_key: ""
 
   # Embeddings batch size (number of texts per API call)
   batch_size: 100

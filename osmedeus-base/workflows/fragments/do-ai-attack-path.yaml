@@ -207,7 +207,7 @@ steps:
       # 读取统计
       STATS=$(cat {{Output}}/ai-analysis/attack-stats.txt 2>/dev/null | cut -d'=' -f2)
       
-      cat > {{attackPathOutput}} << 'EOF'
+      cat > {{attackPathOutput}} << EOF
       # {{Target}} 攻击路径规划报告
       ## 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
       ## 扫描统计: ${STATS}

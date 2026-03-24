@@ -65,6 +65,16 @@ params:
     type: bool
     default: true
 
+  # 扫描激进度阈值（可通过参数覆盖）
+  - name: aggressiveThreshold
+    type: integer
+    default: 10
+    description: "确认漏洞数量超过此值时切换到激进扫描模式"
+  - name: balancedThreshold
+    type: integer
+    default: 5
+    description: "确认漏洞数量超过此值时切换到均衡扫描模式"
+
 steps:
   - name: prepare-analysis
     type: function
@@ -102,19 +112,27 @@ steps:
         WAF_TYPES=$(cut -d',' -f2 {{wafFile}} 2>/dev/null | sort -u | head -5 | tr '\n' ',' | sed 's/,$//')
       fi
 
-      cat > {{Output}}/ai-analysis/intelligent-stats.json << EOF
-      {
-        "subdomains": $SUBDOMAINS,
-        "http_count": $HTTP_COUNT,
-        "resolved": $RESOLVED,
-        "critical": $CRITICAL,
-        "high": $HIGH,
-        "priority_targets": $PRIORITY_COUNT,
-        "waf_count": $WAF_COUNT,
-        "waf_types": "$WAF_TYPES",
-        "tech_stack": "$TECH_STACK"
-      }
-      EOF
+      jq -n \
+        --argjson subdomains "$SUBDOMAINS" \
+        --argjson http_count "$HTTP_COUNT" \
+        --argjson resolved "$RESOLVED" \
+        --argjson critical "$CRITICAL" \
+        --argjson high "$HIGH" \
+        --argjson priority_targets "$PRIORITY_COUNT" \
+        --argjson waf_count "$WAF_COUNT" \
+        --arg waf_types "$WAF_TYPES" \
+        --arg tech_stack "$TECH_STACK" \
+        '{
+          subdomains: $subdomains,
+          http_count: $http_count,
+          resolved: $resolved,
+          critical: $critical,
+          high: $high,
+          priority_targets: $priority_targets,
+          waf_count: $waf_count,
+          waf_types: $waf_types,
+          tech_stack: $tech_stack
+        }' > {{Output}}/ai-analysis/intelligent-stats.json
 
       echo "[AI Coordinator] Stats: Critical=$CRITICAL, High=$HIGH, WAF=$WAF_COUNT"
 
@@ -153,8 +171,11 @@ steps:
       FALSE_POSITIVES=0
       if check_file "$VULN_FILE" "Vuln validation"; then
         VULN_STATUS="available"
-        CONFIRMED_VULNS=$(jq -r '.confirmed_real // 0' "$VULN_FILE" 2>/dev/null || echo 0)
-        FALSE_POSITIVES=$(jq -r '.false_positives // 0' "$VULN_FILE" 2>/dev/null || echo 0)
+        # 兼容两种 schema:
+        # - 非 ACP: .confirmed_real / .false_positives
+        # - ACP:    .validation_summary.confirmed_real / .validation_summary.false_positives
+        CONFIRMED_VULNS=$(jq -r '(.confirmed_real // .validation_summary.confirmed_real // 0)' "$VULN_FILE" 2>/dev/null || echo 0)
+        FALSE_POSITIVES=$(jq -r '(.false_positives // .validation_summary.false_positives // 0)' "$VULN_FILE" 2>/dev/null || echo 0)
       fi
 
       # 聚合攻击链结果
@@ -192,32 +213,43 @@ steps:
       echo "[INFO] [AI Coordinator] Any data available: $ANY_DATA"
 
       # 创建聚合结果文件
-      cat > {{Output}}/ai-analysis/aggregated-results.json << EOF
-      {
-        "aggregation_timestamp": "$(date -Iseconds)",
-        "any_data_available": $ANY_DATA,
-        "components": {
-          "vuln_validation": {
-            "status": "$VULN_STATUS",
-            "confirmed_vulns": $CONFIRMED_VULNS,
-            "false_positives": $FALSE_POSITIVES
-          },
-          "attack_chain": {
-            "status": "$CHAIN_STATUS",
-            "total_chains": $TOTAL_CHAINS,
-            "critical_chains": $CRITICAL_CHAINS
-          },
-          "path_planning": {
-            "status": "$PLAN_STATUS",
-            "total_phases": $TOTAL_PHASES
-          },
-          "semantic_search": {
-            "status": "$SEMANTIC_STATUS",
-            "results": $SEMANTIC_RESULTS
+      jq -n \
+        --arg aggregation_timestamp "$(date -Iseconds)" \
+        --argjson any_data_available "$ANY_DATA" \
+        --arg vuln_status "$VULN_STATUS" \
+        --argjson confirmed_vulns "$CONFIRMED_VULNS" \
+        --argjson false_positives "$FALSE_POSITIVES" \
+        --arg chain_status "$CHAIN_STATUS" \
+        --argjson total_chains "$TOTAL_CHAINS" \
+        --argjson critical_chains "$CRITICAL_CHAINS" \
+        --arg plan_status "$PLAN_STATUS" \
+        --argjson total_phases "$TOTAL_PHASES" \
+        --arg semantic_status "$SEMANTIC_STATUS" \
+        --argjson semantic_results "$SEMANTIC_RESULTS" \
+        '{
+          aggregation_timestamp: $aggregation_timestamp,
+          any_data_available: $any_data_available,
+          components: {
+            vuln_validation: {
+              status: $vuln_status,
+              confirmed_vulns: $confirmed_vulns,
+              false_positives: $false_positives
+            },
+            attack_chain: {
+              status: $chain_status,
+              total_chains: $total_chains,
+              critical_chains: $critical_chains
+            },
+            path_planning: {
+              status: $plan_status,
+              total_phases: $total_phases
+            },
+            semantic_search: {
+              status: $semantic_status,
+              results: $semantic_results
+            }
           }
-        }
-      }
-      EOF
+        }' > {{Output}}/ai-analysis/aggregated-results.json
 
       echo "[AI Coordinator] Results aggregation complete"
       echo "[AI Coordinator] Summary: Vuln=$CONFIRMED_VULNS confirmed, Chains=$TOTAL_CHAINS, Phases=$TOTAL_PHASES"
@@ -254,17 +286,22 @@ steps:
 
       # 从漏洞验证结果中提取配置
       if [ -f "$VULN_FILE" ] && jq empty "$VULN_FILE" 2>/dev/null; then
-        RISK=$(jq -r '.risk_level // "中"' "$VULN_FILE" 2>/dev/null)
-        CONFIRMED=$(jq -r '.confirmed_real // 0' "$VULN_FILE" 2>/dev/null)
+        # 兼容两种 schema:
+        # - 非 ACP: .risk_level / .confirmed_real
+        # - ACP:    .validation_summary.risk_level / .validation_summary.confirmed_real
+        RISK=$(jq -r '(.risk_level // .validation_summary.risk_level // "中")' "$VULN_FILE" 2>/dev/null)
+        CONFIRMED=$(jq -r '(.confirmed_real // .validation_summary.confirmed_real // 0)' "$VULN_FILE" 2>/dev/null)
 
-        # 根据确认漏洞数量调整配置
-        if [ "$CONFIRMED" -gt 10 ]; then
+        # 根据确认漏洞数量调整配置（阈值可通过参数覆盖）
+        AGGRESSIVE_THRESHOLD={{aggressiveThreshold}}
+        BALANCED_THRESHOLD={{balancedThreshold}}
+        if [ "$CONFIRMED" -gt "$AGGRESSIVE_THRESHOLD" ]; then
           SEVERITY="critical,high,medium"
           THREADS=15
           RATE_LIMIT=50
           TIMEOUT="8h"
           REASONING="High confirmed findings ($CONFIRMED), aggressive scan"
-        elif [ "$CONFIRMED" -gt 5 ]; then
+        elif [ "$CONFIRMED" -gt "$BALANCED_THRESHOLD" ]; then
           SEVERITY="critical,high"
           THREADS=12
           RATE_LIMIT=40
@@ -279,7 +316,6 @@ steps:
           REASONING="$REASONING (risk: $RISK)"
         fi
       fi
-      fi
 
       # 从语义搜索结果获取高优先级发现
       SEMANTIC_FILE="{{semanticSearchFile}}"
@@ -291,44 +327,51 @@ steps:
       fi
 
       # 生成 AI 决策 JSON 文件 - 与 vuln-suite.yaml 读取路径一致
-      cat > {{aiDecisionFile}} << EOF
-      {
-        "nuclei_severity": "$SEVERITY",
-        "suggested_threads": $THREADS,
-        "suggested_rate_limit": $RATE_LIMIT,
-        "recommended_timeout": "$TIMEOUT",
-        "waf_bypass_needed": $WAF_NEEDED,
-        "waf_bypass_techniques": "$WAF_TECH",
-        "waf_recommended_delay": "$WAF_DELAY",
-        "enable_ssrf_scan": true,
-        "enable_ssti_scan": true,
-        "enable_sqli_scan": true,
-        "enable_lfi_scan": true,
-        "enable_takeover_scan": true,
-        "reasoning": "$REASONING"
-      }
-      EOF
+      jq -n \
+        --arg nuclei_severity "$SEVERITY" \
+        --argjson suggested_threads "$THREADS" \
+        --argjson suggested_rate_limit "$RATE_LIMIT" \
+        --arg recommended_timeout "$TIMEOUT" \
+        --argjson waf_bypass_needed "$WAF_NEEDED" \
+        --arg waf_bypass_techniques "$WAF_TECH" \
+        --arg waf_recommended_delay "$WAF_DELAY" \
+        --arg reasoning "$REASONING" \
+        '{
+          nuclei_severity: $nuclei_severity,
+          suggested_threads: $suggested_threads,
+          suggested_rate_limit: $suggested_rate_limit,
+          recommended_timeout: $recommended_timeout,
+          waf_bypass_needed: $waf_bypass_needed,
+          waf_bypass_techniques: $waf_bypass_techniques,
+          waf_recommended_delay: $waf_recommended_delay,
+          enable_ssrf_scan: true,
+          enable_ssti_scan: true,
+          enable_sqli_scan: true,
+          enable_lfi_scan: true,
+          enable_takeover_scan: true,
+          reasoning: $reasoning
+        }' > {{aiDecisionFile}}
 
       # 生成 AI 变量 YAML 文件
-      cat > {{aiVarsFile}} << EOF
-      # AI Decision Variables
-      # Generated by ai-intelligent-analysis coordinator
-      # Target: {{Target}}
-      # Generated: $(date)
-
-      nucleiSeverity: "$SEVERITY"
-      nucleiThreads: $THREADS
-      nucleiRateLimit: $RATE_LIMIT
-      nucleiTimeout: "$TIMEOUT"
-      enableWafAwareScan: $WAF_NEEDED
-      wafBypassTechniques: "$WAF_TECH"
-      wafRecommendedDelay: "$WAF_DELAY"
-      enableSsrfScan: true
-      enableSstiScan: true
-      enableSqliScan: true
-      enableLfiScan: true
-      enableTakeoverScan: true
-      EOF
+      {
+        printf '# AI Decision Variables\n'
+        printf '# Generated by ai-intelligent-analysis coordinator\n'
+        printf '# Target: {{Target}}\n'
+        printf '# Generated: %s\n' "$(date)"
+        printf '\n'
+        printf 'nucleiSeverity: %s\n' "$(printf '%s' "$SEVERITY" | sed 's/["\\]/\\&/g')"
+        printf 'nucleiThreads: %s\n' "$THREADS"
+        printf 'nucleiRateLimit: %s\n' "$RATE_LIMIT"
+        printf 'nucleiTimeout: %s\n' "$(printf '%s' "$TIMEOUT" | sed 's/["\\]/\\&/g')"
+        printf 'enableWafAwareScan: %s\n' "$WAF_NEEDED"
+        printf 'wafBypassTechniques: %s\n' "$(printf '%s' "$WAF_TECH" | sed 's/["\\]/\\&/g')"
+        printf 'wafRecommendedDelay: %s\n' "$(printf '%s' "$WAF_DELAY" | sed 's/["\\]/\\&/g')"
+        printf 'enableSsrfScan: true\n'
+        printf 'enableSstiScan: true\n'
+        printf 'enableSqliScan: true\n'
+        printf 'enableLfiScan: true\n'
+        printf 'enableTakeoverScan: true\n'
+      } > {{aiVarsFile}}
 
       echo "[AI Decision] Config saved to {{aiDecisionFile}}"
       echo "[AI Decision] Variables saved to {{aiVarsFile}}"

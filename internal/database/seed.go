@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
+
+var ErrVulnerabilityRetestInProgress = errors.New("vulnerability retest already queued or running")
 
 // SeedDatabase populates the database with sample data for development and testing
 func SeedDatabase(ctx context.Context) error {
@@ -3813,6 +3816,7 @@ type VulnerabilityQuery struct {
 	Severity   string
 	Confidence string
 	AssetValue string
+	VulnStatus string
 	Offset     int
 	Limit      int
 }
@@ -3852,6 +3856,9 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 	if query.AssetValue != "" {
 		baseQuery = baseQuery.Where("asset_value LIKE ?", "%"+query.AssetValue+"%")
 	}
+	if query.VulnStatus != "" {
+		baseQuery = baseQuery.Where("vuln_status = ?", query.VulnStatus)
+	}
 
 	// Get total count with filters
 	totalCount, err := baseQuery.Count(ctx)
@@ -3873,6 +3880,12 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 			}
 			if query.AssetValue != "" {
 				q = q.Where("asset_value LIKE ?", "%"+query.AssetValue+"%")
+			}
+			if query.Confidence != "" {
+				q = q.Where("confidence = ?", query.Confidence)
+			}
+			if query.VulnStatus != "" {
+				q = q.Where("vuln_status = ?", query.VulnStatus)
 			}
 			return q
 		}).
@@ -3911,10 +3924,149 @@ func CreateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) error {
 	if db == nil {
 		return fmt.Errorf("database not connected")
 	}
+	if strings.TrimSpace(vuln.VulnStatus) == "" {
+		vuln.VulnStatus = "new"
+	}
 
 	_, err := db.NewInsert().Model(vuln).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create vulnerability: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateVulnerabilityRecord updates review and lifecycle fields for a vulnerability.
+func UpdateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) error {
+	if db == nil {
+		return fmt.Errorf("database not connected")
+	}
+
+	vuln.UpdatedAt = time.Now()
+	_, err := db.NewUpdate().
+		Model(vuln).
+		Column(
+			"vuln_info",
+			"vuln_title",
+			"vuln_desc",
+			"vuln_poc",
+			"severity",
+			"confidence",
+			"asset_type",
+			"asset_value",
+			"tags",
+			"detail_http_request",
+			"detail_http_response",
+			"raw_vuln_json",
+			"vuln_status",
+			"source_run_uuid",
+			"ai_verdict",
+			"ai_summary",
+			"analyst_verdict",
+			"analyst_notes",
+			"retest_status",
+			"retest_run_uuid",
+			"attack_chain_ref",
+			"related_assets",
+			"report_refs",
+			"verified_at",
+			"closed_at",
+			"updated_at",
+		).
+		WherePK().
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to update vulnerability: %w", err)
+	}
+
+	return nil
+}
+
+// QueueVulnerabilityRetest atomically updates vulnerability retest metadata and inserts the queued run.
+func QueueVulnerabilityRetest(ctx context.Context, vuln *Vulnerability, run *Run) error {
+	if db == nil {
+		return fmt.Errorf("database not connected")
+	}
+
+	now := time.Now()
+	run.CreatedAt = now
+	run.UpdatedAt = now
+	if run.Status == "" {
+		run.Status = "pending"
+	}
+	vuln.UpdatedAt = now
+
+	return Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var current Vulnerability
+		if err := tx.NewSelect().
+			Model(&current).
+			Where("id = ?", vuln.ID).
+			Scan(ctx); err != nil {
+			return fmt.Errorf("vulnerability not found: %w", err)
+		}
+
+		if current.RetestStatus == "queued" || current.RetestStatus == "running" {
+			return ErrVulnerabilityRetestInProgress
+		}
+
+		if _, err := tx.NewUpdate().
+			Model(vuln).
+			Column(
+				"vuln_info",
+				"vuln_title",
+				"vuln_desc",
+				"vuln_poc",
+				"severity",
+				"confidence",
+				"asset_type",
+				"asset_value",
+				"tags",
+				"detail_http_request",
+				"detail_http_response",
+				"raw_vuln_json",
+				"vuln_status",
+				"source_run_uuid",
+				"ai_verdict",
+				"ai_summary",
+				"analyst_verdict",
+				"analyst_notes",
+				"retest_status",
+				"retest_run_uuid",
+				"attack_chain_ref",
+				"related_assets",
+				"report_refs",
+				"verified_at",
+				"closed_at",
+				"updated_at",
+			).
+			WherePK().
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to update vulnerability retest state: %w", err)
+		}
+
+		if _, err := tx.NewInsert().Model(run).Exec(ctx); err != nil {
+			return fmt.Errorf("failed to create retest run: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// UpdateVulnerabilityRetestStatus updates retest status for the vulnerability linked to a queued retest run.
+func UpdateVulnerabilityRetestStatus(ctx context.Context, retestRunUUID, retestStatus string) error {
+	if db == nil || strings.TrimSpace(retestRunUUID) == "" || strings.TrimSpace(retestStatus) == "" {
+		return nil
+	}
+
+	now := time.Now()
+	_, err := db.NewUpdate().
+		Model((*Vulnerability)(nil)).
+		Set("retest_status = ?", retestStatus).
+		Set("updated_at = ?", now).
+		Where("retest_run_uuid = ?", retestRunUUID).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to update vulnerability retest status: %w", err)
 	}
 
 	return nil
@@ -3973,6 +4125,104 @@ func GetVulnerabilitySummary(ctx context.Context, workspace string) (map[string]
 	}
 
 	return summary, nil
+}
+
+// GetVulnerabilityStatusSummary returns vulnerability counts grouped by lifecycle status.
+func GetVulnerabilityStatusSummary(ctx context.Context, workspace string) (map[string]int, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	var results []struct {
+		Status string `bun:"vuln_status"`
+		Count  int    `bun:"count"`
+	}
+
+	query := db.NewSelect().
+		Model((*Vulnerability)(nil)).
+		ColumnExpr("vuln_status, COUNT(*) AS count").
+		Group("vuln_status")
+
+	if workspace != "" {
+		query = query.Where("workspace = ?", workspace)
+	}
+
+	if err := query.Scan(ctx, &results); err != nil {
+		return nil, fmt.Errorf("failed to get vulnerability status summary: %w", err)
+	}
+
+	summary := make(map[string]int)
+	for _, row := range results {
+		summary[row.Status] = row.Count
+	}
+	return summary, nil
+}
+
+// VulnerabilityBoard aggregates workspace-level vulnerability closure metrics.
+type VulnerabilityBoard struct {
+	Workspace     string         `json:"workspace"`
+	BySeverity    map[string]int `json:"by_severity"`
+	ByStatus      map[string]int `json:"by_status"`
+	Total         int            `json:"total"`
+	OpenHighRisk  int            `json:"open_high_risk"`
+	Verified      int            `json:"verified"`
+	FalsePositive int            `json:"false_positive"`
+	NeedsRetest   int            `json:"needs_retest"`
+	Closed        int            `json:"closed"`
+}
+
+// GetVulnerabilityBoard returns a vulnerability risk board for a workspace.
+func GetVulnerabilityBoard(ctx context.Context, workspace string) (*VulnerabilityBoard, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	bySeverity, err := GetVulnerabilitySummary(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+	byStatus, err := GetVulnerabilityStatusSummary(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Total        int `bun:"total"`
+		OpenHighRisk int `bun:"open_high_risk"`
+		Verified     int `bun:"verified"`
+		FalsePos     int `bun:"false_positive"`
+		NeedsRetest  int `bun:"needs_retest"`
+		Closed       int `bun:"closed"`
+	}
+
+	query := db.NewSelect().
+		Model((*Vulnerability)(nil)).
+		ColumnExpr("COUNT(*) AS total").
+		ColumnExpr("COALESCE(SUM(CASE WHEN severity IN ('critical','high') AND vuln_status NOT IN ('false_positive','closed') THEN 1 ELSE 0 END), 0) AS open_high_risk").
+		ColumnExpr("COALESCE(SUM(CASE WHEN vuln_status = 'verified' THEN 1 ELSE 0 END), 0) AS verified").
+		ColumnExpr("COALESCE(SUM(CASE WHEN vuln_status = 'false_positive' THEN 1 ELSE 0 END), 0) AS false_positive").
+		ColumnExpr("COALESCE(SUM(CASE WHEN vuln_status = 'retest' OR retest_status = 'queued' OR retest_status = 'running' THEN 1 ELSE 0 END), 0) AS needs_retest").
+		ColumnExpr("COALESCE(SUM(CASE WHEN vuln_status = 'closed' THEN 1 ELSE 0 END), 0) AS closed")
+
+	if workspace != "" {
+		query = query.Where("workspace = ?", workspace)
+	}
+
+	if err := query.Scan(ctx, &result); err != nil {
+		return nil, fmt.Errorf("failed to build vulnerability board: %w", err)
+	}
+
+	return &VulnerabilityBoard{
+		Workspace:     workspace,
+		BySeverity:    bySeverity,
+		ByStatus:      byStatus,
+		Total:         result.Total,
+		OpenHighRisk:  result.OpenHighRisk,
+		Verified:      result.Verified,
+		FalsePositive: result.FalsePos,
+		NeedsRetest:   result.NeedsRetest,
+		Closed:        result.Closed,
+	}, nil
 }
 
 // RunResult holds paginated run results
