@@ -28,15 +28,13 @@ It is also consumed by `superdomain-extensive`, `superdomain-extensive-stable`, 
   - Required for `pdf`, `docx`, `pptx`, and `xlsx`
 - `antiword`
   - Required for legacy `.doc`
-- `python3`
-  - Required by the semantic-search helper scripts used in AI workflows
 
 ## Optional Dependencies
 
-- `JINA_API_KEY` or `OPENAI_API_KEY`
-  - Enables embeddings-backed semantic retrieval in the AI workflows and vector knowledge indexing/search
-- `chromadb`
-  - Needed only when running the `ai-semantic-search-hybrid` fragment directly
+- at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
+  - Enables vector knowledge indexing/search and AI workflow semantic retrieval
+- a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model`
+  - Keeps vectorkb index/search bound to the same provider/model pair unless you override them explicitly
 
 ## Vector Knowledge Config
 

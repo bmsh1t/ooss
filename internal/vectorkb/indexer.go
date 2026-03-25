@@ -113,7 +113,7 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 			if end > len(inputs) {
 				end = len(inputs)
 			}
-			batchEmbeddings, _, err := illm.GenerateEmbeddings(ctx, cfg, inputs[start:end], model)
+			batchEmbeddings, _, err := illm.GenerateEmbeddingsWithProvider(ctx, cfg, provider, inputs[start:end], model)
 			if err != nil {
 				return summary, fmt.Errorf("failed to generate embeddings for %s: %w", group.sourcePath, err)
 			}

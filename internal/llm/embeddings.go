@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,20 +42,11 @@ type embeddingAPIError struct {
 
 // GenerateEmbeddings generates embeddings using the configured OpenAI-compatible providers.
 func GenerateEmbeddings(ctx context.Context, cfg *config.Config, input []string, modelOverride string) ([][]float64, string, error) {
-	if cfg == nil {
-		return nil, "", fmt.Errorf("configuration not loaded")
-	}
-	if len(input) == 0 {
-		return nil, "", fmt.Errorf("input is required")
-	}
-	if cfg.LLM.GetProviderCount() == 0 {
-		return nil, "", fmt.Errorf("no LLM providers configured")
+	if err := validateEmbeddingConfig(cfg, input); err != nil {
+		return nil, "", err
 	}
 
-	timeout := 120 * time.Second
-	if parsed, err := time.ParseDuration(strings.TrimSpace(cfg.LLM.Timeout)); err == nil && parsed > 0 {
-		timeout = parsed
-	}
+	timeout := getEmbeddingTimeout(cfg)
 
 	maxRetries := cfg.LLM.MaxRetries
 	if maxRetries <= 0 {
@@ -89,6 +81,93 @@ func GenerateEmbeddings(ctx context.Context, cfg *config.Config, input []string,
 	}
 
 	return nil, "", lastErr
+}
+
+// GenerateEmbeddingsWithProvider generates embeddings using the explicitly selected provider.
+func GenerateEmbeddingsWithProvider(ctx context.Context, cfg *config.Config, providerName string, input []string, modelOverride string) ([][]float64, string, error) {
+	if err := validateEmbeddingConfig(cfg, input); err != nil {
+		return nil, "", err
+	}
+
+	provider, err := resolveEmbeddingProvider(cfg, providerName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	model := strings.TrimSpace(modelOverride)
+	if model == "" {
+		model = strings.TrimSpace(provider.Model)
+	}
+	if model == "" {
+		return nil, "", fmt.Errorf("embedding model is empty for provider %q", strings.TrimSpace(providerName))
+	}
+
+	return requestEmbeddings(ctx, cfg, provider, input, model, getEmbeddingTimeout(cfg))
+}
+
+func validateEmbeddingConfig(cfg *config.Config, input []string) error {
+	if cfg == nil {
+		return fmt.Errorf("configuration not loaded")
+	}
+	if len(input) == 0 {
+		return fmt.Errorf("input is required")
+	}
+	if cfg.LLM.GetProviderCount() == 0 {
+		return fmt.Errorf("no LLM providers configured")
+	}
+	return nil
+}
+
+func getEmbeddingTimeout(cfg *config.Config) time.Duration {
+	timeout := 120 * time.Second
+	if parsed, err := time.ParseDuration(strings.TrimSpace(cfg.LLM.Timeout)); err == nil && parsed > 0 {
+		timeout = parsed
+	}
+	return timeout
+}
+
+func resolveEmbeddingProvider(cfg *config.Config, providerName string) (*config.LLMProvider, error) {
+	name := strings.TrimSpace(providerName)
+	if name == "" {
+		return nil, fmt.Errorf("provider is required")
+	}
+
+	var match *config.LLMProvider
+	for i := range cfg.LLM.LLMProviders {
+		provider := &cfg.LLM.LLMProviders[i]
+		if !strings.EqualFold(strings.TrimSpace(provider.Provider), name) {
+			continue
+		}
+		if match != nil {
+			return nil, fmt.Errorf("multiple LLM providers match %q; provider names must be unique for embeddings", name)
+		}
+		match = provider
+	}
+	if match == nil {
+		return nil, fmt.Errorf("LLM provider %q is not configured (available: %s)", name, strings.Join(listEmbeddingProviders(cfg), ", "))
+	}
+	return match, nil
+}
+
+func listEmbeddingProviders(cfg *config.Config) []string {
+	seen := make(map[string]struct{}, len(cfg.LLM.LLMProviders))
+	names := make([]string, 0, len(cfg.LLM.LLMProviders))
+	for _, provider := range cfg.LLM.LLMProviders {
+		name := strings.TrimSpace(provider.Provider)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return []string{"none"}
+	}
+	return names
 }
 
 func requestEmbeddings(ctx context.Context, cfg *config.Config, provider *config.LLMProvider, input []string, model string, timeout time.Duration) ([][]float64, string, error) {

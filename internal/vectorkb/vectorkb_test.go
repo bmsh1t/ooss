@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -364,6 +365,167 @@ func TestSyncPurgesStaleDataAndIndexesCurrentDocuments(t *testing.T) {
 	require.True(t, report.Healthy)
 }
 
+func TestVectorKBUsesExplicitConfiguredProvider(t *testing.T) {
+	var wrongRequests int32
+	wrongServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&wrongRequests, 1)
+		type embeddingRequest struct {
+			Input []string `json:"input"`
+			Model string   `json:"model"`
+		}
+		var req embeddingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		resp := struct {
+			Object string `json:"object"`
+			Data   []struct {
+				Object    string    `json:"object"`
+				Embedding []float64 `json:"embedding"`
+				Index     int       `json:"index"`
+			} `json:"data"`
+			Model string `json:"model"`
+		}{
+			Object: "list",
+			Data: make([]struct {
+				Object    string    `json:"object"`
+				Embedding []float64 `json:"embedding"`
+				Index     int       `json:"index"`
+			}, 0, len(req.Input)),
+			Model: "wrong-embedding-model",
+		}
+		for i := range req.Input {
+			resp.Data = append(resp.Data, struct {
+				Object    string    `json:"object"`
+				Embedding []float64 `json:"embedding"`
+				Index     int       `json:"index"`
+			}{
+				Object:    "embedding",
+				Embedding: []float64{9, 9, 9},
+				Index:     i,
+			})
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer wrongServer.Close()
+
+	var vectorRequests int32
+	vectorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&vectorRequests, 1)
+		type embeddingRequest struct {
+			Input []string `json:"input"`
+			Model string   `json:"model"`
+		}
+		var req embeddingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		type embeddingData struct {
+			Object    string    `json:"object"`
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		}
+		resp := struct {
+			Object string          `json:"object"`
+			Data   []embeddingData `json:"data"`
+			Model  string          `json:"model"`
+		}{
+			Object: "list",
+			Data:   make([]embeddingData, 0, len(req.Input)),
+			Model:  "test-embedding-3-small",
+		}
+		for i, input := range req.Input {
+			text := strings.ToLower(input)
+			resp.Data = append(resp.Data, embeddingData{
+				Object:    "embedding",
+				Index:     i,
+				Embedding: []float64{scoreTerm(text, "sql", "union", "injection"), scoreTerm(text, "login", "auth"), scoreTerm(text, "xss", "payload", "script")},
+			})
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer vectorServer.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:            filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			DefaultProvider:   "vector-provider",
+			DefaultModel:      "test-embedding-3-small",
+			BatchSize:         8,
+			MaxIndexingChunks: 100,
+			TopK:              10,
+			HybridWeight:      0.7,
+			KeywordWeight:     0.3,
+		},
+		LLM: config.LLMConfig{
+			LLMProviders: []config.LLMProvider{
+				{
+					Provider: "wrong-provider",
+					BaseURL:  wrongServer.URL + "/embeddings",
+					Model:    "wrong-embedding-model",
+				},
+				{
+					Provider: "vector-provider",
+					BaseURL:  vectorServer.URL + "/embeddings",
+					Model:    "test-embedding-3-small",
+				},
+			},
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/acme-playbook.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "Acme Playbook",
+		ContentHash: "doc-hash-1",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "SQL Injection",
+		Content:     "Look for UNION based injection on login endpoints.",
+		ContentHash: "chunk-hash-1",
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	_, err = IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     5,
+	}, "union login injection")
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, "vector-provider", results[0].Provider)
+	require.EqualValues(t, 0, atomic.LoadInt32(&wrongRequests))
+	require.EqualValues(t, 2, atomic.LoadInt32(&vectorRequests))
+}
+
 func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {
 	t.Helper()
 
@@ -409,7 +571,7 @@ func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {
 		},
 		KnowledgeVector: config.KnowledgeVectorConfig{
 			DBPath:            filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
-			DefaultProvider:   "test-openai",
+			DefaultProvider:   "openai",
 			DefaultModel:      "test-embedding-3-small",
 			BatchSize:         8,
 			MaxIndexingChunks: 100,

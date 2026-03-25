@@ -1,34 +1,48 @@
 # =============================================================================
-# AI 语义搜索模块 - Chroma 混合检索版
+# AI 语义搜索模块 - vectorkb 混合检索版
 # =============================================================================
 # 功能：
-# - 向量搜索 (Chroma + Jina/OpenAI embeddings)
-# - BM25 关键词搜索
-# - RRF (Reciprocal Rank Fusion) 混合检索
-# - 知识库向量化索引
+# - 使用 kb vector search 进行向量召回
+# - 使用 kb search 进行关键词召回
+# - 使用本地扫描语料做轻量级关键词补充
+# - 使用 jq 融合排序，避免 Chroma/Python/runtime install 依赖
 # =============================================================================
 
 kind: module
 name: ai-semantic-search-hybrid
-description: AI-powered hybrid search with vector + BM25 + RRF fusion
+description: AI-powered hybrid search with vectorkb vector recall and keyword fusion
 
 params:
   - name: semanticIndexDir
     default: "{{Output}}/ai-analysis/semantic-index"
   - name: searchResultsOutput
     default: "{{Output}}/ai-analysis/hybrid-search-results-{{TargetSpace}}.json"
-  - name: chromaPath
-    default: "{{Output}}/ai-analysis/chroma_db"
-  - name: collectionName
-    default: "{{TargetSpace}}"
+  - name: semanticHighlightsOutput
+    default: "{{Output}}/ai-analysis/hybrid-search-highlights-{{TargetSpace}}.json"
+  - name: vectorSearchResultsOutput
+    default: "{{Output}}/ai-analysis/hybrid-vector-search-results-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchOutput
+    default: "{{Output}}/ai-analysis/hybrid-vector-kb-results-{{TargetSpace}}.json"
+  - name: knowledgeSearchOutput
+    default: "{{Output}}/ai-analysis/hybrid-knowledge-search-results-{{TargetSpace}}.json"
+  - name: scanCorpusFile
+    default: "{{semanticIndexDir}}/hybrid-scan-corpus.txt"
+  - name: scanKeywordResultsOutput
+    default: "{{Output}}/ai-analysis/hybrid-scan-keyword-results-{{TargetSpace}}.json"
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
+  - name: sharedKnowledgeWorkspace
+    default: ""
+  - name: globalKnowledgeWorkspace
+    default: "global"
   - name: knowledgeIndexFile
     default: "{{semanticIndexDir}}/knowledge-index.txt"
   - name: nucleiFile
     default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
   - name: fingerprintFile
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
   - name: maxSearchResults
     type: integer
     default: 10
@@ -38,7 +52,7 @@ params:
   - name: hybridAlpha
     type: float
     default: 0.7
-    description: "Weight for vector search (1-alpha for BM25)"
+    description: "Weight for vector recall in hybrid ranking"
   - name: searchQuery
     type: string
     default: "SQL injection vulnerabilities and misconfigurations"
@@ -48,26 +62,20 @@ params:
   - name: includeKnowledgeBase
     type: bool
     default: true
+  - name: indexExistingData
+    type: bool
+    default: true
   - name: maxKnowledgeChunks
     type: integer
     default: 200
 
-  # Embeddings 配置
+  # Optional vectorkb provider/model overrides.
   - name: embeddingsProvider
     type: string
-    default: "jina"
-  - name: jinaApiUrl
+    default: ""
+  - name: embeddingsModel
     type: string
-    default: "https://api.jina.ai/v1/embeddings"
-  - name: jinaModel
-    type: string
-    default: "jina-embeddings-v5-small-eu"
-  - name: jinaApiKey
-    type: string
-    default: "{{JINA_API_KEY}}"
-  - name: openaiApiKey
-    type: string
-    default: "{{OPENAI_API_KEY}}"
+    default: ""
 
 steps:
   - name: prepare-hybrid-index
@@ -75,52 +83,12 @@ steps:
     pre_condition: "{{enableHybridSearch}}"
     functions:
       - 'create_folder("{{semanticIndexDir}}")'
-      - 'create_folder("{{chromaPath}}")'
       - 'create_folder("{{Output}}/ai-analysis")'
-      - 'log_info("Starting hybrid search for {{Target}}")'
-
-  - name: check-chroma-available
-    type: bash
-    pre_condition: "{{enableHybridSearch}}"
-    timeout: 30s
-    command: |
-      echo "[Hybrid] Checking Chroma availability..."
-      
-      # 检查 Python 环境
-      if ! command -v python3 &> /dev/null; then
-        echo "[Hybrid] Python3 not found"
-        exit 1
-      fi
-      
-      # 检查 chromadb 包
-      if python3 -c "import chromadb" 2>/dev/null; then
-        echo "[Hybrid] Chroma SDK available"
-        CHROMA_OK=true
-      else
-        echo "[Hybrid] Chroma SDK not installed"
-        echo "[Hybrid] Installing chromadb..."
-        pip3 install --quiet chromadb || pip install --quiet chromadb
-        if python3 -c "import chromadb" 2>/dev/null; then
-          echo "[Hybrid] Chroma installed successfully"
-        else
-          echo "[Hybrid] Failed to install chromadb"
-          exit 1
-        fi
-      fi
-      
-      # 验证脚本存在
-      SCRIPT_PATH="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
-      if [ -f "$SCRIPT_PATH" ]; then
-        echo "[Hybrid] Search script found: $SCRIPT_PATH"
-      else
-        echo "[Hybrid] ERROR: Search script not found: $SCRIPT_PATH"
-        exit 1
-      fi
+      - 'log_info("Starting hybrid semantic search for {{Target}} via vectorkb")'
 
   - name: export-knowledge-corpus
     type: bash
     pre_condition: "{{enableHybridSearch}} && {{includeKnowledgeBase}}"
-    timeout: 120s
     command: |
       mkdir -p {{semanticIndexDir}}
       : > "{{knowledgeIndexFile}}"
@@ -135,284 +103,440 @@ steps:
         exit 0
       fi
 
-      "$OSM_BIN" kb export \
-        -w "{{knowledgeWorkspace}}" \
-        --limit {{maxKnowledgeChunks}} \
-        --output "{{knowledgeIndexFile}}" >/tmp/osm-kb-export-hybrid.log 2>&1 || true
+      PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
+      SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      GLOBAL_WORKSPACE="{{globalKnowledgeWorkspace}}"
+      PRIMARY_TMP="{{semanticIndexDir}}/.hybrid-knowledge-primary.txt"
+      SHARED_TMP="{{semanticIndexDir}}/.hybrid-knowledge-shared.txt"
+      GLOBAL_TMP="{{semanticIndexDir}}/.hybrid-knowledge-global.txt"
+      : > "$PRIMARY_TMP"
+      : > "$SHARED_TMP"
+      : > "$GLOBAL_TMP"
 
+      "$OSM_BIN" kb export \
+        -w "$PRIMARY_WORKSPACE" \
+        --limit {{maxKnowledgeChunks}} \
+        --output "$PRIMARY_TMP" >/tmp/osm-kb-export-hybrid.log 2>&1 || true
+
+      if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+        "$OSM_BIN" kb export \
+          -w "$SHARED_WORKSPACE" \
+          --limit {{maxKnowledgeChunks}} \
+          --output "$SHARED_TMP" >/tmp/osm-kb-export-hybrid-shared.log 2>&1 || true
+      fi
+
+      if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+        "$OSM_BIN" kb export \
+          -w "$GLOBAL_WORKSPACE" \
+          --limit {{maxKnowledgeChunks}} \
+          --output "$GLOBAL_TMP" >/tmp/osm-kb-export-hybrid-global.log 2>&1 || true
+      fi
+
+      cat "$PRIMARY_TMP" "$SHARED_TMP" "$GLOBAL_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
       KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
       echo "[Hybrid] Exported knowledge corpus: $KB_LINES chunks"
 
-  - name: index-knowledge-base
+  - name: collect-scan-corpus
     type: bash
-    pre_condition: "{{enableHybridSearch}}"
-    timeout: 300s
+    pre_condition: "{{enableHybridSearch}} && {{indexExistingData}}"
     command: |
-      echo "[Hybrid] Indexing knowledge base..."
-      
-      SKILLS_DIR="{{OsmedeusBase}}/skills"
-      COMBINED_KB="{{semanticIndexDir}}/knowledge-base-combined.txt"
-      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
-      
-      # 合并所有 skills 文件
-      : > "$COMBINED_KB"
-      
-      for skill_dir in "$SKILLS_DIR"/*/; do
-        if [ -d "$skill_dir" ]; then
-          SKILL_NAME=$(basename "$skill_dir")
-          SKILL_FILE="$skill_dir/SKILL.md"
-          
-          if [ -f "$SKILL_FILE" ]; then
-            echo "=== [$SKILL_NAME] ===" >> "$COMBINED_KB"
-            cat "$SKILL_FILE" >> "$COMBINED_KB"
-            echo "" >> "$COMBINED_KB"
-            echo "[Hybrid] Added: $SKILL_NAME"
-          fi
+      mkdir -p {{semanticIndexDir}}
+      : > "{{scanCorpusFile}}"
+
+      append_prefixed() {
+        source_file="$1"
+        prefix="$2"
+        [ -f "$source_file" ] || return 0
+        awk -v p="$prefix" 'NF { gsub(/\r/, ""); print p $0 }' "$source_file" >> "{{scanCorpusFile}}"
+      }
+
+      append_prefixed "{{nucleiFile}}" "[scan:vulns] "
+      append_prefixed "{{fingerprintFile}}" "[scan:fingerprint] "
+      append_prefixed "{{httpFile}}" "[scan:http] "
+      append_prefixed "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" "[scan:subdomains] "
+      append_prefixed "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" "[scan:endpoints] "
+
+      awk 'NF && !seen[$0]++' "{{scanCorpusFile}}" > "{{scanCorpusFile}}.tmp" && mv "{{scanCorpusFile}}.tmp" "{{scanCorpusFile}}"
+      SCAN_LINES=$(wc -l < "{{scanCorpusFile}}" 2>/dev/null || echo 0)
+      echo "[Hybrid] Scan corpus prepared: $SCAN_LINES lines"
+
+  - name: search-knowledge-db
+    type: bash
+    pre_condition: "{{enableHybridSearch}} && {{includeKnowledgeBase}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      echo '[]' > "{{knowledgeSearchOutput}}"
+      echo '[]' > "{{vectorKnowledgeSearchOutput}}"
+      echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        echo "[Hybrid] osmedeus binary not found, skipping vector knowledge search"
+        exit 0
+      fi
+
+      PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
+      SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      GLOBAL_WORKSPACE="{{globalKnowledgeWorkspace}}"
+      PRIMARY_VECTOR_JSON="{{semanticIndexDir}}/.hybrid-vector-primary.json"
+      SHARED_VECTOR_JSON="{{semanticIndexDir}}/.hybrid-vector-shared.json"
+      GLOBAL_VECTOR_JSON="{{semanticIndexDir}}/.hybrid-vector-global.json"
+      PRIMARY_JSON="{{semanticIndexDir}}/.hybrid-keyword-primary.json"
+      SHARED_JSON="{{semanticIndexDir}}/.hybrid-keyword-shared.json"
+      GLOBAL_JSON="{{semanticIndexDir}}/.hybrid-keyword-global.json"
+      VECTOR_PROVIDER="{{embeddingsProvider}}"
+      VECTOR_MODEL="{{embeddingsModel}}"
+      VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
+      if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
+        VECTOR_PROVIDER_LABEL="config-default"
+      fi
+
+      run_vector_search() {
+        workspace="$1"
+        output_file="$2"
+        log_file="$3"
+        set -- "$OSM_BIN" --json kb vector search \
+          -w "$workspace" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}}
+        if [ -n "$VECTOR_PROVIDER" ]; then
+          set -- "$@" --provider "$VECTOR_PROVIDER"
         fi
-      done
+        if [ -n "$VECTOR_MODEL" ]; then
+          set -- "$@" --model "$VECTOR_MODEL"
+        fi
+        "$@" > "$output_file" 2>"$log_file" || echo '[]' > "$output_file"
+      }
 
-      if [ -f "{{knowledgeIndexFile}}" ]; then
-        echo "=== [WORKSPACE_KNOWLEDGE] ===" >> "$COMBINED_KB"
-        cat "{{knowledgeIndexFile}}" >> "$COMBINED_KB" 2>/dev/null || true
-        echo "" >> "$COMBINED_KB"
-      fi
-      
-      KB_LINES=$(wc -l < "$COMBINED_KB" 2>/dev/null || echo 0)
-      echo "[Hybrid] Knowledge base combined: $KB_LINES lines"
-      
-      # 使用 Chroma 脚本创建索引
-      python3 "$SCRIPT" \
-        --action create \
-        --collection "{{collectionName}}" \
-        --chroma-path "{{chromaPath}}" \
-        --persist \
-        --input-file "$COMBINED_KB" \
-        --embeddings-api "{{embeddingsProvider}}" \
-        --embeddings-model "{{jinaModel}}" \
-        --embeddings-url "{{jinaApiUrl}}" \
-        --embeddings-api-key "{{jinaApiKey}}"
-      
-      INDEX_STATUS=$?
-      if [ $INDEX_STATUS -eq 0 ]; then
-        echo "[Hybrid] Knowledge base indexed successfully"
-      else
-        echo "[Hybrid] Warning: Indexing may have issues (exit code: $INDEX_STATUS)"
+      echo '[]' > "$PRIMARY_VECTOR_JSON"
+      echo '[]' > "$SHARED_VECTOR_JSON"
+      echo '[]' > "$GLOBAL_VECTOR_JSON"
+
+      run_vector_search "$PRIMARY_WORKSPACE" "$PRIMARY_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid.log
+
+      if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+        run_vector_search "$SHARED_WORKSPACE" "$SHARED_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid-shared.log
       fi
 
-  - name: index-scan-data
-    type: bash
-    pre_condition: "{{enableHybridSearch}}"
-    timeout: 300s
-    command: |
-      echo "[Hybrid] Indexing scan data..."
-      
-      SCAN_DATA="{{semanticIndexDir}}/scan-data-combined.txt"
-      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
-      : > "$SCAN_DATA"
-      
-      # 索引漏洞数据
-      if [ -f "{{nucleiFile}}" ]; then
-        echo "=== [VULNERABILITIES] ===" >> "$SCAN_DATA"
-        cat "{{nucleiFile}}" >> "$SCAN_DATA" 2>/dev/null || true
-        echo "" >> "$SCAN_DATA"
-        VULN_LINES=$(wc -l < "{{nucleiFile}}" 2>/dev/null || echo 0)
-        echo "[Hybrid] Added vulnerabilities: $VULN_LINES lines"
-      fi
-      
-      # 索引指纹数据
-      if [ -f "{{fingerprintFile}}" ]; then
-        echo "=== [FINGERPRINT] ===" >> "$SCAN_DATA"
-        cat "{{fingerprintFile}}" >> "$SCAN_DATA" 2>/dev/null || true
-        echo "" >> "$SCAN_DATA"
-      fi
-      
-      # 索引子域名
-      SUBDOMAIN_FILE="{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
-      if [ -f "$SUBDOMAIN_FILE" ]; then
-        echo "=== [SUBDOMAINS] ===" >> "$SCAN_DATA"
-        cat "$SUBDOMAIN_FILE" >> "$SCAN_DATA" 2>/dev/null || true
-        echo "" >> "$SCAN_DATA"
-      fi
-      
-      SCAN_LINES=$(wc -l < "$SCAN_DATA" 2>/dev/null || echo 0)
-      echo "[Hybrid] Scan data combined: $SCAN_LINES lines"
-      
-      # 追加到 Chroma 索引
-      if [ "$SCAN_LINES" -gt 0 ]; then
-        python3 "$SCRIPT" \
-          --action create \
-          --collection "{{collectionName}}-scan" \
-          --chroma-path "{{chromaPath}}" \
-          --persist \
-          --input-file "$SCAN_DATA" \
-          --embeddings-api "{{embeddingsProvider}}" \
-          --embeddings-model "{{jinaModel}}" \
-          --embeddings-url "{{jinaApiUrl}}" \
-          --embeddings-api-key "{{jinaApiKey}}"
-        
-        echo "[Hybrid] Scan data indexed"
+      if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+        run_vector_search "$GLOBAL_WORKSPACE" "$GLOBAL_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid-global.log
       fi
 
-  - name: hybrid-search
-    type: bash
-    pre_condition: "{{enableHybridSearch}}"
-    timeout: 120s
-    command: |
-      echo "[Hybrid] Performing hybrid search..."
-      echo "[Hybrid] Query: {{searchQuery}}"
-      echo "[Hybrid] Alpha (vector weight): {{hybridAlpha}}"
-      
-      SCRIPT="{{OsmedeusBase}}/scripts/chroma-hybrid-search.py"
-      
-      # 搜索知识库
-      echo "[Hybrid] Searching knowledge base..."
-      python3 "$SCRIPT" \
-        --action search \
-        --collection "{{collectionName}}" \
-        --chroma-path "{{chromaPath}}" \
-        --persist \
+      jq -s --argjson max_results {{maxSearchResults}} '
+        add
+        | map(
+            if type == "object" then (.source = (.source // "vector_kb")) else {"content": tostring, "source": "vector_kb"} end
+          )
+        | unique_by((.chunk_id // .id // .source_path // .title // .content // tostring))
+        | sort_by(-(.relevance_score // .score // 0))
+        | .[:$max_results]
+      ' "$PRIMARY_VECTOR_JSON" "$SHARED_VECTOR_JSON" "$GLOBAL_VECTOR_JSON" > "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{vectorKnowledgeSearchOutput}}"
+
+      "$OSM_BIN" --json kb search \
+        -w "$PRIMARY_WORKSPACE" \
         --query "{{searchQuery}}" \
-        --n-results {{maxSearchResults}} \
-        --alpha {{hybridAlpha}} \
-        --min-score {{minRelevanceScore}} \
-        --embeddings-api "{{embeddingsProvider}}" \
-        --embeddings-model "{{jinaModel}}" \
-        --embeddings-url "{{jinaApiUrl}}" \
-        --embeddings-api-key "{{jinaApiKey}}" \
-        --output "{{semanticIndexDir}}/kb-results.json"
-      
-      # 搜索扫描数据
-      echo "[Hybrid] Searching scan data..."
-      python3 "$SCRIPT" \
-        --action search \
-        --collection "{{collectionName}}-scan" \
-        --chroma-path "{{chromaPath}}" \
-        --persist \
-        --query "{{searchQuery}}" \
-        --n-results {{maxSearchResults}} \
-        --alpha {{hybridAlpha}} \
-        --min-score {{minRelevanceScore}} \
-        --embeddings-api "{{embeddingsProvider}}" \
-        --embeddings-model "{{jinaModel}}" \
-        --embeddings-url "{{jinaApiUrl}}" \
-        --embeddings-api-key "{{jinaApiKey}}" \
-        --output "{{semanticIndexDir}}/scan-results.json"
-      
-      echo "[Hybrid] Search completed"
+        --limit {{maxSearchResults}} > "$PRIMARY_JSON" 2>/tmp/osm-kb-search-hybrid.log || echo '[]' > "$PRIMARY_JSON"
+
+      echo '[]' > "$SHARED_JSON"
+      echo '[]' > "$GLOBAL_JSON"
+      if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+        "$OSM_BIN" --json kb search \
+          -w "$SHARED_WORKSPACE" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}} > "$SHARED_JSON" 2>/tmp/osm-kb-search-hybrid-shared.log || echo '[]' > "$SHARED_JSON"
+      fi
+
+      if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+        "$OSM_BIN" --json kb search \
+          -w "$GLOBAL_WORKSPACE" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}} > "$GLOBAL_JSON" 2>/tmp/osm-kb-search-hybrid-global.log || echo '[]' > "$GLOBAL_JSON"
+      fi
+
+      jq -s --argjson max_results {{maxSearchResults}} '
+        add
+        | map(
+            if type == "object" then (.source = (.source // "knowledge_keyword"))
+            else {"content": tostring, "source": "knowledge_keyword"}
+            end
+          )
+        | map(.workspace = (.workspace // .metadata.workspace // "unknown"))
+        | unique_by((.chunk_id // .id // .source_path // .title // .content // tostring))
+        | sort_by(-(.relevance_score // .score // 0))
+        | .[:$max_results]
+      ' "$PRIMARY_JSON" "$SHARED_JSON" "$GLOBAL_JSON" > "{{knowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{knowledgeSearchOutput}}"
+
+      jq -n \
+        --arg query "{{searchQuery}}" \
+        --arg provider "$VECTOR_PROVIDER" \
+        --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
+        {
+          status: "success",
+          query: $query,
+          provider: $provider,
+          total_results: ($hits[0] | length),
+          results: (
+            $hits[0]
+            | map({
+                type: (.type // "vector_match"),
+                content: (.content // .snippet // ""),
+                relevance_score: (.relevance_score // .score // 0),
+                source: (.source // "vector_kb"),
+                title: (.title // ""),
+                workspace: (.workspace // ""),
+                source_path: (.source_path // ""),
+                snippet: (.snippet // .content // "")
+              })
+          )
+        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
+
+      echo "[Hybrid] Vector KB hits: $(jq 'length' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo 0)"
+      echo "[Hybrid] Knowledge keyword hits: $(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)"
+
+  - name: keyword-search-scan-corpus
+    type: bash
+    pre_condition: "{{enableHybridSearch}} && {{indexExistingData}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      echo '[]' > "{{scanKeywordResultsOutput}}"
+
+      if [ ! -s "{{scanCorpusFile}}" ]; then
+        echo "[Hybrid] Scan corpus empty, skipping local keyword recall"
+        exit 0
+      fi
+
+      QUERY_PATTERN=$(printf '%s' "{{searchQuery}}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -cs '[:alnum:]' '\n' \
+        | awk 'length($0) >= 4 && !seen[$0]++ { print }' \
+        | head -n 12 \
+        | paste -sd'|' -)
+
+      if [ -z "$QUERY_PATTERN" ]; then
+        echo "[Hybrid] Query did not yield usable keyword terms"
+        exit 0
+      fi
+
+      grep -Ein "$QUERY_PATTERN" "{{scanCorpusFile}}" 2>/dev/null | head -n {{maxSearchResults}} > "{{semanticIndexDir}}/.hybrid-scan-keywords.txt" || true
+
+      jq -R -s '
+        split("\n")
+        | map(select(length > 0))
+        | map(
+            capture("^(?<line>[0-9]+):(?<content>.*)$")
+            | {
+                type: "scan_keyword",
+                content: .content,
+                source: "scan_index",
+                source_path: "{{scanCorpusFile}}",
+                line: (.line | tonumber),
+                score: 0.35
+              }
+          )
+      ' "{{semanticIndexDir}}/.hybrid-scan-keywords.txt" > "{{scanKeywordResultsOutput}}" 2>/dev/null || echo '[]' > "{{scanKeywordResultsOutput}}"
+
+      echo "[Hybrid] Local scan keyword hits: $(jq 'length' "{{scanKeywordResultsOutput}}" 2>/dev/null || echo 0)"
 
   - name: merge-results
     type: bash
     pre_condition: "{{enableHybridSearch}}"
     command: |
-      echo "[Hybrid] Merging results..."
-      
-      KB_RESULTS="{{semanticIndexDir}}/kb-results.json"
-      SCAN_RESULTS="{{semanticIndexDir}}/scan-results.json"
-      FINAL_OUTPUT="{{searchResultsOutput}}"
-      
-      # 构建最终结果
-      python3 << 'EOF'
-      import json
-      import sys
-      
-      try:
-        # Load knowledge base results
-        kb_data = {"results": []}
-        try:
-          with open("{{semanticIndexDir}}/kb-results.json", "r") as f:
-            kb_data = json.load(f)
-        except:
-          pass
-        
-        # Load scan results
-        scan_data = {"results": []}
-        try:
-          with open("{{semanticIndexDir}}/scan-results.json", "r") as f:
-            scan_data = json.load(f)
-        except:
-          pass
-        
-        # Merge and deduplicate
-        seen = set()
-        merged = {
-            "query": "{{searchQuery}}",
-            "target": "{{Target}}",
-            "timestamp": "",
-            "knowledge_base": {
-                "count": len(kb_data.get("results", [])),
-                "results": kb_data.get("results", [])
+      jq -n \
+        --arg query "{{searchQuery}}" \
+        --arg target "{{Target}}" \
+        --arg provider "$VECTOR_PROVIDER_LABEL" \
+        --arg ts "$(date -Iseconds)" \
+        --argjson alpha "{{hybridAlpha}}" \
+        --argjson max_results {{maxSearchResults}} \
+        --slurpfile vector_hits "{{vectorKnowledgeSearchOutput}}" \
+        --slurpfile keyword_hits "{{knowledgeSearchOutput}}" \
+        --slurpfile scan_hits "{{scanKeywordResultsOutput}}" '
+        def textify:
+          if . == null then "" else tostring end
+          | gsub("\\s+"; " ")
+          | gsub("^\\s+|\\s+$"; "");
+
+        def keyword_weight($alpha):
+          1 - $alpha;
+
+        def default_score($kind):
+          if $kind == "vector_search" then 0.72
+          elif $kind == "knowledge_base" then 0.58
+          else 0.35
+          end;
+
+        def source_bonus($kind):
+          if $kind == "vector_search" then 0.22
+          elif $kind == "knowledge_base" then 0.12
+          else 0.05
+          end;
+
+        def pick_target($item; $text):
+          (
+            $item.target
+            // $item.url
+            // $item.host
+            // $item.endpoint
+            // $item.source_path
+            // (try (($text | match("https?://[^\\s\\\"]+"; "i")).string) catch "")
+            // ""
+          ) | textify;
+
+        def pick_category($text):
+          if ($text | test("admin|dashboard|backoffice|manage"; "i")) then "admin_surface"
+          elif ($text | test("login|auth|signin|session|oauth|sso|jwt"; "i")) then "auth_surface"
+          elif ($text | test("graphql|swagger|openapi|api|endpoint"; "i")) then "api_surface"
+          elif ($text | test("idor|authorization|authz|permission|privilege|role|tenant"; "i")) then "business_logic"
+          elif ($text | test("upload|import|export|download|backup|file"; "i")) then "file_data_surface"
+          elif ($text | test("sql|ssti|rce|ssrf|xss|takeover|secret|cve|critical"; "i")) then "vulnerability_context"
+          else "general"
+          end;
+
+        def pick_severity($item; $text):
+          (($item.severity // $item.severity_hint // "") | textify | ascii_downcase) as $direct
+          | if ($direct | length) > 0 then $direct
+            elif ($text | test("critical|rce|takeover|admin access|secret"; "i")) then "critical"
+            elif ($text | test("high|login|auth|admin|graphql|swagger|sql|ssrf|ssti|upload|idor"; "i")) then "high"
+            elif ($text | test("medium|token|session|api|endpoint"; "i")) then "medium"
+            else "info"
+            end;
+
+        def pick_action($category; $text):
+          if $category == "auth_surface" then "auth_review"
+          elif $category == "admin_surface" then "admin_review"
+          elif $category == "api_surface" then "api_probe"
+          elif $category == "business_logic" then "logic_verify"
+          elif ($text | test("sql|ssti|rce|ssrf|xss|takeover|secret"; "i")) then "exploit_verify"
+          else "investigate"
+          end;
+
+        def normalize($kind):
+          (if type == "object" then . else {content: (. | tostring)} end) as $item
+          | (($item.content // $item.snippet // $item.text // $item.title // ($item | tostring)) | textify) as $text
+          | (pick_target($item; $text)) as $target
+          | (pick_category($text)) as $category
+          | (pick_severity($item; $text)) as $severity
+          | (($item.relevance_score // $item.score // default_score($kind)) | tonumber? // default_score($kind)) as $base_score
+          | (
+              if $kind == "vector_search"
+              then (($base_score * $alpha) + source_bonus($kind))
+              else (($base_score * keyword_weight($alpha)) + source_bonus($kind))
+              end
+            ) as $hybrid_score
+          | {
+              type: ($item.type // $category),
+              content: ($text[0:800]),
+              source: ($item.source // $kind),
+              source_type: $kind,
+              relevance_score: $base_score,
+              hybrid_score: $hybrid_score,
+              target: $target,
+              category: $category,
+              severity_hint: $severity,
+              action_type: pick_action($category; $text),
+              title: ($item.title // ""),
+              workspace: ($item.workspace // ($item.metadata.workspace?)),
+              source_path: ($item.source_path // ""),
+              snippet: ($item.snippet // $text[0:220])
+            };
+
+        def unique_nonempty:
+          reduce .[] as $v ([]; ($v | textify) as $s | if ($s | length) == 0 or index($s) then . else . + [$s] end);
+
+        ($vector_hits[0] // []) as $vector_doc
+        | ($keyword_hits[0] // []) as $keyword_doc
+        | ($scan_hits[0] // []) as $scan_doc
+        | ($vector_doc | map(normalize("vector_search"))) as $vector_results
+        | ($keyword_doc | map(normalize("knowledge_base"))) as $knowledge_results
+        | ($scan_doc | map(normalize("scan_index"))) as $scan_results
+        | ($vector_results + $knowledge_results + $scan_results) as $all_results
+        | (
+            $all_results
+            | sort_by(.hybrid_score, .relevance_score)
+            | reverse
+            | reduce .[] as $item ({items: [], seen: []};
+                (($item.source_path // "") + "|" + ($item.target // "") + "|" + ($item.content // "")) as $dedupe_key
+                | if (
+                    ((($item.content // "") | textify | length) == 0 and (($item.target // "") | textify | length) == 0)
+                    or (.seen | index($dedupe_key))
+                  )
+                  then .
+                  else {items: (.items + [$item]), seen: (.seen + [$dedupe_key])}
+                  end
+              ).items[:$max_results]
+          ) as $combined
+        | (
+            [
+              $combined[]
+              | select((.severity_hint == "critical") or (.severity_hint == "high"))
+              | (.target // .content // "")
+            ] | unique_nonempty | .[:8]
+          ) as $critical_findings
+        | (
+            [
+              $knowledge_results[]
+              | (.title // .snippet // .content // "")
+            ] | unique_nonempty | .[:6]
+          ) as $relevant_knowledge
+        | (
+            [
+              $combined[]
+              | "[\(.action_type // "investigate")] \(((.target // .content // "") | textify)[0:140])"
+            ] | unique_nonempty | .[:8]
+          ) as $immediate_actions
+        | {
+            query: $query,
+            target: $target,
+            timestamp: $ts,
+            provider: $provider,
+            alpha: $alpha,
+            status: (if ($combined | length) > 0 then "success" else "no_results" end),
+            vector_recall: {
+              count: ($vector_results | length),
+              results: $vector_results
             },
-            "scan_data": {
-                "count": len(scan_data.get("results", [])),
-                "results": scan_data.get("results", [])
+            knowledge_base: {
+              count: ($knowledge_results | length),
+              results: $knowledge_results
             },
-            "total_results": 0,
-            "highlights": {
-                "critical_findings": [],
-                "relevant_knowledge": [],
-                "immediate_actions": []
+            scan_data: {
+              count: ($scan_results | length),
+              results: $scan_results
+            },
+            total_results: ($combined | length),
+            results: $combined,
+            highlights: {
+              critical_findings: $critical_findings,
+              relevant_knowledge: $relevant_knowledge,
+              immediate_actions: $immediate_actions
             }
-        }
-        
-        # Extract highlights
-        all_results = kb_data.get("results", []) + scan_data.get("results", [])
-        for r in all_results:
-            content_lower = r.get("content", "").lower()
-            
-            # Critical keywords
-            if any(k in content_lower for k in ["critical", "high severity", "rce", "remote code"]):
-                merged["highlights"]["critical_findings"].append({
-                    "content": r.get("content", "")[:200],
-                    "source": r.get("id", "unknown"),
-                    "score": r.get("score", 0)
-                })
-            
-            # Actionable items
-            if any(k in content_lower for k in ["remediation", "fix", "patch", "mitigation", "suggest"]):
-                merged["highlights"]["immediate_actions"].append({
-                    "content": r.get("content", "")[:200],
-                    "source": r.get("id", "unknown")
-                })
-        
-        merged["highlights"]["critical_findings"] = merged["highlights"]["critical_findings"][:5]
-        merged["highlights"]["immediate_actions"] = merged["highlights"]["immediate_actions"][:5]
-        merged["total_results"] = len(all_results)
-        merged["status"] = "success"
-        
-        # Output
-        output_path = "{{searchResultsOutput}}"
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
-        
-        print(json.dumps({
-            "status": "success",
-            "total_results": merged["total_results"],
-            "kb_count": len(kb_data.get("results", [])),
-            "scan_count": len(scan_data.get("results", []))
-        }))
-        
-      except Exception as e:
-        print(json.dumps({"status": "error", "message": str(e)}))
-      EOF
-      
+          }
+      ' > "{{searchResultsOutput}}"
+
+      jq '.highlights // {"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[]}' "{{searchResultsOutput}}" > "{{semanticHighlightsOutput}}" 2>/dev/null || echo '{"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[]}' > "{{semanticHighlightsOutput}}"
+
       echo "[Hybrid] Results merged and saved to {{searchResultsOutput}}"
 
   - name: generate-summary
     type: bash
     pre_condition: "{{enableHybridSearch}}"
     command: |
-      echo "[Hybrid] Generating summary..."
-      
       RESULTS_FILE="{{searchResultsOutput}}"
-      
-      if [ -f "$RESULTS_FILE" ]; then
-        TOTAL=$(python3 -c "import json; print(json.load(open('$RESULTS_FILE')).get('total_results', 0))" 2>/dev/null || echo 0)
-        KB_COUNT=$(python3 -c "import json; print(json.load(open('$RESULTS_FILE')).get('knowledge_base', {}).get('count', 0))" 2>/dev/null || echo 0)
-        SCAN_COUNT=$(python3 -c "import json; print(json.load(open('$RESULTS_FILE')).get('scan_data', {}).get('count', 0))" 2>/dev/null || echo 0)
-        
+
+      if [ -f "$RESULTS_FILE" ] && jq empty "$RESULTS_FILE" >/dev/null 2>&1; then
+        TOTAL=$(jq '.total_results // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        VECTOR_COUNT=$(jq '.vector_recall.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        KB_COUNT=$(jq '.knowledge_base.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        SCAN_COUNT=$(jq '.scan_data.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+
         echo "[Hybrid] ========== Search Summary =========="
         echo "[Hybrid] Query: {{searchQuery}}"
         echo "[Hybrid] Total Results: $TOTAL"
+        echo "[Hybrid] Vector Recall Hits: $VECTOR_COUNT"
         echo "[Hybrid] Knowledge Base Hits: $KB_COUNT"
         echo "[Hybrid] Scan Data Hits: $SCAN_COUNT"
         echo "[Hybrid] Output: $RESULTS_FILE"

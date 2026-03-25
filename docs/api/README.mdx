@@ -98,12 +98,11 @@ Dependencies for richer document ingestion:
 
 - `docling` for `pdf`, `docx`, `pptx`, `xlsx`
 - `antiword` for legacy `.doc`
-- `python3` for the semantic-search helper scripts used by the AI workflow family
 
 Optional vector-search dependencies:
 
-- `JINA_API_KEY` or `OPENAI_API_KEY` to enable embeddings-backed retrieval
-- `chromadb` when running the Chroma hybrid-search fragment directly
+- at least one configured `llm.llm_providers` entry that exposes an OpenAI-compatible `/embeddings` endpoint
+- a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model` pair, or explicit provider/model overrides when calling `kb vector`
 
 The standalone vector knowledge DB defaults to `{{base_folder}}/knowledge/vector-kb.sqlite` and can be queried from both CLI and API.
 

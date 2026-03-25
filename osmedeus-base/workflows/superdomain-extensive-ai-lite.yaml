@@ -57,7 +57,7 @@ params:
   - name: enableSemanticSearch
     type: bool
     default: false
-    description: "Enable semantic search (requires Chroma)"
+    description: "Enable semantic search through vectorkb-backed retrieval"
   - name: includeKnowledgeBase
     type: bool
     default: true

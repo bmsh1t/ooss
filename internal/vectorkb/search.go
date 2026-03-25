@@ -55,7 +55,7 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		return nil, err
 	}
 
-	queryEmbeddings, _, err := illm.GenerateEmbeddings(ctx, cfg, []string{query}, model)
+	queryEmbeddings, _, err := illm.GenerateEmbeddingsWithProvider(ctx, cfg, provider, []string{query}, model)
 	if err != nil {
 		return nil, err
 	}

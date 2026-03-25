@@ -60,35 +60,17 @@ params:
   - name: useVectorSearch
     type: bool
     default: true
-    description: "Use vector embeddings for semantic search (requires API key)"
+    description: "Use vectorkb semantic retrieval"
   
-  # Embeddings Provider 配置 - 支持多 provider
+  # Optional vectorkb provider/model overrides.
   - name: embeddingsProvider
     type: string
-    default: "jina"
-    description: "Embeddings provider: jina, openai"
-  
-  # Jina AI (默认)
-  - name: jinaApiUrl
-    type: string
-    default: "https://api.jina.ai/v1/embeddings"
-  - name: jinaModel
-    type: string
-    default: "jina-embeddings-v5-text-small"
-  - name: jinaApiKey
+    default: ""
+    description: "Optional provider override; empty uses knowledge_vector.default_provider"
+  - name: embeddingsModel
     type: string
     default: ""
-  
-  # OpenAI
-  - name: openaiApiUrl
-    type: string
-    default: "https://api.openai.com/v1/embeddings"
-  - name: openaiModel
-    type: string
-    default: "text-embedding-3-small"
-  - name: openaiApiKey
-    type: string
-    default: ""
+    description: "Optional model override; empty uses knowledge_vector.default_model"
   
   - name: indexExistingData
     type: bool
@@ -133,9 +115,9 @@ steps:
     pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}}"
     log: "Loading embeddings configuration"
     functions:
-      - 'log_info("Embeddings provider: {{embeddingsProvider}}")'
-      - 'log_info("JINA_API_KEY set: no")'
-      - 'log_info("OPENAI_API_KEY set: no")'
+      - 'log_info("Embeddings provider override: {{embeddingsProvider}}")'
+      - 'log_info("Embeddings model override: {{embeddingsModel}}")'
+      - 'log_info("Semantic vector retrieval uses kb vector search with optional provider/model overrides")'
 
   - name: check-semantic-data
     type: bash
@@ -223,6 +205,7 @@ steps:
       mkdir -p {{Output}}/ai-analysis
       echo '[]' > "{{knowledgeSearchOutput}}"
       echo '[]' > "{{vectorKnowledgeSearchOutput}}"
+      echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
 
       OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
@@ -243,28 +226,42 @@ steps:
       PRIMARY_JSON="{{semanticIndexDir}}/.knowledge-search-primary.json"
       SHARED_JSON="{{semanticIndexDir}}/.knowledge-search-shared.json"
       GLOBAL_JSON="{{semanticIndexDir}}/.knowledge-search-global.json"
+      VECTOR_PROVIDER="{{embeddingsProvider}}"
+      VECTOR_MODEL="{{embeddingsModel}}"
+      VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
+      if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
+        VECTOR_PROVIDER_LABEL="config-default"
+      fi
+
+      run_vector_search() {
+        workspace="$1"
+        output_file="$2"
+        log_file="$3"
+        set -- "$OSM_BIN" --json kb vector search \
+          -w "$workspace" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}}
+        if [ -n "$VECTOR_PROVIDER" ]; then
+          set -- "$@" --provider "$VECTOR_PROVIDER"
+        fi
+        if [ -n "$VECTOR_MODEL" ]; then
+          set -- "$@" --model "$VECTOR_MODEL"
+        fi
+        "$@" > "$output_file" 2>"$log_file" || echo '[]' > "$output_file"
+      }
 
       echo '[]' > "$PRIMARY_VECTOR_JSON"
       echo '[]' > "$SHARED_VECTOR_JSON"
       echo '[]' > "$GLOBAL_VECTOR_JSON"
       if [ "{{useVectorKnowledgeDB}}" = "true" ]; then
-        "$OSM_BIN" --json kb vector search \
-          -w "$PRIMARY_WORKSPACE" \
-          --query "{{searchQuery}}" \
-          --limit {{maxSearchResults}} > "$PRIMARY_VECTOR_JSON" 2>/tmp/osm-kb-vector-search.log || echo '[]' > "$PRIMARY_VECTOR_JSON"
+        run_vector_search "$PRIMARY_WORKSPACE" "$PRIMARY_VECTOR_JSON" /tmp/osm-kb-vector-search.log
 
         if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
-          "$OSM_BIN" --json kb vector search \
-            -w "$SHARED_WORKSPACE" \
-            --query "{{searchQuery}}" \
-            --limit {{maxSearchResults}} > "$SHARED_VECTOR_JSON" 2>/tmp/osm-kb-vector-search-shared.log || echo '[]' > "$SHARED_VECTOR_JSON"
+          run_vector_search "$SHARED_WORKSPACE" "$SHARED_VECTOR_JSON" /tmp/osm-kb-vector-search-shared.log
         fi
 
         if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
-          "$OSM_BIN" --json kb vector search \
-            -w "$GLOBAL_WORKSPACE" \
-            --query "{{searchQuery}}" \
-            --limit {{maxSearchResults}} > "$GLOBAL_VECTOR_JSON" 2>/tmp/osm-kb-vector-search-global.log || echo '[]' > "$GLOBAL_VECTOR_JSON"
+          run_vector_search "$GLOBAL_WORKSPACE" "$GLOBAL_VECTOR_JSON" /tmp/osm-kb-vector-search-global.log
         fi
       fi
 
@@ -332,6 +329,31 @@ steps:
 
       VKB_HITS=$(jq 'length' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo 0)
       KB_HITS=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
+
+      jq -n \
+        --arg query "{{searchQuery}}" \
+        --arg provider "$VECTOR_PROVIDER" \
+        --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
+        {
+          status: "success",
+          query: $query,
+          provider: $provider,
+          total_results: ($hits[0] | length),
+          results: (
+            $hits[0]
+            | map({
+                type: (.type // "vector_match"),
+                content: (.content // .snippet // ""),
+                relevance_score: (.relevance_score // .score // 0),
+                source: (.source // "vector_kb"),
+                title: (.title // ""),
+                workspace: (.workspace // ""),
+                source_path: (.source_path // ""),
+                snippet: (.snippet // .content // "")
+              })
+          )
+        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
+
       echo "[Semantic] Vector KB hits: $VKB_HITS"
       echo "[Semantic] Knowledge DB merged hits: $KB_HITS"
 
@@ -450,203 +472,6 @@ steps:
       CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
       echo "[Semantic] Vector corpus prepared: $CORPUS_LINES lines"
 
-  - name: generate-data-embeddings
-    type: bash
-    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{vectorCorpusFile}}')"
-    timeout: 300s
-    command: |
-      mkdir -p {{Output}}/ai-analysis
-      
-      # 根据 provider 选择配置
-      PROVIDER="{{embeddingsProvider}}"
-      API_URL=""
-      MODEL=""
-      API_KEY=""
-      
-      case "$PROVIDER" in
-        jina)
-          API_URL="{{jinaApiUrl}}"
-          MODEL="{{jinaModel}}"
-          API_KEY="{{jinaApiKey}}"
-          [ -z "$API_KEY" ] && API_KEY="${JINA_API_KEY:-}"
-          ;;
-        openai)
-          API_URL="{{openaiApiUrl}}"
-          MODEL="{{openaiModel}}"
-          API_KEY="{{openaiApiKey}}"
-          [ -z "$API_KEY" ] && API_KEY="${OPENAI_API_KEY:-}"
-          ;;
-        *)
-          echo "[Semantic] Unknown provider: $PROVIDER"
-          exit 0
-          ;;
-      esac
-      
-      # 检查 API key - 确保不是占位符或空值
-      # 过滤掉常见的占位符格式
-      API_KEY_ACTUAL="$API_KEY"
-      if [ -z "$API_KEY_ACTUAL" ] || \
-         [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
-         [ "$API_KEY_ACTUAL" = "sk-" ]; then
-        echo "[Semantic] API key not configured for $PROVIDER, skipping vector embeddings"
-        echo "[Semantic] Please set JINA_API_KEY or OPENAI_API_KEY environment variable"
-        exit 0
-      fi
-      
-      echo "[Semantic] Using provider: $PROVIDER, URL: $API_URL, Model: $MODEL"
-      
-      # 准备数据 - 每行作为一个 embedding 单位
-      awk 'NF { print }' "{{vectorCorpusFile}}" | head -300 > "{{vectorEmbeddingsInput}}"
-      DATA=$(cat "{{vectorEmbeddingsInput}}" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0))')
-      
-      if [ -z "$DATA" ] || [ "$DATA" = "[]" ]; then
-        echo "[Semantic] No data to embed"
-        exit 0
-      fi
-      
-      # 调用 API 生成 embeddings
-      RESPONSE=$(curl -s -X POST "$API_URL" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $API_KEY" \
-        -d "{
-          \"model\": \"$MODEL\",
-          \"input\": $DATA
-        }" 2>/dev/null)
-      
-      if echo "$RESPONSE" | jq empty 2>/dev/null; then
-        echo "$RESPONSE" > {{embeddingsOutput}}
-        EMBEDDING_COUNT=$(echo "$RESPONSE" | jq '.data | length' 2>/dev/null || echo 0)
-        echo "[Semantic] Generated $EMBEDDING_COUNT embeddings with $PROVIDER"
-      else
-        echo "[Semantic] Failed to generate embeddings"
-        echo '{"error": "api_error", "data": []}' > {{embeddingsOutput}}
-      fi
-
-  - name: generate-query-embedding
-    type: bash
-    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}}"
-    timeout: 30s
-    command: |
-      mkdir -p {{Output}}/ai-analysis
-      
-      # 根据 provider 选择配置
-      PROVIDER="{{embeddingsProvider}}"
-      API_URL=""
-      MODEL=""
-      API_KEY=""
-      
-      case "$PROVIDER" in
-        jina)
-          API_URL="{{jinaApiUrl}}"
-          MODEL="{{jinaModel}}"
-          API_KEY="{{jinaApiKey}}"
-          [ -z "$API_KEY" ] && API_KEY="${JINA_API_KEY:-}"
-          ;;
-        openai)
-          API_URL="{{openaiApiUrl}}"
-          MODEL="{{openaiModel}}"
-          API_KEY="{{openaiApiKey}}"
-          [ -z "$API_KEY" ] && API_KEY="${OPENAI_API_KEY:-}"
-          ;;
-        *)
-          echo "[Semantic] Unknown provider: $PROVIDER"
-          exit 0
-          ;;
-      esac
-      
-      # 检查 API key - 确保不是占位符或空值
-      API_KEY_ACTUAL="$API_KEY"
-      if [ -z "$API_KEY_ACTUAL" ] || \
-         [ "$API_KEY_ACTUAL" = "your-api-key-here" ] || \
-         [ "$API_KEY_ACTUAL" = "sk-" ]; then
-        echo "[Semantic] API key not configured for $PROVIDER, will use LLM-based search"
-        exit 0
-      fi
-      
-      echo "[Semantic] Generating query embedding with $PROVIDER"
-      
-      # 调用 API 生成查询向量
-      RESPONSE=$(curl -s -X POST "$API_URL" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $API_KEY" \
-        -d "{
-          \"model\": \"$MODEL\",
-          \"input\": [\"{{searchQuery}}\"]
-        }" 2>/dev/null)
-      
-      if echo "$RESPONSE" | jq empty 2>/dev/null; then
-        echo "$RESPONSE" > {{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json
-        echo "[Semantic] Query embedding generated"
-      else
-        echo "[Semantic] Failed to generate query embedding"
-      fi
-
-  - name: run-vector-search
-    type: bash
-    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{vectorEmbeddingsInput}}') && file_exists('{{embeddingsOutput}}') && file_exists('{{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json')"
-    timeout: 120s
-    command: |
-      python3 << 'PY'
-      import json
-      import math
-      from pathlib import Path
-
-      embeddings_path = Path("{{embeddingsOutput}}")
-      query_path = Path("{{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json")
-      corpus_path = Path("{{vectorEmbeddingsInput}}")
-      output_path = Path("{{vectorSearchResultsOutput}}")
-      max_results = int("{{maxSearchResults}}")
-      query_text = "{{searchQuery}}"
-
-      def cosine_similarity(left, right):
-          if not left or not right or len(left) != len(right):
-              return 0.0
-          dot = sum(a * b for a, b in zip(left, right))
-          left_norm = math.sqrt(sum(a * a for a in left))
-          right_norm = math.sqrt(sum(b * b for b in right))
-          if left_norm == 0 or right_norm == 0:
-              return 0.0
-          return dot / (left_norm * right_norm)
-
-      try:
-          corpus = [line.strip() for line in corpus_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
-          embeddings = json.loads(embeddings_path.read_text(encoding="utf-8")).get("data", [])
-          query_embedding = json.loads(query_path.read_text(encoding="utf-8")).get("data", [{}])[0].get("embedding", [])
-      except Exception as exc:
-          output_path.write_text(json.dumps({
-              "status": "error",
-              "query": query_text,
-              "message": str(exc),
-              "results": [],
-              "total_results": 0
-          }, ensure_ascii=False, indent=2), encoding="utf-8")
-          raise SystemExit(0)
-
-      results = []
-      for idx, item in enumerate(embeddings[:len(corpus)]):
-          vector = item.get("embedding")
-          if not vector:
-              continue
-          content = corpus[idx]
-          score = cosine_similarity(query_embedding, vector)
-          source = "knowledge_base" if "[kb]" in content or "[workspace=" in content else "scan_index"
-          results.append({
-              "type": "vector_match",
-              "content": content[:800],
-              "relevance_score": round(score, 4),
-              "source": source
-          })
-
-      results.sort(key=lambda item: item["relevance_score"], reverse=True)
-      payload = {
-          "status": "success",
-          "query": query_text,
-          "total_results": min(len(results), max_results),
-          "results": results[:max_results],
-      }
-      output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-      PY
-
   - name: semantic-search-agent
     type: agent
     pre_condition: "{{enableSemanticSearch}}"
@@ -727,7 +552,7 @@ steps:
       jq -n \
         --arg query "{{searchQuery}}" \
         --arg ts "$(date -Iseconds)" \
-        --arg provider "{{embeddingsProvider}}" \
+        --arg provider "${VECTOR_PROVIDER_LABEL:-config-default}" \
         --argjson vulns "$VULNS_LINES" \
         --argjson tech "$TECH_LINES" \
         --argjson subdomains "$SUBDOMAIN_LINES" \
@@ -861,7 +686,7 @@ steps:
       search_output = Path("{{searchResultsOutput}}")
       query = "{{searchQuery}}"
       ts = os.environ.get("OSM_SEMANTIC_TS", "")
-      provider = "{{embeddingsProvider}}"
+      provider = "{{embeddingsProvider}}".strip() or "config-default"
       agent_status = os.environ.get("OSM_SEMANTIC_AGENT_STATUS", "missing")
       max_results = int("{{maxSearchResults}}")
 
