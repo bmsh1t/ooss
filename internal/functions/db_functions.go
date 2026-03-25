@@ -2633,7 +2633,7 @@ func (vf *vmFunc) dbImportVuln(call goja.FunctionCall) goja.Value {
 	}
 
 	// Map nuclei fields to Vulnerability model
-	vuln := mapJSONToVuln(data, workspace, jsonData)
+	vuln := mapJSONToVuln(data, workspace, jsonData, vf.currentRunUUID())
 
 	ctx := context.Background()
 
@@ -2933,7 +2933,7 @@ func (vf *vmFunc) dbImportVulnFromFile(call goja.FunctionCall) goja.Value {
 		}
 
 		// Map nuclei fields to Vulnerability model
-		vuln := mapJSONToVuln(data, workspace, line)
+		vuln := mapJSONToVuln(data, workspace, line, vf.currentRunUUID())
 		vuln.LastSeenAt = now
 
 		// Check if vulnerability already exists
@@ -2972,6 +2972,8 @@ func (vf *vmFunc) dbImportVulnFromFile(call goja.FunctionCall) goja.Value {
 				// Unchanged - only update last_seen_at
 				_, updateErr := db.NewUpdate().Model((*database.Vulnerability)(nil)).
 					Set("last_seen_at = ?", now).
+					Set("source_run_uuid = ?", vuln.SourceRunUUID).
+					Set("updated_at = ?", now).
 					Where("id = ?", existing.ID).
 					Exec(ctx)
 				if updateErr != nil {
@@ -3017,13 +3019,20 @@ func hasVulnChanged(existing, new *database.Vulnerability) bool {
 		!slicesEqual(existing.Tags, new.Tags)
 }
 
-// mapJSONToVuln maps nuclei JSON fields to Vulnerability model
-func mapJSONToVuln(data map[string]interface{}, workspace, rawLine string) database.Vulnerability {
+// mapJSONToVuln maps nuclei JSON fields to Vulnerability model.
+// The optional fourth argument carries the source run UUID when available.
+func mapJSONToVuln(data map[string]interface{}, workspace, rawLine string, sourceRunUUID ...string) database.Vulnerability {
+	runUUID := ""
+	if len(sourceRunUUID) > 0 {
+		runUUID = sourceRunUUID[0]
+	}
+
 	vuln := database.Vulnerability{
-		Workspace:   workspace,
-		RawVulnJSON: rawLine,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Workspace:     workspace,
+		RawVulnJSON:   rawLine,
+		SourceRunUUID: strings.TrimSpace(runUUID),
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	// template-id -> VulnInfo
@@ -3089,6 +3098,14 @@ func mapJSONToVuln(data map[string]interface{}, workspace, rawLine string) datab
 	}
 
 	return vuln
+}
+
+func (vf *vmFunc) currentRunUUID() string {
+	ctx := vf.getContext()
+	if ctx == nil {
+		return ""
+	}
+	return strings.TrimSpace(ctx.scanID)
 }
 
 // getAssetDiffInternal is a helper that retrieves asset diff data

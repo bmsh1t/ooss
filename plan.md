@@ -16,28 +16,51 @@
   - Lifecycle states: `new`, `triaged`, `verified`, `false_positive`, `retest`, `closed`
   - AI verdict and analyst review fields
   - Retest task creation and queue-state synchronization
+  - Automatic post-retest closure based on imported retest results
   - Workspace vulnerability board API
 - Attack chain workbench backend v1 is in place.
   - Attack-chain report persistence
   - Attack-chain import function/API
   - Summary/detail query APIs
   - Workflow fragments now write attack-chain outputs into the report store
+  - Detail API now links chains back to matching vulnerabilities and assets
+- Superdomain AI workflows are now more cohesive.
+  - `stable` and `hybrid` include attack-chain visualization
+  - `stable`, `hybrid`, `optimized`, and `lite` include post-run knowledge auto-learning
+- Current-source verification completed for this round:
+  - `make build`
+  - workflow validation for `superdomain-extensive-stable`
+  - workflow validation for `superdomain-extensive-hybrid`
+  - workflow validation for `superdomain-extensive`
+  - workflow validation for `superdomain-extensive-lite`
+  - workflow validation for `ai-knowledge-autolearn`
+- Targeted tests were added for:
+  - vulnerability retest closure
+  - source run UUID propagation in vulnerability mapping
 - Static checks completed for the current round.
   - `gofmt`
   - `git diff --check`
-  - YAML syntax validation for modified attack-chain workflow fragments
+  - YAML structure review for modified workflow fragments
 
 ## Unfinished Work
 
 ### 1. Runtime Validation
 
-- Full runtime validation is not completed yet.
+- Runtime validation is mostly closed for the modified AI workflow/backend path.
 - Not done yet:
-  - build from current source
+  - full `make test-unit` pass across the entire repository in an unrestricted host environment
   - server startup validation
   - end-to-end API verification
   - workflow execution verification against current source
   - regression pass across modified queue / vuln / attack-chain paths
+- Verified already:
+  - clean current-source build
+  - lint/validate pass for all modified superdomain AI workflows and the new knowledge auto-learn fragment
+  - targeted package/test coverage for the modified database, handler, and knowledge/URL mapping paths
+- Remaining environment blockers observed in this sandbox:
+  - tests that require local socket listeners (`httptest`)
+  - tests that require usable `tmux`
+  - tests that require local `uv` Python execution support
 - This is the highest-risk remaining gap.
 
 ### 2. Knowledge Base
@@ -60,29 +83,28 @@
 
 ### 4. Vulnerability Lifecycle Center
 
-- Current lifecycle center is backend v1.
+- Current lifecycle center is backend v1+.
 - Not done yet:
-  - automatic retest result interpretation
-  - automatic state transition from retest outputs back to `verified` / `false_positive` / `closed`
-  - stronger linkage between vulnerabilities, assets, reports, and attack chains
+  - less heuristic retest closure rules for edge cases
+  - stronger persistent linkage between vulnerabilities, reports, and attack chains
   - richer retest history timeline
 
 ### 5. Attack Chain Workbench
 
-- Current attack-chain workbench is backend/API v1.
+- Current attack-chain workbench is backend/API v1+.
 - Not done yet:
   - frontend or visual workbench page
-  - automatic linking from attack chains back to vulnerabilities/assets
+  - persistent backfill linking from attack chains back to vulnerabilities/assets
   - deeper filtering such as verified-only chain generation from stored vuln state
   - workspace-level attack-chain dashboard
 
 ### 6. Documentation
 
-- Root `README.md` has been updated.
+- Root `README.md` and `plan.md` have been updated.
 - Not done yet:
   - `docs/api/` entries for newly added campaign / vulnerability / attack-chain APIs
   - usage examples for new CLI/API capabilities
-  - workflow authoring notes for attack-chain persistence
+  - workflow authoring notes for attack-chain persistence and knowledge auto-learning
 
 ## Next Plan
 
@@ -102,26 +124,7 @@
   - attack-chain JSON generation
   - attack-chain import into database
 
-### Priority 2: Retest Result Closure
-
-- Add logic to evaluate retest results and write back vulnerability lifecycle state.
-- Target outcome:
-  - retest run completes
-  - result is inspected
-  - vulnerability transitions to an explicit post-retest state
-
-### Priority 3: Attack Chain Linking
-
-- Link attack-chain reports to:
-  - vulnerabilities
-  - related assets
-  - report references
-  - retest tasks where applicable
-- Target outcome:
-  - attack-chain report is no longer standalone data
-  - users can navigate between chain, vuln, and asset records
-
-### Priority 4: Campaign Productization
+### Priority 2: Campaign Productization
 
 - Extend campaign reporting with:
   - target risk distribution
@@ -129,20 +132,20 @@
   - rerun history
   - campaign summary export
 
-### Priority 5: Vector Knowledge Base
+### Priority 3: Vector Knowledge Base
 
 - Introduce a real embedding-based retrieval path.
 - Keep this behind a stable abstraction so the current text/document KB remains usable.
 - Limit first scope to local document corpora only.
 
-### Priority 6: Documentation Completion
+### Priority 4: Documentation Completion
 
 - Update `docs/api/`
 - Add practical examples for new APIs
-- Add operational notes for queue, retest, and attack-chain persistence
+- Add operational notes for queue, retest, attack-chain persistence, and knowledge auto-learning
 
 ## Notes
 
 - Stability is still the primary constraint.
 - Prefer backend-first, additive changes over large UI or engine rewrites.
-- Do not treat a feature as complete until runtime verification is done against the current source tree.
+- Current-source build and workflow validation are done; unrestricted-host runtime verification is still the final closure step.

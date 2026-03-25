@@ -304,8 +304,8 @@ func TestExtractHostname(t *testing.T) {
 func TestGetIP_WithRegistry(t *testing.T) {
 	registry := NewRegistry()
 
-	// Test with a well-known domain (google.com should always resolve)
-	result, err := registry.Execute(`get_ip("google.com")`, map[string]interface{}{})
+	// Use an IP literal so the test does not depend on external DNS availability.
+	result, err := registry.Execute(`get_ip("127.0.0.1")`, map[string]interface{}{})
 	require.NoError(t, err)
 	// Should return a non-empty IP string
 	ip, ok := result.(string)
@@ -313,7 +313,7 @@ func TestGetIP_WithRegistry(t *testing.T) {
 	assert.NotEmpty(t, ip, "should resolve to an IP")
 
 	// Test with URL format
-	result, err = registry.Execute(`get_ip("https://google.com/path")`, map[string]interface{}{})
+	result, err = registry.Execute(`get_ip("http://127.0.0.1/path")`, map[string]interface{}{})
 	require.NoError(t, err)
 	ip, ok = result.(string)
 	assert.True(t, ok, "result should be a string")
@@ -343,11 +343,9 @@ func TestResolveToIP(t *testing.T) {
 	result = resolveToIP("this-domain-does-not-exist-12345.invalid")
 	assert.Empty(t, result)
 
-	// Test with localhost (should resolve)
-	result = resolveToIP("localhost")
-	// localhost typically resolves to 127.0.0.1 or ::1
-	// We just check it returns something
-	assert.NotEmpty(t, result, "localhost should resolve")
+	// Test with an IP literal (should resolve without relying on external DNS)
+	result = resolveToIP("127.0.0.1")
+	assert.Equal(t, "127.0.0.1", result)
 }
 
 func TestGetParentURLImpl(t *testing.T) {

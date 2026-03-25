@@ -25,7 +25,7 @@ func (vf *vmFunc) dbImportAttackChain(call goja.FunctionCall) goja.Value {
 		return vf.errorValue(err.Error())
 	}
 
-	return vf.toValue(summary)
+	return vf.vm.ToValue(summary)
 }
 
 func optionalStringArg(args []goja.Value, index int) string {

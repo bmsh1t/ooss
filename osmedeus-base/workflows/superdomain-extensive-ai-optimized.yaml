@@ -75,6 +75,10 @@ params:
     type: bool
     default: true
     description: "Enable AI attack path planning"
+  - name: enableKnowledgeLearning
+    type: bool
+    default: true
+    description: "Write scan findings back into the local knowledge base"
 
   # ===========================================================
   # 规避检测与 WAF 感知配置
@@ -288,3 +292,11 @@ modules:
     depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
     on_error:
       - action: continue
+
+  # ===========================================================================
+  # Phase 13: Knowledge Auto-Learning
+  # ===========================================================================
+  - name: ai-knowledge-autolearn
+    path: fragments/do-ai-knowledge-autolearn.yaml
+    depends_on: [report]
+    pre_condition: "{{enableKnowledgeLearning}}"

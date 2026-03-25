@@ -3,6 +3,7 @@ package functions
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func newIPv4HTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
 
 func TestSortUnix_InPlace(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -304,7 +317,7 @@ func TestWget_EmptyOutputPath(t *testing.T) {
 
 func TestWget_RemovesExistingFile(t *testing.T) {
 	// Serve a small file
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newIPv4HTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write([]byte("new-content"))
 	}))
@@ -332,7 +345,7 @@ func TestWget_RemovesExistingFile(t *testing.T) {
 
 func TestWget_SmallFile(t *testing.T) {
 	payload := "hello-world-test-data"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newIPv4HTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write([]byte(payload))
 	}))
@@ -358,7 +371,7 @@ func TestWget_SegmentedDownload(t *testing.T) {
 	// Create a payload >1MB to trigger segmented download
 	payload := bytes.Repeat([]byte("A"), 2*1024*1024) // 2MB
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newIPv4HTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "HEAD" {
 			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 			w.Header().Set("Accept-Ranges", "bytes")
@@ -409,7 +422,7 @@ func TestWget_SegmentedDownload(t *testing.T) {
 func TestWget_FallbackNoRange(t *testing.T) {
 	payload := bytes.Repeat([]byte("B"), 2*1024*1024) // 2MB, no Range support
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newIPv4HTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// HEAD response without Accept-Ranges
 		if r.Method == "HEAD" {
 			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
@@ -440,7 +453,7 @@ func TestWget_FallbackNoRange(t *testing.T) {
 
 func TestWget_CreatesParentDirs(t *testing.T) {
 	payload := "test-parent-dir"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newIPv4HTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer ts.Close()

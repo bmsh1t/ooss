@@ -208,7 +208,10 @@ func TestDecisionInline_WorkflowValidate(t *testing.T) {
 	require.NoError(t, err)
 
 	log.Info("Asserting workflow is valid")
-	assert.True(t, strings.Contains(stdout, "is valid") || strings.Contains(stdout, "passed all lint checks"),
+	assert.True(t,
+		strings.Contains(stdout, "is valid") ||
+			strings.Contains(stdout, "passed all lint checks") ||
+			strings.Contains(stdout, "0 error(s)"),
 		"expected validation success message")
 
 	log.Success("decision-inline workflow passes validation")

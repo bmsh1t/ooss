@@ -65,10 +65,29 @@ func tmuxAvailable() bool {
 	return err == nil
 }
 
-func TestTmuxRunAndKill(t *testing.T) {
+func requireUsableTmux(t *testing.T) {
+	t.Helper()
+
 	if !tmuxAvailable() {
 		t.Skip("tmux not installed")
 	}
+
+	tmuxBin := findTmuxBin()
+	if tmuxBin == "" {
+		t.Skip("tmux binary not found")
+	}
+
+	probeName := generateTmuxSessionName()
+	cmd := exec.Command(tmuxBin, "new-session", "-d", "-s", probeName, "true")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("tmux not usable in current environment: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	_ = exec.Command(tmuxBin, "kill-session", "-t", probeName).Run()
+}
+
+func TestTmuxRunAndKill(t *testing.T) {
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 
@@ -94,9 +113,7 @@ func TestTmuxRunAndKill(t *testing.T) {
 }
 
 func TestTmuxRunWithCustomName(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 	customName := "test-tmux-custom-bosm"
@@ -110,9 +127,7 @@ func TestTmuxRunWithCustomName(t *testing.T) {
 }
 
 func TestTmuxCapture(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 
@@ -142,9 +157,7 @@ func TestTmuxCapture(t *testing.T) {
 }
 
 func TestTmuxSend(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 
@@ -164,9 +177,7 @@ func TestTmuxSend(t *testing.T) {
 }
 
 func TestTmuxRunEmptyCommand(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 	result, err := rt.Execute(`tmux_run("")`, nil)
@@ -175,9 +186,7 @@ func TestTmuxRunEmptyCommand(t *testing.T) {
 }
 
 func TestTmuxCaptureNonexistent(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 	result, err := rt.Execute(`tmux_capture("nonexistent-bosm-999")`, nil)
@@ -186,9 +195,7 @@ func TestTmuxCaptureNonexistent(t *testing.T) {
 }
 
 func TestTmuxSendNonexistent(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 	result, err := rt.Execute(`tmux_send("nonexistent-bosm-999", "echo hi")`, nil)
@@ -197,9 +204,7 @@ func TestTmuxSendNonexistent(t *testing.T) {
 }
 
 func TestTmuxKillNonexistent(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 	result, err := rt.Execute(`tmux_kill("nonexistent-bosm-999")`, nil)
@@ -208,9 +213,7 @@ func TestTmuxKillNonexistent(t *testing.T) {
 }
 
 func TestTmuxList(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 
@@ -237,9 +240,7 @@ func TestTmuxList(t *testing.T) {
 }
 
 func TestTmuxListEmpty(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 
@@ -253,9 +254,7 @@ func TestTmuxListEmpty(t *testing.T) {
 }
 
 func TestTmuxCaptureAll(t *testing.T) {
-	if !tmuxAvailable() {
-		t.Skip("tmux not installed")
-	}
+	requireUsableTmux(t)
 
 	rt := NewGojaRuntime()
 

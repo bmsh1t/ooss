@@ -82,6 +82,10 @@ params:
     type: bool
     default: true
     description: "Enable AI attack path planning"
+  - name: enableKnowledgeLearning
+    type: bool
+    default: true
+    description: "Write scan findings back into the local knowledge base"
 
   # ===========================================================
   # Agent 配置
@@ -254,6 +258,12 @@ modules:
     depends_on: [ai-vuln-validation]
     pre_condition: "{{enableAttackChain}}"
 
+  # AI 攻击链可视化 - 依赖攻击链分析输出
+  - name: ai-attack-chain-viz
+    path: fragments/do-attack-chain-visualization.yaml
+    depends_on: [ai-attack-chain]
+    pre_condition: "{{enableAttackChain}}"
+
   # AI 攻击路径规划 - 依赖攻击链分析输出
   - name: ai-path-planning
     path: fragments/do-ai-path-planning-acp.yaml
@@ -296,3 +306,11 @@ modules:
     depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
     on_error:
       - action: continue
+
+  # ===========================================================================
+  # Phase 13: Knowledge Auto-Learning
+  # ===========================================================================
+  - name: ai-knowledge-autolearn
+    path: fragments/do-ai-knowledge-autolearn.yaml
+    depends_on: [report]
+    pre_condition: "{{enableKnowledgeLearning}}"

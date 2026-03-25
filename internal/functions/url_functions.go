@@ -306,6 +306,15 @@ func resolveToIP(hostname string) string {
 		return ""
 	}
 
+	// Avoid DNS resolution for IP literals so the function is stable
+	// across environments with different resolver behavior.
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+		return ip.String()
+	}
+
 	// Use net.LookupIP for DNS resolution
 	ips, err := net.LookupIP(hostname)
 	if err != nil {

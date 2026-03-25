@@ -1,0 +1,67 @@
+# =============================================================================
+# AI 知识库自动学习模块
+# =============================================================================
+# 功能：
+# - 在扫描完成后将当前 workspace 的资产、漏洞、运行记录和 AI 分析摘要写回本地知识库
+# - 优先复用内置 `osmedeus kb learn` 能力，避免重复实现知识拼装逻辑
+# - 不让知识学习失败阻断主扫描流程
+# =============================================================================
+
+kind: module
+name: ai-knowledge-autolearn
+description: Automatically synthesize workspace findings back into the local knowledge base
+
+params:
+  - name: enableKnowledgeLearning
+    type: bool
+    default: true
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: knowledgeScope
+    default: "workspace"
+  - name: knowledgeLearnSummary
+    default: "{{Output}}/ai-analysis/knowledge-learning-{{TargetSpace}}.log"
+
+steps:
+  - name: prepare-knowledge-learning
+    type: function
+    pre_condition: "{{enableKnowledgeLearning}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Preparing knowledge auto-learning for {{knowledgeWorkspace}}")'
+
+  - name: learn-workspace-knowledge
+    type: bash
+    pre_condition: "{{enableKnowledgeLearning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        {
+          echo "[Knowledge Learn] osmedeus binary not found in PATH"
+          echo "[Knowledge Learn] Skipping automatic knowledge learning"
+        } > "{{knowledgeLearnSummary}}"
+        exit 0
+      fi
+
+      {
+        echo "[Knowledge Learn] Binary: $OSM_BIN"
+        echo "[Knowledge Learn] Workspace: {{knowledgeWorkspace}}"
+        echo "[Knowledge Learn] Scope: {{knowledgeScope}}"
+        echo "[Knowledge Learn] Started: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        "$OSM_BIN" kb learn -w "{{knowledgeWorkspace}}" --scope "{{knowledgeScope}}" --include-ai
+      } > "{{knowledgeLearnSummary}}" 2>&1 || true
+
+      echo "[Knowledge Learn] Summary saved to {{knowledgeLearnSummary}}"
+
+  - name: log-knowledge-learning-complete
+    type: function
+    pre_condition: "{{enableKnowledgeLearning}}"
+    functions:
+      - 'log_info("Knowledge auto-learning completed for {{knowledgeWorkspace}}")'

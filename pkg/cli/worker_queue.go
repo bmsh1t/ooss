@@ -605,7 +605,6 @@ func updateQueuedRunStatus(ctx context.Context, runUUID, status, errorMsg string
 		return
 	}
 	_ = database.UpdateRunStatus(ctx, runUUID, status, errorMsg)
-	_ = database.UpdateVulnerabilityRetestStatus(ctx, runUUID, status)
 }
 
 func maybeQueueCampaignDeepScan(ctx context.Context, runUUID string) {

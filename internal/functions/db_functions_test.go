@@ -408,6 +408,24 @@ func TestMapJSONToVuln(t *testing.T) {
 	assert.NotEmpty(t, vuln.RawVulnJSON)
 }
 
+func TestMapJSONToVuln_WithSourceRunUUID(t *testing.T) {
+	data := map[string]interface{}{
+		"template-id": "test-vuln",
+		"info": map[string]interface{}{
+			"name":     "Test Vulnerability",
+			"severity": "high",
+		},
+		"host": "example.com",
+		"type": "http",
+	}
+
+	vuln := mapJSONToVuln(data, "test-workspace", `{"template-id":"test-vuln"}`, "run-uuid-123")
+
+	assert.Equal(t, "run-uuid-123", vuln.SourceRunUUID)
+	assert.Equal(t, "test-workspace", vuln.Workspace)
+	assert.Equal(t, "test-vuln", vuln.VulnInfo)
+}
+
 func TestMapJSONToVuln_MatchedAtFallback(t *testing.T) {
 	data := map[string]interface{}{
 		"template-id": "test-vuln",

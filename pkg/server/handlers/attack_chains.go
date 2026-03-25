@@ -10,6 +10,7 @@ import (
 	"github.com/j3ssie/osmedeus/v5/internal/attackchain"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
+	"github.com/uptrace/bun"
 )
 
 type ImportAttackChainRequest struct {
@@ -53,6 +54,28 @@ type attackChainPath struct {
 	Path      []string `json:"path"`
 	TotalRisk string   `json:"total_risk"`
 	Weakness  string   `json:"weakness,omitempty"`
+}
+
+type linkedVulnerability struct {
+	ID         int64  `json:"id"`
+	VulnTitle  string `json:"vuln_title"`
+	Severity   string `json:"severity"`
+	VulnStatus string `json:"vuln_status"`
+	AssetValue string `json:"asset_value"`
+}
+
+type linkedAsset struct {
+	ID         int64  `json:"id"`
+	AssetValue string `json:"asset_value"`
+	URL        string `json:"url,omitempty"`
+	AssetType  string `json:"asset_type,omitempty"`
+	Source     string `json:"source,omitempty"`
+}
+
+type attackChainWorkbenchItem struct {
+	attackChainItem
+	LinkedVulnerabilities []linkedVulnerability `json:"linked_vulnerabilities,omitempty"`
+	LinkedAssets          []linkedAsset         `json:"linked_assets,omitempty"`
 }
 
 // ListAttackChains returns normalized attack-chain reports.
@@ -125,10 +148,12 @@ func GetAttackChain(cfg *config.Config) fiber.Handler {
 			chains = filtered
 		}
 
+		enrichedChains := enrichAttackChains(context.Background(), report.Workspace, chains)
+
 		return c.JSON(fiber.Map{
 			"data": fiber.Map{
 				"report":              report,
-				"chains":              chains,
+				"chains":              enrichedChains,
 				"critical_paths":      decodeAttackPaths(report.CriticalPathsJSON),
 				"execution_checklist": buildExecutionChecklist(chains),
 				"source_files": fiber.Map{
@@ -234,4 +259,108 @@ func buildExecutionChecklist(chains []attackChainItem) []string {
 		}
 	}
 	return checklist
+}
+
+func enrichAttackChains(ctx context.Context, workspace string, chains []attackChainItem) []attackChainWorkbenchItem {
+	if strings.TrimSpace(workspace) == "" || len(chains) == 0 {
+		result := make([]attackChainWorkbenchItem, 0, len(chains))
+		for _, chain := range chains {
+			result = append(result, attackChainWorkbenchItem{attackChainItem: chain})
+		}
+		return result
+	}
+
+	result := make([]attackChainWorkbenchItem, 0, len(chains))
+	for _, chain := range chains {
+		result = append(result, attackChainWorkbenchItem{
+			attackChainItem:       chain,
+			LinkedVulnerabilities: findLinkedVulnerabilities(ctx, workspace, chain),
+			LinkedAssets:          findLinkedAssets(ctx, workspace, chain),
+		})
+	}
+	return result
+}
+
+func findLinkedVulnerabilities(ctx context.Context, workspace string, chain attackChainItem) []linkedVulnerability {
+	db := database.GetDB()
+	if db == nil {
+		return nil
+	}
+
+	var vulns []database.Vulnerability
+	query := db.NewSelect().
+		Model(&vulns).
+		Column("id", "vuln_title", "severity", "vuln_status", "asset_value").
+		Where("workspace = ?", workspace)
+
+	entryName := strings.ToLower(strings.TrimSpace(chain.EntryPoint.Vulnerability))
+	entryURL := strings.TrimSpace(chain.EntryPoint.URL)
+
+	if entryName != "" {
+		query = query.Where("LOWER(vuln_title) LIKE ?", "%"+entryName+"%")
+	}
+	if entryURL != "" {
+		query = query.Where("asset_value LIKE ?", "%"+entryURL+"%")
+	}
+
+	if entryName == "" && entryURL == "" {
+		return nil
+	}
+
+	if err := query.Order("updated_at DESC").Limit(10).Scan(ctx); err != nil {
+		return nil
+	}
+
+	result := make([]linkedVulnerability, 0, len(vulns))
+	for _, vuln := range vulns {
+		result = append(result, linkedVulnerability{
+			ID:         vuln.ID,
+			VulnTitle:  vuln.VulnTitle,
+			Severity:   vuln.Severity,
+			VulnStatus: vuln.VulnStatus,
+			AssetValue: vuln.AssetValue,
+		})
+	}
+	return result
+}
+
+func findLinkedAssets(ctx context.Context, workspace string, chain attackChainItem) []linkedAsset {
+	db := database.GetDB()
+	if db == nil {
+		return nil
+	}
+
+	entryURL := strings.TrimSpace(chain.EntryPoint.URL)
+	if entryURL == "" {
+		return nil
+	}
+
+	var assets []database.Asset
+	if err := db.NewSelect().
+		Model(&assets).
+		Column("id", "asset_value", "url", "asset_type", "source").
+		Where("workspace = ?", workspace).
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				WhereOr("asset_value LIKE ?", "%"+entryURL+"%").
+				WhereOr("url LIKE ?", "%"+entryURL+"%").
+				WhereOr("external_url LIKE ?", "%"+entryURL+"%")
+		}).
+		Order("updated_at DESC").
+		Limit(10).
+		Scan(ctx); err != nil {
+		return nil
+	}
+
+	result := make([]linkedAsset, 0, len(assets))
+	for _, asset := range assets {
+		result = append(result, linkedAsset{
+			ID:         asset.ID,
+			AssetValue: asset.AssetValue,
+			URL:        asset.URL,
+			AssetType:  asset.AssetType,
+			Source:     asset.Source,
+		})
+	}
+	return result
 }

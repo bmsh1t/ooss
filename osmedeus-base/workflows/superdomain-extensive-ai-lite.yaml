@@ -58,6 +58,10 @@ params:
     type: bool
     default: false
     description: "Enable semantic search (requires Chroma)"
+  - name: enableKnowledgeLearning
+    type: bool
+    default: true
+    description: "Write scan findings back into the local knowledge base"
   - name: enableLlmCodeReview
     type: bool
     default: false
@@ -216,3 +220,11 @@ modules:
     depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
     on_error:
       - action: continue
+
+  # ===========================================================================
+  # Phase 12: Knowledge Auto-Learning
+  # ===========================================================================
+  - name: ai-knowledge-autolearn
+    path: fragments/do-ai-knowledge-autolearn.yaml
+    depends_on: [report]
+    pre_condition: "{{enableKnowledgeLearning}}"

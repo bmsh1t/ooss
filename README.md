@@ -29,6 +29,7 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
 - **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, and workspace risk boards
 - **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report
+- **Superdomain AI Workflow Family** - `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
 - **Event-Driven Scheduling** - Cron, file-watch, and event triggers with filtering, deduplication, and delayed task queues
 - **Agentic LLM Steps** - Tool-calling agent loops with sub-agent orchestration, memory management, and structured output; plus ACP subprocess agents (Claude Code, Codex, OpenCode, Gemini)
 - **Cloud Infrastructure** - Provision and run scans across DigitalOcean, AWS, GCP, Linode, and Azure with cost controls and automatic cleanup
@@ -104,6 +105,12 @@ osmedeus kb ingest -p ./notes -w example.com --recursive
 osmedeus kb search -q "jwt bypass" -w example.com
 osmedeus kb learn -w example.com
 
+# AI-heavy recon workflows
+osmedeus run -f superdomain-extensive-stable -t example.com
+osmedeus run -f superdomain-extensive-hybrid -t example.com
+osmedeus run -f superdomain-extensive -t example.com
+osmedeus run -f superdomain-extensive-lite -t example.com
+
 # Worker management
 osmedeus worker status                          # Show workers
 osmedeus worker eval -e 'ssh_exec("host", "whoami")'  # Eval with distributed hooks
@@ -137,6 +144,14 @@ osmedeus --usage-example
   - `GET /osm/api/attack-chains`
   - `GET /osm/api/attack-chains/:id`
   - `POST /osm/api/attack-chains/import`
+- **Superdomain AI workflow closure**
+  - `stable` and `hybrid` now generate persisted attack-chain visualization artifacts in addition to the attack-chain report
+  - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
+  - Retest lifecycle now propagates source run UUIDs so post-retest state can converge back to `verified`, `closed`, or `triaged`
+- **Verification snapshot**
+  - Current source builds successfully with `make build`
+  - `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, `superdomain-extensive`, `superdomain-extensive-lite`, and `ai-knowledge-autolearn` all pass workflow validation
+  - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support
 
 ## Docker
 

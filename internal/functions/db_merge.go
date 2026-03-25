@@ -1,6 +1,10 @@
 package functions
 
-import "github.com/j3ssie/osmedeus/v5/internal/database"
+import (
+	"time"
+
+	"github.com/j3ssie/osmedeus/v5/internal/database"
+)
 
 // mergeString returns incoming if non-empty, otherwise existing.
 func mergeString(existing, incoming string) string {
@@ -34,6 +38,22 @@ func mergeBool(existing, incoming bool) bool {
 // mergeStringSlice returns incoming if non-nil and non-empty, otherwise existing.
 func mergeStringSlice(existing, incoming []string) []string {
 	if len(incoming) > 0 {
+		return incoming
+	}
+	return existing
+}
+
+// mergeTime returns incoming if non-zero, otherwise existing.
+func mergeTime(existing, incoming time.Time) time.Time {
+	if !incoming.IsZero() {
+		return incoming
+	}
+	return existing
+}
+
+// mergeTimePtr returns incoming if non-nil, otherwise existing.
+func mergeTimePtr(existing, incoming *time.Time) *time.Time {
+	if incoming != nil {
 		return incoming
 	}
 	return existing
@@ -116,6 +136,22 @@ func mergeVulnFields(existing, incoming *database.Vulnerability) {
 	incoming.DetailHTTPRequest = mergeString(existing.DetailHTTPRequest, incoming.DetailHTTPRequest)
 	incoming.DetailHTTPResponse = mergeString(existing.DetailHTTPResponse, incoming.DetailHTTPResponse)
 	incoming.RawVulnJSON = mergeString(existing.RawVulnJSON, incoming.RawVulnJSON)
+
+	// Lifecycle, review, and linkage fields
+	incoming.VulnStatus = mergeString(existing.VulnStatus, incoming.VulnStatus)
+	incoming.SourceRunUUID = mergeString(existing.SourceRunUUID, incoming.SourceRunUUID)
+	incoming.AIVerdict = mergeString(existing.AIVerdict, incoming.AIVerdict)
+	incoming.AISummary = mergeString(existing.AISummary, incoming.AISummary)
+	incoming.AnalystVerdict = mergeString(existing.AnalystVerdict, incoming.AnalystVerdict)
+	incoming.AnalystNotes = mergeString(existing.AnalystNotes, incoming.AnalystNotes)
+	incoming.RetestStatus = mergeString(existing.RetestStatus, incoming.RetestStatus)
+	incoming.RetestRunUUID = mergeString(existing.RetestRunUUID, incoming.RetestRunUUID)
+	incoming.AttackChainRef = mergeString(existing.AttackChainRef, incoming.AttackChainRef)
+	incoming.RelatedAssets = mergeStringSlice(existing.RelatedAssets, incoming.RelatedAssets)
+	incoming.ReportRefs = mergeStringSlice(existing.ReportRefs, incoming.ReportRefs)
+	incoming.VerifiedAt = mergeTimePtr(existing.VerifiedAt, incoming.VerifiedAt)
+	incoming.ClosedAt = mergeTimePtr(existing.ClosedAt, incoming.ClosedAt)
+	incoming.LastSeenAt = mergeTime(existing.LastSeenAt, incoming.LastSeenAt)
 }
 
 // mergePortAssetFields merges port-specific fields from incoming to existing

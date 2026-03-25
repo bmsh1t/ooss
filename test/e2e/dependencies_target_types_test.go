@@ -32,10 +32,11 @@ func TestRun_DependencyTargetTypes_RejectsOther(t *testing.T) {
 	log.Step("Testing dependencies.target_types rejects non-matching target")
 
 	workflowPath := getTestdataPath(t)
-	_, stderr, err := runCLIWithLog(t, log, "run", "-m", "test-target-types", "-t", "not-a-domain", "--dry-run", "-F", workflowPath)
+	stdout, stderr, err := runCLIWithLog(t, log, "run", "-m", "test-target-types", "-t", "not-a-domain", "--dry-run", "-F", workflowPath)
+	combined := stdout + "\n" + stderr
 	assert.Error(t, err)
-	assert.Contains(t, stderr, "dependency")
-	assert.Contains(t, stderr, "required types")
+	assert.Contains(t, combined, "Target type mismatch")
+	assert.Contains(t, combined, "Required Params")
 }
 
 // Tests for comma-separated types in dependencies.variables

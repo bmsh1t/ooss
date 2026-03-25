@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func newIPv4TestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
 
 func TestNewScheduleClient(t *testing.T) {
 	cfg := &config.Config{
@@ -36,7 +49,7 @@ func TestScheduleClient_SetBaseURL(t *testing.T) {
 
 func TestScheduleClient_IsServerAvailable(t *testing.T) {
 	t.Run("server available", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/osm/server-info", r.URL.Path)
 			w.WriteHeader(http.StatusOK)
 		}))
@@ -50,7 +63,7 @@ func TestScheduleClient_IsServerAvailable(t *testing.T) {
 	})
 
 	t.Run("server unavailable", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
 		defer server.Close()
@@ -83,7 +96,7 @@ func TestScheduleClient_RegisterCronTrigger(t *testing.T) {
 	}
 
 	t.Run("success - 201 created", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/osm/api/schedules", r.URL.Path)
 			assert.Equal(t, "POST", r.Method)
 			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
@@ -116,7 +129,7 @@ func TestScheduleClient_RegisterCronTrigger(t *testing.T) {
 	})
 
 	t.Run("success - 409 conflict (schedule exists)", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"error": true, "message": "schedule already exists"}`))
 		}))
@@ -132,7 +145,7 @@ func TestScheduleClient_RegisterCronTrigger(t *testing.T) {
 	})
 
 	t.Run("failure - 400 bad request", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error": true, "message": "invalid request"}`))
 		}))
@@ -183,7 +196,7 @@ func TestRunClient_SetBaseURL(t *testing.T) {
 
 func TestRunClient_IsServerAvailable(t *testing.T) {
 	t.Run("server available", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/server-info", r.URL.Path)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"version": "5.0.0"}`))
@@ -198,7 +211,7 @@ func TestRunClient_IsServerAvailable(t *testing.T) {
 	})
 
 	t.Run("server unavailable", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
 		defer server.Close()
@@ -221,7 +234,7 @@ func TestRunClient_IsServerAvailable(t *testing.T) {
 
 func TestRunClient_CreateRun(t *testing.T) {
 	t.Run("success - 202 accepted", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/osm/api/runs", r.URL.Path)
 			assert.Equal(t, "POST", r.Method)
 			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
@@ -273,7 +286,7 @@ func TestRunClient_CreateRun(t *testing.T) {
 	})
 
 	t.Run("failure - 400 bad request", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error": true, "message": "Invalid priority"}`))
 		}))
@@ -297,7 +310,7 @@ func TestRunClient_CreateRun(t *testing.T) {
 	})
 
 	t.Run("failure - 404 workflow not found", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error": true, "message": "Workflow not found"}`))
 		}))
@@ -337,7 +350,7 @@ func TestRunClient_CreateRun(t *testing.T) {
 	})
 
 	t.Run("success - multiple targets", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var req CreateRunRequest
 			err := json.NewDecoder(r.Body).Decode(&req)
 			require.NoError(t, err)

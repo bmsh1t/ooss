@@ -4072,6 +4072,90 @@ func UpdateVulnerabilityRetestStatus(ctx context.Context, retestRunUUID, retestS
 	return nil
 }
 
+// FinalizeVulnerabilityRetest syncs the owning vulnerability when a retest run changes state.
+func FinalizeVulnerabilityRetest(ctx context.Context, retestRunUUID, runStatus string) error {
+	if db == nil || strings.TrimSpace(retestRunUUID) == "" || strings.TrimSpace(runStatus) == "" {
+		return nil
+	}
+
+	var vuln Vulnerability
+	if err := db.NewSelect().
+		Model(&vuln).
+		Where("retest_run_uuid = ?", retestRunUUID).
+		Limit(1).
+		Scan(ctx); err != nil {
+		return nil
+	}
+
+	now := time.Now()
+	status := strings.ToLower(strings.TrimSpace(runStatus))
+
+	switch status {
+	case "queued", "running":
+		vuln.RetestStatus = status
+		vuln.UpdatedAt = now
+		return UpdateVulnerabilityRecord(ctx, &vuln)
+	case "failed", "cancelled":
+		vuln.RetestStatus = status
+		vuln.VulnStatus = "retest"
+		vuln.ClosedAt = nil
+		vuln.UpdatedAt = now
+		vuln.AISummary = appendRetestSummary(vuln.AISummary, fmt.Sprintf("Retest run %s.", status))
+		return UpdateVulnerabilityRecord(ctx, &vuln)
+	case "completed":
+		importedCount, err := db.NewSelect().
+			Model((*Vulnerability)(nil)).
+			Where("workspace = ?", vuln.Workspace).
+			Where("source_run_uuid = ?", retestRunUUID).
+			Count(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate retest results: %w", err)
+		}
+
+		vuln.RetestStatus = "completed"
+		vuln.UpdatedAt = now
+
+		switch {
+		case strings.TrimSpace(vuln.SourceRunUUID) == retestRunUUID:
+			vuln.VulnStatus = "verified"
+			if vuln.VerifiedAt == nil {
+				vuln.VerifiedAt = &now
+			}
+			vuln.ClosedAt = nil
+			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed and this finding was reproduced in the retest run.")
+		case importedCount > 0:
+			vuln.VulnStatus = "closed"
+			if vuln.ClosedAt == nil {
+				vuln.ClosedAt = &now
+			}
+			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed and this finding was not reproduced, while other findings were imported from the same run.")
+		default:
+			vuln.VulnStatus = "triaged"
+			vuln.ClosedAt = nil
+			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed without imported findings from this run; manual review is still required.")
+		}
+
+		return UpdateVulnerabilityRecord(ctx, &vuln)
+	default:
+		return nil
+	}
+}
+
+func appendRetestSummary(existing, summary string) string {
+	existing = strings.TrimSpace(existing)
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return existing
+	}
+	if existing == "" {
+		return summary
+	}
+	if strings.Contains(existing, summary) {
+		return existing
+	}
+	return existing + "\n" + summary
+}
+
 // DeleteVulnerabilityByID deletes a vulnerability by ID
 func DeleteVulnerabilityByID(ctx context.Context, id int64) error {
 	if db == nil {
@@ -4404,6 +4488,10 @@ func UpdateRunStatus(ctx context.Context, runUUID, status, errorMessage string) 
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		return fmt.Errorf("run not found")
+	}
+
+	if err := FinalizeVulnerabilityRetest(ctx, runUUID, status); err != nil {
+		return err
 	}
 
 	return nil
