@@ -1,0 +1,32 @@
+knowledgeWorkspace: "{{TargetSpace}}"
+sharedKnowledgeWorkspace: "shared-web"
+globalKnowledgeWorkspace: "global"
+
+enableSemanticSearch: true
+includeKnowledgeBase: true
+enablePostVulnSemanticSearch: true
+
+enableVulnValidation: true
+enableAttackChain: true
+enablePathPlanning: true
+enableRetestPlanning: true
+enableOperatorQueue: true
+enableCampaignHandoff: true
+
+enableKnowledgeLearning: true
+
+maxKnowledgeChunks: 400
+maxSearchResults: 12
+minRelevanceScore: 0.7
+
+retestFlow: "web-analysis"
+retestWorkflowKind: "flow"
+retestPriority: "high"
+
+campaignWorkflow: "web-analysis"
+campaignWorkflowKind: "flow"
+campaignPriority: "high"
+campaignAutoDeepScan: false
+campaignDeepScanWorkflow: ""
+campaignDeepScanWorkflowKind: "flow"
+campaignHighRiskSeverities: "critical,high"

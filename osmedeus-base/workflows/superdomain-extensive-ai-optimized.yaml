@@ -110,9 +110,11 @@ params:
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
   - name: sharedKnowledgeWorkspace
+    default: ""
+  - name: globalKnowledgeWorkspace
     default: "global"
   - name: retestFlow
-    default: "web-classic"
+    default: "web-analysis"
   - name: retestWorkflowKind
     default: "flow"
   - name: retestPriority
@@ -183,6 +185,8 @@ params:
     default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
   - name: campaignCreateOutput
     default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: followupDecisionOutput
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
 
 # -----------------------------------------------------------------------------
 # MODULES SECTION
@@ -285,6 +289,7 @@ modules:
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
       searchQuery: "Admin panels, authentication flows, high-value endpoints, exposed services, and tech-specific exploitation ideas"
 
@@ -312,8 +317,12 @@ modules:
   # AI 攻击链分析 - 依赖 ai-vuln-validation 的输出
   - name: ai-attack-chain
     path: fragments/do-ai-attack-chain.yaml
-    depends_on: [ai-vuln-validation]
+    depends_on: [ai-vuln-validation, ai-semantic-search]
     pre_condition: "{{enableAttackChain}}"
+    params:
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # AI 攻击链可视化 - 依赖攻击链分析输出
   - name: ai-attack-chain-viz
@@ -324,8 +333,12 @@ modules:
   # AI 攻击路径规划 - 依赖 ai-attack-chain 的输出
   - name: ai-path-planning
     path: fragments/do-ai-path-planning.yaml
-    depends_on: [ai-attack-chain]
+    depends_on: [ai-attack-chain, ai-semantic-search]
     pre_condition: "{{enablePathPlanning}}"
+    params:
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # AI 漏洞后语义搜索 - 基于 vuln-suite 结果再次拉取可利用上下文
   - name: ai-post-vuln-semantic-search
@@ -342,6 +355,7 @@ modules:
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
       searchQuery: "Confirmed findings, exploit chains, auth bypass, pivot paths, retest payloads, and post-validation exploitation guidance"
 
@@ -355,6 +369,10 @@ modules:
       semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
       initialSemanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
       initialSemanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+      initialKnowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+      initialVectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # AI 决策应用 - 将 intelligent-analysis 产出的决策配置写入环境
   - name: ai-apply-decision
@@ -375,12 +393,15 @@ modules:
   # ===========================================================================
   - name: ai-retest-planning
     path: fragments/do-ai-retest-planning.yaml
-    depends_on: [ai-apply-decision, ai-path-planning, ai-attack-chain]
+    depends_on: [ai-apply-decision, ai-path-planning, ai-attack-chain, ai-post-vuln-semantic-search]
     pre_condition: "{{enableRetestPlanning}}"
     params:
       retestPlanOutput: "{{retestPlanOutput}}"
       retestFlow: "{{retestFlow}}"
       retestPriority: "{{retestPriority}}"
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
 
   - name: ai-operator-queue
     path: fragments/do-ai-operator-queue.yaml
@@ -425,12 +446,19 @@ modules:
       retestPriority: "{{retestPriority}}"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
 
+  - name: ai-post-followup-coordination
+    path: fragments/do-ai-post-followup-coordination.yaml
+    depends_on: [ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
+    pre_condition: "{{enableLlmAnalysis}}"
+    params:
+      followupDecisionOutput: "{{followupDecisionOutput}}"
+
   # ===========================================================================
   # Phase 12: Final Report
   # ===========================================================================
   - name: report
     path: common/10-report.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue, ai-post-followup-coordination]
     on_error:
       - action: continue
 

@@ -1,13 +1,15 @@
 ---
 title: "Knowledge Base"
-description: "Ingest local documents, search knowledge chunks, and auto-learn workspace findings"
+description: "Ingest local documents, search knowledge chunks, auto-learn workspace findings, and use the standalone vector knowledge DB"
 ---
 
 # Knowledge Base
 
 The local knowledge base lets you ingest local files into `knowledge_documents` and `knowledge_chunks`, search them from CLI or API, and synthesize workspace findings back into reusable knowledge.
 
-It is also consumed by the `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` workflow family during semantic search.
+For semantic retrieval, Osmedeus now also supports a standalone vector SQLite database, defaulting to `{{base_folder}}/knowledge/vector-kb.sqlite`. This keeps vector embeddings portable and reusable across workflows without mixing them into the main relational DB tables.
+
+It is also consumed by `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` during semantic search.
 
 ## Supported Document Types
 
@@ -32,9 +34,28 @@ It is also consumed by the `superdomain-extensive-ai-{stable,hybrid,optimized,li
 ## Optional Dependencies
 
 - `JINA_API_KEY` or `OPENAI_API_KEY`
-  - Enables embeddings-backed semantic retrieval in the AI workflows
+  - Enables embeddings-backed semantic retrieval in the AI workflows and vector knowledge indexing/search
 - `chromadb`
   - Needed only when running the `ai-semantic-search-hybrid` fragment directly
+
+## Vector Knowledge Config
+
+```yaml
+knowledge_vector:
+  enabled: true
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+  default_provider: openai
+  default_model: text-embedding-3-small
+  auto_index_on_ingest: true
+  auto_index_on_learn: true
+  top_k: 20
+  hybrid_weight: 0.7
+  keyword_weight: 0.3
+  batch_size: 32
+  max_indexing_chunks: 5000
+```
+
+When `auto_index_on_ingest` or `auto_index_on_learn` is enabled, successful `kb ingest` and `kb learn` operations automatically refresh the standalone vector DB.
 
 ---
 
@@ -175,6 +196,71 @@ curl -X POST http://localhost:8002/osm/api/knowledge/learn \
 
 ---
 
+## Index into the Standalone Vector DB
+
+Trigger indexing from the main knowledge tables into `vector-kb.sqlite`.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/vector/index \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace": "example.com",
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "max_chunks": 500
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `workspace` | string | No | Restrict indexing to a single workspace; empty indexes all workspaces |
+| `provider` | string | No | Override configured embedding provider |
+| `model` | string | No | Override configured embedding model |
+| `max_chunks` | int | No | Maximum chunks to index in this run |
+
+---
+
+## Search the Standalone Vector DB
+
+Perform semantic search directly against `vector-kb.sqlite`.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace": "example.com",
+    "query": "authentication bypass",
+    "limit": 10
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `workspace` | string | No | Restrict search to a workspace |
+| `query` | string | Yes | Natural-language semantic query |
+| `provider` | string | No | Override configured embedding provider |
+| `model` | string | No | Override configured embedding model |
+| `limit` | int | No | Maximum hits to return |
+
+---
+
+## Get Vector DB Stats
+
+```bash
+curl http://localhost:8002/osm/api/knowledge/vector/stats \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+This returns the vector DB path, document count, chunk count, embedding count, indexed workspaces, and active provider/model combinations.
+
+---
+
 ## Workflow Integration
 
 For the AI workflow family, the default knowledge workspace is `{{TargetSpace}}`.
@@ -182,5 +268,7 @@ For the AI workflow family, the default knowledge workspace is `{{TargetSpace}}`
 Recommended flow:
 
 1. Ingest your PDFs, markdown notes, ebooks, or vendor docs into the same workspace name you scan with.
-2. Run `superdomain-extensive-ai-hybrid` or `superdomain-extensive-ai-stable`.
-3. The workflow will export knowledge chunks, perform direct knowledge search, include those chunks in vector retrieval when embeddings are configured, and run post-report `kb learn` for reuse in future runs.
+2. Let Osmedeus auto-index them into `vector-kb.sqlite`, or trigger `/knowledge/vector/index` manually.
+3. Run `superdomain-extensive-hybrid`, `superdomain-extensive-stable`, `superdomain-extensive`, or `superdomain-extensive-lite`.
+4. The workflow will perform direct `kb vector search`, merge that with direct `kb search` keyword hits, still export chunks into the semantic corpus, and run post-report `kb learn` for reuse in future runs.
+5. During the AI closure, the workflow also writes a normalized `applied-ai-decision-<workspace>.json`, feeds targeted rescan findings back into the main vuln result set, and emits a `followup-decision-<workspace>.json` package after retest/operator/campaign coordination.

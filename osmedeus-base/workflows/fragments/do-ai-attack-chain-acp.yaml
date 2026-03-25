@@ -50,6 +50,12 @@ params:
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: confirmedUrlsFile
     default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: knowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
   - name: osintFile
     default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
 
@@ -185,6 +191,15 @@ steps:
           ## 已确认可利用的 URL
           请使用 read_lines 工具读取 {{confirmedUrlsFile}}
 
+          ## 早期语义搜索结果
+          请使用 read_lines 工具读取 {{semanticSearchFile}}
+
+          ## 知识库命中
+          请使用 read_lines 工具读取 {{knowledgeSearchFile}}
+
+          ## 直接 vector-kb 命中
+          请使用 read_lines 工具读取 {{vectorKnowledgeSearchFile}}
+
           请输出 JSON 格式的攻击链分析保存到 {{attackChainOutput}}：
           ```json
           {
@@ -233,6 +248,11 @@ steps:
           ```
 
           只输出 JSON，确保格式完全正确。
+          
+          额外要求：
+          - 如果 validated finding、semantic result、knowledge/vector 命中同时指向同一 URL、同一入口或同一产品弱点，要把它视为高优先级攻击链入口
+          - 不要编造不存在的中间条件
+          - 更偏向真实可落地的链路，而不是理论最复杂的链路
 
     exports:
       attack_chain_json: "{{acp_output}}"

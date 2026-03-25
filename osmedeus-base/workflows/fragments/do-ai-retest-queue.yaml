@@ -7,7 +7,7 @@ params:
     type: bool
     default: false
   - name: retestFlow
-    default: "web-classic"
+    default: "web-analysis"
   - name: retestWorkflowKind
     default: "flow"
   - name: retestPriority

@@ -21,10 +21,16 @@ params:
     default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
   - name: attackChainFile
     default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: followupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: reportDir
     default: "{{Output}}/report"
   - name: vulnDbFile
     default: "{{Output}}/report/vuln.db"
+  - name: enhancedSummaryFile
+    default: "{{Output}}/report/enhanced-summary-{{TargetSpace}}.md"
 
 steps:
   - name: prepare-report
@@ -103,6 +109,32 @@ steps:
       echo "  end" >> "{{reportDir}}/topology.mmd"
       echo "  A --> B" >> "{{reportDir}}/topology.mmd"
       echo "[Mermaid] Topology done"
+
+  - name: write-enhanced-summary
+    type: bash
+    command: |
+      TOTAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;" 2>/dev/null || echo 0)
+      CRITICAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='critical';" 2>/dev/null || echo 0)
+      HIGH=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='high';" 2>/dev/null || echo 0)
+      FOLLOWUP_PHASE=$(jq -r '.execution_feedback.next_phase // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+
+      {
+        echo "# Enhanced Report Summary"
+        echo ""
+        echo "- Target: {{Target}}"
+        echo "- Total vulnerabilities: $TOTAL"
+        echo "- Critical: $CRITICAL"
+        echo "- High: $HIGH"
+        echo "- Next follow-up phase: $FOLLOWUP_PHASE"
+        echo ""
+        echo "## Artifacts"
+        echo "- CSV: {{reportDir}}/vulns-{{TargetSpace}}.csv"
+        echo "- Vulnerability DB: {{vulnDbFile}}"
+        echo "- Mermaid distribution: {{reportDir}}/vuln-dist.mmd"
+        echo "- Mermaid topology: {{reportDir}}/topology.mmd"
+        echo "- Applied AI decision: {{appliedDecisionFile}}"
+        echo "- Follow-up decision: {{followupDecisionFile}}"
+      } > "{{enhancedSummaryFile}}"
 
   - name: log-complete
     type: function

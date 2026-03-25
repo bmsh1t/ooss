@@ -395,6 +395,9 @@ func (s *Server) setupRoutes() {
 	api.Post("/knowledge/ingest", handlers.IngestKnowledge(s.config))
 	api.Post("/knowledge/search", handlers.SearchKnowledge(s.config))
 	api.Post("/knowledge/learn", handlers.LearnKnowledge(s.config))
+	api.Post("/knowledge/vector/index", handlers.IndexVectorKnowledge(s.config))
+	api.Post("/knowledge/vector/search", handlers.SearchVectorKnowledge(s.config))
+	api.Get("/knowledge/vector/stats", handlers.VectorKnowledgeStats(s.config))
 
 	// Distributed endpoints (only available when running in master mode)
 	if s.options.Master != nil {

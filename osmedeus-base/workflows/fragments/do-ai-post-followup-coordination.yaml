@@ -1,0 +1,230 @@
+kind: module
+name: ai-post-followup-coordination
+description: Aggregate follow-up execution outputs into a final AI decision package for reporting and downstream reuse
+
+params:
+  - name: followupDecisionOutput
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: followupDecisionMd
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.md"
+  - name: followupPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/followup-priority-targets-{{TargetSpace}}.txt"
+  - name: followupFocusAreasFile
+    default: "{{Output}}/ai-analysis/followup-focus-areas-{{TargetSpace}}.txt"
+
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueOutput
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: campaignHandoffOutput
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignCreateOutput
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: retestQueueSummary
+    default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
+  - name: rescanOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-rescan-{{TargetSpace}}.jsonl"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: operatorQueueTargetsFile
+    default: "{{Output}}/ai-analysis/operator-queue-targets-{{TargetSpace}}.txt"
+  - name: retestTargetsFile
+    default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+  - name: campaignTargetsFile
+    default: "{{Output}}/ai-analysis/campaign-targets-{{TargetSpace}}.txt"
+
+  - name: enablePostFollowupCoordination
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-post-followup
+    type: function
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Preparing post-followup coordination for {{Target}}")'
+
+  - name: build-post-followup-decision
+    type: bash
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+      fi
+
+      BASE_FOCUS_JSON='[]'
+      BASE_RESCAN_JSON='[]'
+      BASE_REASONING="no_base_decision"
+      BASE_PROFILE="focused"
+      BASE_SEVERITY="critical,high"
+      if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        BASE_FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        BASE_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        BASE_REASONING=$(jq -r '.reasoning // "ai-decision-loaded"' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo "ai-decision-loaded")
+        BASE_PROFILE=$(jq -r '.scan.profile // "focused"' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo "focused")
+        BASE_SEVERITY=$(jq -r '.scan.severity // .nuclei_severity // "critical,high"' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo "critical,high")
+      fi
+
+      RETEST_TARGETS_JSON='[]'
+      RETEST_COUNT=0
+      if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
+        RETEST_TARGETS_JSON=$(jq -c '[.targets[]?.target, .automation_queue[]?.target] | map(select(. != null and . != "")) | unique' "{{retestPlanOutput}}" 2>/dev/null || echo '[]')
+        RETEST_COUNT=$(jq -r '.summary.total_targets // ([.targets[]?] | length) // 0' "{{retestPlanOutput}}" 2>/dev/null || echo 0)
+      fi
+
+      OPERATOR_TARGETS_JSON='[]'
+      OPERATOR_TASKS=0
+      if [ -f "{{operatorQueueOutput}}" ] && jq empty "{{operatorQueueOutput}}" 2>/dev/null; then
+        OPERATOR_TARGETS_JSON=$(jq -c '[.focus_targets[]?, .tasks[]?.target] | map(select(. != null and . != "")) | unique' "{{operatorQueueOutput}}" 2>/dev/null || echo '[]')
+        OPERATOR_TASKS=$(jq -r '.summary.total_tasks // ([.tasks[]?] | length) // 0' "{{operatorQueueOutput}}" 2>/dev/null || echo 0)
+      fi
+
+      CAMPAIGN_READY=false
+      CAMPAIGN_TARGETS=0
+      CAMPAIGN_CREATE_STATUS="not_requested"
+      if [ -f "{{campaignHandoffOutput}}" ] && jq empty "{{campaignHandoffOutput}}" 2>/dev/null; then
+        CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffOutput}}" 2>/dev/null || echo false)
+        CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffOutput}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{campaignCreateOutput}}" ] && jq empty "{{campaignCreateOutput}}" 2>/dev/null; then
+        CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateOutput}}" 2>/dev/null || echo not_requested)
+      fi
+
+      RETEST_QUEUED=0
+      RETEST_QUEUE_STATUS="not_requested"
+      if [ -f "{{retestQueueSummary}}" ] && jq empty "{{retestQueueSummary}}" 2>/dev/null; then
+        RETEST_QUEUED=$(jq -r '.queued_targets // 0' "{{retestQueueSummary}}" 2>/dev/null || echo 0)
+        RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummary}}" 2>/dev/null || echo not_requested)
+      fi
+
+      RESCAN_TOTAL=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+      RESCAN_CRITICAL=$(jq -r 'select(.info.severity == "critical") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
+      RESCAN_HIGH=$(jq -r 'select(.info.severity == "high") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
+
+      {
+        printf '%s\n' "$BASE_FOCUS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$BASE_RESCAN_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$RETEST_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$OPERATOR_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
+        cat "{{semanticPriorityTargetsFile}}" 2>/dev/null || true
+        cat "{{operatorQueueTargetsFile}}" 2>/dev/null || true
+        cat "{{retestTargetsFile}}" 2>/dev/null || true
+        cat "{{campaignTargetsFile}}" 2>/dev/null || true
+        head -20 "{{confirmedUrlsFile}}" 2>/dev/null || true
+      } | awk 'NF && !seen[$0]++' > "{{followupPriorityTargetsFile}}" || true
+
+      {
+        printf '%s\n' "$BASE_FOCUS_JSON" | jq -r '.[]' 2>/dev/null
+        cat "{{semanticPriorityTargetsFile}}" 2>/dev/null || true
+        cat "{{operatorQueueTargetsFile}}" 2>/dev/null || true
+        head -15 "{{confirmedUrlsFile}}" 2>/dev/null || true
+      } | awk 'NF && !seen[$0]++' > "{{followupFocusAreasFile}}" || true
+
+      PRIORITY_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "{{followupPriorityTargetsFile}}" 2>/dev/null || echo '[]')
+      FOCUS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "{{followupFocusAreasFile}}" 2>/dev/null || echo '[]')
+
+      NEXT_PHASE="knowledge-consolidation"
+      if [ "$RESCAN_CRITICAL" -gt 0 ] || [ "$OPERATOR_TASKS" -gt 0 ]; then
+        NEXT_PHASE="manual-exploitation"
+      elif [ "$CAMPAIGN_READY" = "true" ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
+        NEXT_PHASE="campaign-followup"
+      elif [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUED" -gt 0 ]; then
+        NEXT_PHASE="targeted-retest"
+      fi
+
+      jq -n \
+        --arg generated_at "$(date -Iseconds)" \
+        --arg base_decision_file "$ACTIVE_DECISION_FILE" \
+        --arg base_profile "$BASE_PROFILE" \
+        --arg base_severity "$BASE_SEVERITY" \
+        --arg base_reasoning "$BASE_REASONING" \
+        --arg next_phase "$NEXT_PHASE" \
+        --arg campaign_create_status "$CAMPAIGN_CREATE_STATUS" \
+        --arg retest_queue_status "$RETEST_QUEUE_STATUS" \
+        --argjson retest_targets "$RETEST_COUNT" \
+        --argjson operator_tasks "$OPERATOR_TASKS" \
+        --argjson campaign_targets "$CAMPAIGN_TARGETS" \
+        --argjson retest_queued "$RETEST_QUEUED" \
+        --argjson rescan_total "$RESCAN_TOTAL" \
+        --argjson rescan_critical "$RESCAN_CRITICAL" \
+        --argjson rescan_high "$RESCAN_HIGH" \
+        --argjson campaign_ready "$CAMPAIGN_READY" \
+        --argjson refined_focus_areas "$FOCUS_JSON" \
+        --argjson refined_priority_targets "$PRIORITY_JSON" \
+        '{
+          generated_at: $generated_at,
+          base_decision: {
+            file: $base_decision_file,
+            profile: $base_profile,
+            severity: $base_severity,
+            reasoning: $base_reasoning
+          },
+          followup_summary: {
+            retest_targets: $retest_targets,
+            operator_tasks: $operator_tasks,
+            campaign_targets: $campaign_targets,
+            retest_queued_targets: $retest_queued,
+            rescan_findings: $rescan_total,
+            rescan_critical: $rescan_critical,
+            rescan_high: $rescan_high,
+            campaign_ready: $campaign_ready,
+            campaign_create_status: $campaign_create_status,
+            retest_queue_status: $retest_queue_status
+          },
+          refined_targets: {
+            focus_areas: $refined_focus_areas,
+            priority_targets: $refined_priority_targets
+          },
+          execution_feedback: {
+            next_phase: $next_phase,
+            keep_aggressive_scan: ($rescan_critical > 0),
+            manual_followup_needed: (($operator_tasks > 0) or ($rescan_critical > 0) or ($rescan_high > 0)),
+            campaign_followup_recommended: (($campaign_ready == true) and ($campaign_targets > 0)),
+            queue_followup_effective: ($retest_queued > 0)
+          },
+          next_actions: (
+            [
+              (if $rescan_total > 0 then "Review targeted rescan hits first and capture proof for all new findings" else empty end),
+              (if $operator_tasks > 0 then "Execute P1/P2 operator tasks against refined priority targets" else empty end),
+              (if ($campaign_ready == true) and ($campaign_targets > 0) then "Use campaign handoff as the next-stage batch execution package" else empty end),
+              (if $retest_queued > 0 then "Track queued retest jobs and fold their results back into the knowledge base" else empty end),
+              "Persist the final follow-up decision package for future reruns and manual handoff"
+            ] | map(select(. != null and . != ""))
+          )
+        }' > "{{followupDecisionOutput}}"
+
+  - name: render-post-followup-markdown
+    type: bash
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    command: |
+      {
+        echo "# AI Post-Followup Decision"
+        echo "## 目标: {{Target}}"
+        echo ""
+        jq -r '.base_decision | "- Base profile: \(.profile // "focused")\n- Base severity: \(.severity // "critical,high")\n- Reasoning: \(.reasoning // "n/a")"' "{{followupDecisionOutput}}" 2>/dev/null || true
+        echo ""
+        echo "## Follow-up Summary"
+        jq -r '.followup_summary | "- Retest targets: \(.retest_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)\n- Campaign targets: \(.campaign_targets // 0)\n- Retest queued: \(.retest_queued_targets // 0)\n- Rescan findings: \(.rescan_findings // 0) (critical=\(.rescan_critical // 0), high=\(.rescan_high // 0))\n- Campaign ready: \(.campaign_ready // false)\n- Campaign create: \(.campaign_create_status // "not_requested")\n- Retest queue: \(.retest_queue_status // "not_requested")"' "{{followupDecisionOutput}}" 2>/dev/null || true
+        echo ""
+        echo "## Refined Priority Targets"
+        jq -r '.refined_targets.priority_targets[]? | "- \(.)"' "{{followupDecisionOutput}}" 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Next Actions"
+        jq -r '.next_actions[]? | "- \(.)"' "{{followupDecisionOutput}}" 2>/dev/null || true
+      } > "{{followupDecisionMd}}"
+
+  - name: log-post-followup-complete
+    type: function
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    functions:
+      - 'log_info("Post-followup coordination completed for {{Target}}")'

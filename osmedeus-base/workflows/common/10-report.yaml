@@ -96,6 +96,12 @@ params:
     default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
   - name: rescanSummaryFile
     default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+  - name: rescanFindingsFile
+    default: "{{Output}}/vulnscan/nuclei-rescan-{{TargetSpace}}.jsonl"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: followupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: confirmedUrlsFile
     default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
   - name: entryPointsFile
@@ -229,6 +235,10 @@ steps:
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' {{campaignHandoffFile}} 2>/dev/null || echo false)
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
       SEMANTIC_RESULTS=$(jq -r '.total_results // 0' {{semanticSearchFile}} 2>/dev/null || echo 0)
+      RESCAN_TOTAL=$(wc -l < {{rescanFindingsFile}} 2>/dev/null || echo 0)
+      RESCAN_CRITICAL=$(jq -r 'select(.info.severity == "critical") | 1' {{rescanFindingsFile}} 2>/dev/null | wc -l | tr -d ' ')
+      RESCAN_HIGH=$(jq -r 'select(.info.severity == "high") | 1' {{rescanFindingsFile}} 2>/dev/null | wc -l | tr -d ' ')
+      FOLLOWUP_NEXT_PHASE=$(jq -r '.execution_feedback.next_phase // "not_generated"' {{followupDecisionFile}} 2>/dev/null || echo not_generated)
       
       # 生成 JSON
       cat > {{jsonStatsFile}} << EOF
@@ -256,6 +266,10 @@ steps:
             "operator_tasks": $OPERATOR_TASKS,
             "campaign_targets": $CAMPAIGN_TARGETS,
             "retest_queued_targets": $RETEST_QUEUED,
+            "targeted_rescan_findings": $RESCAN_TOTAL,
+            "targeted_rescan_critical": $RESCAN_CRITICAL,
+            "targeted_rescan_high": $RESCAN_HIGH,
+            "followup_next_phase": "$FOLLOWUP_NEXT_PHASE",
             "campaign_ready": $CAMPAIGN_READY,
             "campaign_create_status": "$CAMPAIGN_CREATE_STATUS"
           }
@@ -349,6 +363,8 @@ steps:
       OPERATOR_TASKS=$(jq -r '.statistics.ai.operator_tasks // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       CAMPAIGN_TARGETS=$(jq -r '.statistics.ai.campaign_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       CAMPAIGN_READY=$(jq -r '.statistics.ai.campaign_ready // false' {{jsonStatsFile}} 2>/dev/null || echo false)
+      RESCAN_TOTAL=$(jq -r '.statistics.ai.targeted_rescan_findings // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_NEXT_PHASE=$(jq -r '.statistics.ai.followup_next_phase // "not_generated"' {{jsonStatsFile}} 2>/dev/null || echo not_generated)
       
       # 风险等级
       [ "$CRITICAL" -gt 0 ] && RISK_LEVEL="🔴 CRITICAL" && RISK_ACTION="立即修复关键漏洞"
@@ -396,6 +412,8 @@ steps:
         echo "| 🔁 复测目标 | $RETEST_TARGETS |"
         echo "| 👨‍💻 操作员任务 | $OPERATOR_TASKS |"
         echo "| 🎯 Campaign 目标 | $CAMPAIGN_TARGETS |"
+        echo "| 🔍 定向复扫新增 | $RESCAN_TOTAL |"
+        echo "| 🧭 下一阶段 | $FOLLOWUP_NEXT_PHASE |"
         echo "| 🚦 Campaign Ready | $CAMPAIGN_READY |"
         echo ""
         echo "---"
@@ -407,6 +425,7 @@ steps:
         if [ "$AI_CONFIRMED" -gt 0 ] || [ "$OPERATOR_TASKS" -gt 0 ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
           echo ""
           echo "### 实战优先动作"
+          [ "$RESCAN_TOTAL" -gt 0 ] && echo "- 复查 targeted rescan 新增命中，这些结果已经并回主漏洞结果，应优先补截图、响应包和复现步骤。"
           [ "$RETEST_TARGETS" -gt 0 ] && echo "- 优先对 AI 选出的复测目标补证据和补 payload。"
           [ "$OPERATOR_TASKS" -gt 0 ] && echo "- 先执行 operator queue 里的 P1/P2 任务，验证鉴权、业务逻辑、提权和横向可能性。"
           [ "$CAMPAIGN_TARGETS" -gt 0 ] && echo "- 将 campaign targets 作为后续深扫或人工接管目标包。"
@@ -525,10 +544,21 @@ steps:
         jq -r '
           [
             "- Handoff ready: " + ((.handoff_ready // false) | tostring),
-            "- Recommended flow: " + (.campaign_profile.recommended_flow // "web-classic"),
+            "- Recommended flow: " + (.campaign_profile.recommended_flow // "web-analysis"),
             "- Campaign targets: " + ((.counts.campaign_targets // 0) | tostring)
           ] | .[]
         ' {{campaignHandoffFile}} 2>/dev/null >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{followupDecisionFile}}" ] && jq empty "{{followupDecisionFile}}" 2>/dev/null; then
+        echo -e "\n### 🧭 Post-Followup Decision 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          [
+            "- Next phase: " + (.execution_feedback.next_phase // "not_generated"),
+            "- Manual follow-up needed: " + ((.execution_feedback.manual_followup_needed // false) | tostring),
+            "- Campaign follow-up recommended: " + ((.execution_feedback.campaign_followup_recommended // false) | tostring)
+          ] + [(.next_actions[]? | "- " + .)]
+        ' {{followupDecisionFile}} 2>/dev/null >> {{fullReportFile}} || true
       fi
 
       if [ -f "{{rescanSummaryFile}}" ] && [ -s "{{rescanSummaryFile}}" ]; then
@@ -539,12 +569,14 @@ steps:
       echo -e "\n### 📁 AI Artifacts\n" >> {{fullReportFile}}
       {
         echo "- AI decision: {{aiDecisionFile}}"
+        echo "- Applied AI decision: {{appliedDecisionFile}}"
         echo "- Validation: {{vulnValidationFile}}"
         echo "- Attack chain: {{attackChainFile}}"
         echo "- Path planning: {{pathPlanningFile}}"
         echo "- Retest plan: {{retestPlanFile}}"
         echo "- Operator queue: {{operatorQueueFile}}"
         echo "- Campaign handoff: {{campaignHandoffFile}}"
+        echo "- Follow-up decision: {{followupDecisionFile}}"
         echo "- Retest queue summary: {{retestQueueSummaryFile}}"
         echo "- Prioritized target pack: {{assetsSummaryFile}}"
         echo "- Semantic priority targets: {{semanticPriorityTargetsFile}}"

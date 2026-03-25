@@ -32,6 +32,8 @@ params:
     default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
   - name: rescanTargetsFile
     default: "{{Output}}/ai-analysis/rescan-targets-{{TargetSpace}}.txt"
 
@@ -42,6 +44,14 @@ params:
     default: "{{Output}}/vulnscan/rescan-critical-{{TargetSpace}}.txt"
   - name: rescanHighFile
     default: "{{Output}}/vulnscan/rescan-high-{{TargetSpace}}.txt"
+  - name: mainNucleiOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: mainNucleiCriticalFile
+    default: "{{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt"
+  - name: mainNucleiHighFile
+    default: "{{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt"
+  - name: mainNucleiCleanFile
+    default: "{{Output}}/vulnscan/clean-jsonl-{{TargetSpace}}.txt"
   - name: rescanSummaryFile
     default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
 
@@ -86,6 +96,10 @@ steps:
       mkdir -p {{Output}}/ai-analysis
       TARGET_TMP="{{Output}}/ai-analysis/.rescan-targets-raw-{{TargetSpace}}.txt"
       : > "$TARGET_TMP"
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+      fi
 
       for f in "{{confirmedUrlsFile}}" "{{attackChainEntryPointsFile}}" "{{priorityTargetsFile}}" "{{semanticPriorityTargetsFile}}" "{{operatorQueueTargetsFile}}" "{{retestTargetsFile}}"; do
         if [ -f "$f" ]; then
@@ -93,8 +107,8 @@ steps:
         fi
       done
 
-      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
-        jq -r '.rescan_targets[]? // empty' "{{aiDecisionFile}}" 2>/dev/null >> "$TARGET_TMP" || true
+      if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        jq -r '.targets.rescan_targets[]? // .rescan_targets[]? // empty' "$ACTIVE_DECISION_FILE" 2>/dev/null >> "$TARGET_TMP" || true
       fi
 
       awk 'NF && !seen[$0]++' "$TARGET_TMP" | head -{{maxRescanTargets}} > "{{rescanTargetsFile}}" || true
@@ -117,19 +131,43 @@ steps:
       THREADS={{defaultThreads}}
       RATE_LIMIT={{defaultRateLimit}}
       TIMEOUT="{{defaultTimeout}}"
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+      fi
 
-      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
-        AI_SEVERITY=$(jq -r '.nuclei_severity // ""' "{{aiDecisionFile}}" 2>/dev/null)
-        AI_THREADS=$(jq -r '.suggested_threads // 0' "{{aiDecisionFile}}" 2>/dev/null)
-        AI_RATE=$(jq -r '.suggested_rate_limit // 0' "{{aiDecisionFile}}" 2>/dev/null)
-        AI_TIMEOUT=$(jq -r '.recommended_timeout // ""' "{{aiDecisionFile}}" 2>/dev/null)
+      if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        AI_SEVERITY=$(jq -r '.scan.severity // .nuclei_severity // ""' "$ACTIVE_DECISION_FILE" 2>/dev/null)
+        AI_THREADS=$(jq -r '.scan.threads // .suggested_threads // 0' "$ACTIVE_DECISION_FILE" 2>/dev/null)
+        AI_RATE=$(jq -r '.scan.rate_limit // .suggested_rate_limit // 0' "$ACTIVE_DECISION_FILE" 2>/dev/null)
+        AI_TIMEOUT=$(jq -r '.scan.timeout // .recommended_timeout // ""' "$ACTIVE_DECISION_FILE" 2>/dev/null)
+        AI_TIMEOUT_SECONDS=$(jq -r '.scan.timeout_seconds // 0' "$ACTIVE_DECISION_FILE" 2>/dev/null)
 
         [ -n "$AI_SEVERITY" ] && SEVERITY="$AI_SEVERITY"
         [ "$AI_THREADS" -gt 0 ] 2>/dev/null && THREADS=$AI_THREADS
         [ "$AI_RATE" -gt 0 ] 2>/dev/null && RATE_LIMIT=$AI_RATE
-        # 去掉单位后缀，只保留数字（nuclei -timeout 单位为秒）
-        AI_TIMEOUT_NUM=$(echo "$AI_TIMEOUT" | tr -dc '0-9')
-        [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT="$AI_TIMEOUT_NUM"
+        [ "$AI_TIMEOUT_SECONDS" -gt 0 ] 2>/dev/null && TIMEOUT="$AI_TIMEOUT_SECONDS"
+        # 支持 6h/30m/90s 这种配置，统一转换为 nuclei 所需的秒数。
+        if [ "$TIMEOUT" = "{{defaultTimeout}}" ] && [ -n "$AI_TIMEOUT" ]; then
+          case "$AI_TIMEOUT" in
+            *h|*H)
+              AI_TIMEOUT_NUM=$(printf '%s' "$AI_TIMEOUT" | tr -dc '0-9')
+              [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT=$((AI_TIMEOUT_NUM * 3600))
+              ;;
+            *m|*M)
+              AI_TIMEOUT_NUM=$(printf '%s' "$AI_TIMEOUT" | tr -dc '0-9')
+              [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT=$((AI_TIMEOUT_NUM * 60))
+              ;;
+            *s|*S)
+              AI_TIMEOUT_NUM=$(printf '%s' "$AI_TIMEOUT" | tr -dc '0-9')
+              [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT="$AI_TIMEOUT_NUM"
+              ;;
+            *)
+              AI_TIMEOUT_NUM=$(printf '%s' "$AI_TIMEOUT" | tr -dc '0-9')
+              [ -n "$AI_TIMEOUT_NUM" ] && [ "$AI_TIMEOUT_NUM" -gt 0 ] 2>/dev/null && TIMEOUT="$AI_TIMEOUT_NUM"
+              ;;
+          esac
+        fi
 
         echo "[Rescan] AI decision loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
       else
@@ -199,6 +237,79 @@ steps:
       CRITICAL=$(wc -l < "{{rescanCriticalFile}}" 2>/dev/null || echo 0)
       HIGH=$(wc -l < "{{rescanHighFile}}" 2>/dev/null || echo 0)
       echo "[Rescan] Extracted: critical=$CRITICAL high=$HIGH"
+
+  - name: merge-rescan-findings-into-main-results
+    type: bash
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
+    command: |
+      if [ ! -f "{{rescanOutputJsonl}}" ] || [ ! -s "{{rescanOutputJsonl}}" ]; then
+        echo "[Rescan] No rescan findings to merge"
+        exit 0
+      fi
+
+      merge_jsonl() {
+        MAIN_FILE="$1"
+        EXTRA_FILE="$2"
+        TMP_FILE="$3"
+
+        if [ -f "$MAIN_FILE" ] && [ -s "$MAIN_FILE" ]; then
+          jq -s '
+            map(select(type == "object"))
+            | unique_by([
+                (."template-id" // ""),
+                (."matched-at" // .matched_at // ""),
+                (.host // ""),
+                (.matched // ""),
+                (.info.name // ""),
+                (.info.severity // "")
+              ])
+            | .[]
+          ' "$MAIN_FILE" "$EXTRA_FILE" > "$TMP_FILE" 2>/dev/null || cp "$MAIN_FILE" "$TMP_FILE"
+        else
+          cp "$EXTRA_FILE" "$TMP_FILE"
+        fi
+
+        mv "$TMP_FILE" "$MAIN_FILE"
+      }
+
+      TMP_ALL="{{Output}}/vulnscan/.nuclei-jsonl-merged-{{TargetSpace}}.tmp"
+      TMP_CRIT="{{Output}}/vulnscan/.nuclei-critical-merged-{{TargetSpace}}.tmp"
+      TMP_HIGH="{{Output}}/vulnscan/.nuclei-high-merged-{{TargetSpace}}.tmp"
+      RESCAN_CRIT_JSONL="{{Output}}/vulnscan/.nuclei-rescan-critical-{{TargetSpace}}.jsonl"
+      RESCAN_HIGH_JSONL="{{Output}}/vulnscan/.nuclei-rescan-high-{{TargetSpace}}.jsonl"
+
+      merge_jsonl "{{mainNucleiOutputJsonl}}" "{{rescanOutputJsonl}}" "$TMP_ALL"
+
+      jq 'select(.info.severity == "critical")' "{{rescanOutputJsonl}}" > "$RESCAN_CRIT_JSONL" 2>/dev/null || true
+      jq 'select(.info.severity == "high")' "{{rescanOutputJsonl}}" > "$RESCAN_HIGH_JSONL" 2>/dev/null || true
+
+      if [ -s "$RESCAN_CRIT_JSONL" ]; then
+        merge_jsonl "{{mainNucleiCriticalFile}}" "$RESCAN_CRIT_JSONL" "$TMP_CRIT"
+      fi
+      if [ -s "$RESCAN_HIGH_JSONL" ]; then
+        merge_jsonl "{{mainNucleiHighFile}}" "$RESCAN_HIGH_JSONL" "$TMP_HIGH"
+      fi
+
+      rm -f "$RESCAN_CRIT_JSONL" "$RESCAN_HIGH_JSONL" 2>/dev/null || true
+
+      TOTAL_MAIN=$(wc -l < "{{mainNucleiOutputJsonl}}" 2>/dev/null || echo 0)
+      TOTAL_RESCAN=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+      echo "[Rescan] Merged $TOTAL_RESCAN rescan findings into main vuln results (total=$TOTAL_MAIN)"
+
+  - name: refresh-clean-vuln-jsonl
+    type: function
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\") && file_exists(\"{{mainNucleiOutputJsonl}}\")"
+    functions:
+      - 'jsonl_filter("{{mainNucleiOutputJsonl}}", "{{mainNucleiCleanFile}}", "template-id,info.name,info.severity,matched-at,matched-name")'
+      - 'sort_unix("{{mainNucleiCleanFile}}")'
+
+  - name: import-rescan-findings
+    type: function
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\") && file_exists(\"{{rescanOutputJsonl}}\") && file_length(\"{{rescanOutputJsonl}}\") > 0"
+    on_error:
+      - action: continue
+    functions:
+      - 'db_import_vuln_from_file("{{TargetSpace}}", "{{rescanOutputJsonl}}")'
 
   - name: generate-rescan-summary
     type: bash

@@ -16,6 +16,8 @@ params:
 
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
   - name: retestPlanOutput
     default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
   - name: operatorQueueOutput
@@ -32,7 +34,7 @@ params:
     default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
 
   - name: retestFlow
-    default: "web-classic"
+    default: "web-analysis"
   - name: retestPriority
     default: "high"
   - name: knowledgeWorkspace
@@ -75,9 +77,13 @@ steps:
 
       FOCUS_JSON='[]'
       DECISION_RESCAN_JSON='[]'
-      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
-        FOCUS_JSON=$(jq -c '.focus_areas // []' "{{aiDecisionFile}}" 2>/dev/null || echo '[]')
-        DECISION_RESCAN_JSON=$(jq -c '.rescan_targets // .priority_targets // []' "{{aiDecisionFile}}" 2>/dev/null || echo '[]')
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+      fi
+      if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
       fi
 
       RETEST_TARGETS_JSON='[]'
@@ -257,7 +263,7 @@ steps:
         echo "# AI Campaign Handoff"
         echo "## 目标: {{Target}}"
         echo ""
-        jq -r '.campaign_profile | "- Recommended flow: \(.recommended_flow // "web-classic")\n- Retest priority: \(.retest_priority // "high")"' {{campaignHandoffOutput}} 2>/dev/null || true
+        jq -r '.campaign_profile | "- Recommended flow: \(.recommended_flow // "web-analysis")\n- Retest priority: \(.retest_priority // "high")"' {{campaignHandoffOutput}} 2>/dev/null || true
         echo ""
         echo "## Counts"
         jq -r '.counts | "- Confirmed URLs: \(.confirmed_urls // 0)\n- Attack-chain entry points: \(.attack_chain_entry_points // 0)\n- Best path targets: \(.best_path_targets // 0)\n- Semantic priority targets: \(.semantic_priority_targets // 0)\n- Decision rescan targets: \(.decision_rescan_targets // 0)\n- Retest targets: \(.retest_targets // 0)\n- Operator targets: \(.operator_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)"' {{campaignHandoffOutput}} 2>/dev/null || true

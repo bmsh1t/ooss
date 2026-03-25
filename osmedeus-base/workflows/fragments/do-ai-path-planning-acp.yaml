@@ -33,6 +33,12 @@ params:
     default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
   - name: confirmedUrlsFile
     default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: knowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
   - name: fingerprintFile
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: osintFile
@@ -143,6 +149,15 @@ steps:
           ## 入口点
           请使用 read_lines 工具读取 {{entryPointsFile}}
 
+          ## 早期语义搜索结果
+          请使用 read_lines 工具读取 {{semanticSearchFile}}
+
+          ## 知识库命中
+          请使用 read_lines 工具读取 {{knowledgeSearchFile}}
+
+          ## 直接 vector-kb 命中
+          请使用 read_lines 工具读取 {{vectorKnowledgeSearchFile}}
+
           ## 技术栈
           请使用 read_lines 工具读取 {{fingerprintFile}}
 
@@ -205,6 +220,11 @@ steps:
           ```
 
           只输出 JSON，确保格式完全正确。
+
+          额外要求：
+          - 优先围绕“攻击链入口 + confirmed URLs + semantic/knowledge 高频命中点”来规划阶段
+          - 把知识库里提示高价值的认证面、后台面、API 面、文件处理面和业务逻辑面前置
+          - 计划要尽量低噪音、可验证、适合真实复测与人工跟进
 
     exports:
       path_planning_json: "{{acp_output}}"

@@ -555,12 +555,14 @@ steps:
       # ========================================
       # AI 决策配置加载 (新增 - 真正影响扫描)
       # ========================================
+      APPLIED_AI_DECISION_FILE="{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
       AI_DECISION_FILE="{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
       PRE_AI_DECISION_FILE="{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
-      AI_VARS_FILE="{{Output}}/ai-analysis/ai-vars.yaml"
       ACTIVE_AI_DECISION_FILE=""
 
-      if [ -f "$AI_DECISION_FILE" ]; then
+      if [ -f "$APPLIED_AI_DECISION_FILE" ]; then
+        ACTIVE_AI_DECISION_FILE="$APPLIED_AI_DECISION_FILE"
+      elif [ -f "$AI_DECISION_FILE" ]; then
         ACTIVE_AI_DECISION_FILE="$AI_DECISION_FILE"
       elif [ -f "$PRE_AI_DECISION_FILE" ]; then
         ACTIVE_AI_DECISION_FILE="$PRE_AI_DECISION_FILE"
@@ -568,11 +570,11 @@ steps:
 
       if [ -n "$ACTIVE_AI_DECISION_FILE" ]; then
         echo "[NUCLEI] Loading AI decision config from $ACTIVE_AI_DECISION_FILE"
-        AI_SEVERITY=$(jq -r '.nuclei_severity // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_THREADS=$(jq -r '.suggested_threads // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_RATE_LIMIT=$(jq -r '.suggested_rate_limit // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_TIMEOUT=$(jq -r '.recommended_timeout // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_WAF_BYPASS=$(jq -r '.waf_bypass_needed // false' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_SEVERITY=$(jq -r '.scan.severity // .nuclei_severity // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_THREADS=$(jq -r '.scan.threads // .suggested_threads // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_RATE_LIMIT=$(jq -r '.scan.rate_limit // .suggested_rate_limit // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_TIMEOUT=$(jq -r '.scan.timeout // .recommended_timeout // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_WAF_BYPASS=$(jq -r '.waf.bypass_needed // .waf_bypass_needed // false' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
         AI_REASONING=$(jq -r '.reasoning // "none"' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
 
         [ -n "$AI_SEVERITY" ] && echo "[NUCLEI] AI Decision: severity=$AI_SEVERITY"

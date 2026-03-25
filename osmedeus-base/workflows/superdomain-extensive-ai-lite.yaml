@@ -97,9 +97,11 @@ params:
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
   - name: sharedKnowledgeWorkspace
+    default: ""
+  - name: globalKnowledgeWorkspace
     default: "global"
   - name: retestFlow
-    default: "web-classic"
+    default: "web-analysis"
   - name: retestWorkflowKind
     default: "flow"
   - name: retestPriority
@@ -163,6 +165,8 @@ params:
     default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
   - name: campaignCreateOutput
     default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: followupDecisionOutput
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
 
 # -----------------------------------------------------------------------------
 # MODULES SECTION
@@ -257,6 +261,7 @@ modules:
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
       searchQuery: "Admin panels, authentication flows, high-value endpoints, exposed services, and tech-specific exploitation ideas"
 
@@ -279,6 +284,7 @@ modules:
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
       searchQuery: "Confirmed findings, exploit chains, auth bypass, pivot paths, retest payloads, and post-validation exploitation guidance"
 
@@ -291,6 +297,10 @@ modules:
       semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
       initialSemanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
       initialSemanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+      initialKnowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+      initialVectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # AI 决策应用 - 将决策配置写入环境
   - name: ai-apply-decision
@@ -361,12 +371,19 @@ modules:
       retestPriority: "{{retestPriority}}"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
 
+  - name: ai-post-followup-coordination
+    path: fragments/do-ai-post-followup-coordination.yaml
+    depends_on: [ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
+    pre_condition: "{{enableLlmAnalysis}}"
+    params:
+      followupDecisionOutput: "{{followupDecisionOutput}}"
+
   # ===========================================================================
   # Phase 11: Report (增强版 - 可视化)
   # ===========================================================================
   - name: report
     path: common/10-report-enhanced.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue, ai-post-followup-coordination]
     on_error:
       - action: continue
 

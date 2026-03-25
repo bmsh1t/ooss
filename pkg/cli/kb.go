@@ -10,6 +10,7 @@ import (
 	"github.com/j3ssie/osmedeus/v5/internal/database"
 	"github.com/j3ssie/osmedeus/v5/internal/knowledge"
 	"github.com/j3ssie/osmedeus/v5/internal/terminal"
+	"github.com/j3ssie/osmedeus/v5/internal/vectorkb"
 	"github.com/spf13/cobra"
 )
 
@@ -117,6 +118,10 @@ func runKBIngest(cmd *cobra.Command, args []string) error {
 			data, _ := json.Marshal(summary)
 			fmt.Println(string(data))
 		}
+		return err
+	}
+
+	if err := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "ingest"); err != nil {
 		return err
 	}
 
@@ -244,6 +249,10 @@ func runKBLearn(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if err := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "learn"); err != nil {
+		return err
+	}
+
 	if globalJSON {
 		data, err := json.Marshal(summary)
 		if err != nil {
@@ -300,5 +309,40 @@ func runKBExport(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Output:    %s\n", summary.Output)
 	fmt.Printf("Documents: %d\n", summary.Documents)
 	fmt.Printf("Chunks:    %d\n", summary.Chunks)
+	return nil
+}
+
+func formatKnowledgeWorkspaceLabel(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return "all"
+	}
+	return workspace
+}
+
+func maybeAutoIndexVectorKnowledge(ctx context.Context, cfg *config.Config, workspace, mode string) error {
+	if cfg == nil || !cfg.IsKnowledgeVectorEnabled() {
+		return nil
+	}
+	switch strings.TrimSpace(mode) {
+	case "ingest":
+		if !cfg.IsKnowledgeVectorAutoIndexOnIngest() {
+			return nil
+		}
+	case "learn":
+		if !cfg.IsKnowledgeVectorAutoIndexOnLearn() {
+			return nil
+		}
+	}
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil
+	}
+	_, err := vectorkb.IndexWorkspace(ctx, cfg, vectorkb.IndexOptions{
+		Workspace: workspace,
+	})
+	if err != nil {
+		return fmt.Errorf("knowledge ingest succeeded but vector auto-index failed for workspace %s: %w", workspace, err)
+	}
 	return nil
 }

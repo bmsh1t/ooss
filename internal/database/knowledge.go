@@ -59,8 +59,11 @@ type KnowledgeChunkExportRow struct {
 	Title      string `bun:"title"`
 	SourcePath string `bun:"source_path"`
 	DocType    string `bun:"doc_type"`
+	DocHash    string `bun:"doc_hash"`
 	Section    string `bun:"section"`
 	Content    string `bun:"content"`
+	ChunkHash  string `bun:"chunk_hash"`
+	Metadata   string `bun:"metadata_json"`
 }
 
 // UpsertKnowledgeDocument stores a document and replaces all associated chunks.
@@ -243,6 +246,11 @@ func SearchKnowledge(ctx context.Context, workspace, query string, limit int) ([
 
 // ListKnowledgeChunks returns joined chunk/document rows for export and offline indexing.
 func ListKnowledgeChunks(ctx context.Context, workspace string, limit int) ([]KnowledgeChunkExportRow, error) {
+	return ListKnowledgeChunksPage(ctx, workspace, limit, 0)
+}
+
+// ListKnowledgeChunksPage returns joined chunk/document rows for export and offline indexing with pagination.
+func ListKnowledgeChunksPage(ctx context.Context, workspace string, limit, offset int) ([]KnowledgeChunkExportRow, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
@@ -251,6 +259,9 @@ func ListKnowledgeChunks(ctx context.Context, workspace string, limit int) ([]Kn
 	}
 	if limit > 5000 {
 		limit = 5000
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
 	var rows []KnowledgeChunkExportRow
@@ -263,8 +274,11 @@ func ListKnowledgeChunks(ctx context.Context, workspace string, limit int) ([]Kn
 		ColumnExpr("kd.title AS title").
 		ColumnExpr("kd.source_path AS source_path").
 		ColumnExpr("kd.doc_type AS doc_type").
+		ColumnExpr("kd.content_hash AS doc_hash").
 		ColumnExpr("kc.section AS section").
 		ColumnExpr("kc.content AS content").
+		ColumnExpr("kc.content_hash AS chunk_hash").
+		ColumnExpr("kc.metadata_json AS metadata_json").
 		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id")
 
 	if trimmed := strings.TrimSpace(workspace); trimmed != "" {
@@ -276,6 +290,7 @@ func ListKnowledgeChunks(ctx context.Context, workspace string, limit int) ([]Kn
 		OrderExpr("kc.document_id DESC").
 		OrderExpr("kc.chunk_index ASC").
 		Limit(limit).
+		Offset(offset).
 		Scan(ctx, &rows); err != nil {
 		return nil, err
 	}

@@ -30,6 +30,8 @@ params:
     default: "{{Output}}/ai-analysis/semantic-priority-vulns-{{TargetSpace}}.json"
   - name: vectorSearchResultsOutput
     default: "{{Output}}/ai-analysis/vector-search-results-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchOutput
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-{{TargetSpace}}.json"
   - name: knowledgeSearchOutput
     default: "{{Output}}/ai-analysis/knowledge-search-results-{{TargetSpace}}.json"
   - name: skillsDir
@@ -42,6 +44,8 @@ params:
     default: "{{TargetSpace}}"
   - name: sharedKnowledgeWorkspace
     default: ""
+  - name: globalKnowledgeWorkspace
+    default: "global"
   - name: knowledgeIndexFile
     default: "{{semanticIndexDir}}/knowledge-index.txt"
   - name: vectorCorpusFile
@@ -94,6 +98,10 @@ params:
     type: bool
     default: true
     description: "Include imported and learned knowledge-base chunks in semantic search"
+  - name: useVectorKnowledgeDB
+    type: bool
+    default: true
+    description: "Prefer direct search against vector-kb.sqlite before keyword fallback"
   - name: maxKnowledgeChunks
     type: integer
     default: 200
@@ -176,10 +184,13 @@ steps:
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      GLOBAL_WORKSPACE="{{globalKnowledgeWorkspace}}"
       PRIMARY_TMP="{{semanticIndexDir}}/.knowledge-primary.txt"
       SHARED_TMP="{{semanticIndexDir}}/.knowledge-shared.txt"
+      GLOBAL_TMP="{{semanticIndexDir}}/.knowledge-global.txt"
       : > "$PRIMARY_TMP"
       : > "$SHARED_TMP"
+      : > "$GLOBAL_TMP"
 
       "$OSM_BIN" kb export \
         -w "$PRIMARY_WORKSPACE" \
@@ -193,7 +204,14 @@ steps:
           --output "$SHARED_TMP" >/tmp/osm-kb-export-shared.log 2>&1 || true
       fi
 
-      cat "$PRIMARY_TMP" "$SHARED_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
+      if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+        "$OSM_BIN" kb export \
+          -w "$GLOBAL_WORKSPACE" \
+          --limit {{maxKnowledgeChunks}} \
+          --output "$GLOBAL_TMP" >/tmp/osm-kb-export-global.log 2>&1 || true
+      fi
+
+      cat "$PRIMARY_TMP" "$SHARED_TMP" "$GLOBAL_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
 
       KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
       echo "[Semantic] Knowledge corpus exported: $KB_LINES chunks"
@@ -204,6 +222,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
       echo '[]' > "{{knowledgeSearchOutput}}"
+      echo '[]' > "{{vectorKnowledgeSearchOutput}}"
 
       OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
@@ -217,8 +236,47 @@ steps:
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      GLOBAL_WORKSPACE="{{globalKnowledgeWorkspace}}"
+      PRIMARY_VECTOR_JSON="{{semanticIndexDir}}/.knowledge-vector-primary.json"
+      SHARED_VECTOR_JSON="{{semanticIndexDir}}/.knowledge-vector-shared.json"
+      GLOBAL_VECTOR_JSON="{{semanticIndexDir}}/.knowledge-vector-global.json"
       PRIMARY_JSON="{{semanticIndexDir}}/.knowledge-search-primary.json"
       SHARED_JSON="{{semanticIndexDir}}/.knowledge-search-shared.json"
+      GLOBAL_JSON="{{semanticIndexDir}}/.knowledge-search-global.json"
+
+      echo '[]' > "$PRIMARY_VECTOR_JSON"
+      echo '[]' > "$SHARED_VECTOR_JSON"
+      echo '[]' > "$GLOBAL_VECTOR_JSON"
+      if [ "{{useVectorKnowledgeDB}}" = "true" ]; then
+        "$OSM_BIN" --json kb vector search \
+          -w "$PRIMARY_WORKSPACE" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}} > "$PRIMARY_VECTOR_JSON" 2>/tmp/osm-kb-vector-search.log || echo '[]' > "$PRIMARY_VECTOR_JSON"
+
+        if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+          "$OSM_BIN" --json kb vector search \
+            -w "$SHARED_WORKSPACE" \
+            --query "{{searchQuery}}" \
+            --limit {{maxSearchResults}} > "$SHARED_VECTOR_JSON" 2>/tmp/osm-kb-vector-search-shared.log || echo '[]' > "$SHARED_VECTOR_JSON"
+        fi
+
+        if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+          "$OSM_BIN" --json kb vector search \
+            -w "$GLOBAL_WORKSPACE" \
+            --query "{{searchQuery}}" \
+            --limit {{maxSearchResults}} > "$GLOBAL_VECTOR_JSON" 2>/tmp/osm-kb-vector-search-global.log || echo '[]' > "$GLOBAL_VECTOR_JSON"
+        fi
+      fi
+
+      jq -s --argjson max_results {{maxSearchResults}} '
+        add
+        | map(
+            if type == "object" then (.source = (.source // "vector_kb")) else {"content": tostring, "source": "vector_kb"} end
+          )
+        | unique_by((.chunk_id // .id // .source_path // .title // .content // tostring))
+        | sort_by(-(.relevance_score // .score // 0))
+        | .[:$max_results]
+      ' "$PRIMARY_VECTOR_JSON" "$SHARED_VECTOR_JSON" "$GLOBAL_VECTOR_JSON" > "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{vectorKnowledgeSearchOutput}}"
 
       "$OSM_BIN" --json kb search \
         -w "$PRIMARY_WORKSPACE" \
@@ -226,12 +284,35 @@ steps:
         --limit {{maxSearchResults}} > "$PRIMARY_JSON" 2>/tmp/osm-kb-search.log || echo '[]' > "$PRIMARY_JSON"
 
       echo '[]' > "$SHARED_JSON"
+      echo '[]' > "$GLOBAL_JSON"
       if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
         "$OSM_BIN" --json kb search \
           -w "$SHARED_WORKSPACE" \
           --query "{{searchQuery}}" \
           --limit {{maxSearchResults}} > "$SHARED_JSON" 2>/tmp/osm-kb-search-shared.log || echo '[]' > "$SHARED_JSON"
       fi
+
+      if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
+        "$OSM_BIN" --json kb search \
+          -w "$GLOBAL_WORKSPACE" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}} > "$GLOBAL_JSON" 2>/tmp/osm-kb-search-global.log || echo '[]' > "$GLOBAL_JSON"
+      fi
+
+      jq -s --argjson max_results {{maxSearchResults}} '
+        add
+        | map(
+            if type == "object" then (.source = (.source // "knowledge_keyword"))
+            else {"content": tostring, "source": "knowledge_keyword"}
+            end
+          )
+        | map(
+            .workspace = (.workspace // .metadata.workspace // "unknown")
+          )
+        | unique_by((.chunk_id // .id // .content // tostring))
+        | sort_by(-(.relevance_score // .score // 0))
+        | .[:$max_results]
+      ' "$PRIMARY_JSON" "$SHARED_JSON" "$GLOBAL_JSON" > "{{knowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{knowledgeSearchOutput}}"
 
       jq -s --argjson max_results {{maxSearchResults}} '
         add
@@ -243,12 +324,16 @@ steps:
         | map(
             .workspace = (.workspace // .metadata.workspace // "unknown")
           )
-        | unique_by((.chunk_id // .id // .content // tostring))
+        | unique_by((.chunk_id // .id // .source_path // .title // .content // tostring))
+        | sort_by(-(.relevance_score // .score // 0))
         | .[:$max_results]
-      ' "$PRIMARY_JSON" "$SHARED_JSON" > "{{knowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{knowledgeSearchOutput}}"
+      ' "{{vectorKnowledgeSearchOutput}}" "{{knowledgeSearchOutput}}" > "{{knowledgeSearchOutput}}.tmp" 2>/dev/null || cp "{{knowledgeSearchOutput}}" "{{knowledgeSearchOutput}}.tmp"
+      mv "{{knowledgeSearchOutput}}.tmp" "{{knowledgeSearchOutput}}"
 
+      VKB_HITS=$(jq 'length' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo 0)
       KB_HITS=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
-      echo "[Semantic] Knowledge DB search hits: $KB_HITS"
+      echo "[Semantic] Vector KB hits: $VKB_HITS"
+      echo "[Semantic] Knowledge DB merged hits: $KB_HITS"
 
   - name: index-scan-data
     type: bash
@@ -893,14 +978,89 @@ steps:
               result.append(value)
           return result
 
+      def normalize_target_key(target):
+          target = textify(target).lower()
+          if not target:
+              return ""
+          target = re.sub(r"^https?://", "", target)
+          target = target.split("#", 1)[0]
+          target = target.split("?", 1)[0]
+          return target.rstrip("/")
+
+      def content_fingerprint(item):
+          title = textify(item.get("title"))
+          content = textify(item.get("content"))[:220]
+          target = normalize_target_key(item.get("target"))
+          if target:
+              return f"{target}|{content}"
+          return f"{title}|{content}"
+
+      def source_priority(source_type):
+          return {
+              "llm_agent": 0.14,
+              "knowledge_base": 0.10,
+              "vector_search": 0.08,
+              "scan_index": 0.02,
+          }.get(source_type, 0.0)
+
+      def severity_boost(severity):
+          return {
+              "critical": 0.16,
+              "high": 0.10,
+              "medium": 0.05,
+              "info": 0.0,
+          }.get((severity or "info").lower(), 0.0)
+
+      def category_boost(category):
+          return {
+              "auth_surface": 0.12,
+              "admin_surface": 0.11,
+              "api_surface": 0.09,
+              "business_logic": 0.12,
+              "file_data_surface": 0.07,
+              "vulnerability_context": 0.08,
+              "general": 0.0,
+          }.get(category or "general", 0.0)
+
       agent_results = [normalize(item, "llm_agent") for item in agent.get("results", [])]
       vector_results = [normalize(item, "vector_search") for item in vector.get("results", [])]
       kb_results = [normalize(item, "knowledge_base") for item in kb]
       scan_results = [normalize(item, "scan_index") for item in scan]
 
+      all_items = agent_results + vector_results + kb_results + scan_results
+      target_source_map = {}
+      content_source_map = {}
+      for item in all_items:
+          tkey = normalize_target_key(item.get("target"))
+          ckey = content_fingerprint(item)
+          source = item.get("source_type") or "unknown"
+          if tkey:
+              target_source_map.setdefault(tkey, set()).add(source)
+          content_source_map.setdefault(ckey, set()).add(source)
+
+      for item in all_items:
+          tkey = normalize_target_key(item.get("target"))
+          ckey = content_fingerprint(item)
+          corroboration = len(content_source_map.get(ckey, set()))
+          target_corroboration = len(target_source_map.get(tkey, set())) if tkey else 0
+          boost = source_priority(item.get("source_type"))
+          boost += severity_boost(item.get("severity_hint"))
+          boost += category_boost(item.get("category"))
+          if corroboration >= 2:
+              boost += 0.12
+          if corroboration >= 3:
+              boost += 0.08
+          if target_corroboration >= 2:
+              boost += 0.10
+          if target_corroboration >= 3:
+              boost += 0.06
+          item["corroboration"] = corroboration
+          item["target_corroboration"] = target_corroboration
+          item["rank_score"] = round(float(item.get("relevance_score", 0)) + boost, 4)
+
       combined = []
       seen = set()
-      for item in sorted(agent_results + vector_results + kb_results + scan_results, key=lambda it: it.get("relevance_score", 0), reverse=True):
+      for item in sorted(all_items, key=lambda it: (it.get("rank_score", 0), it.get("relevance_score", 0)), reverse=True):
           if not item.get("content") and not item.get("target"):
               continue
           key = f'{item.get("target", "")}|{item.get("content", "")}'
@@ -1005,6 +1165,7 @@ steps:
       SKILLS_COMBINED="{{Output}}/ai-analysis/skills-combined.md"
       KNOWLEDGE_JSON="{{knowledgeSearchOutput}}"
       VECTOR_JSON="{{vectorSearchResultsOutput}}"
+      VECTOR_KB_JSON="{{vectorKnowledgeSearchOutput}}"
       echo "[Knowledge Base] Searching security knowledge..."
 
       strip_frontmatter() {
@@ -1094,12 +1255,26 @@ steps:
       if jq empty "$KNOWLEDGE_JSON" 2>/dev/null; then
         HIT_COUNT=$(jq 'length' "$KNOWLEDGE_JSON" 2>/dev/null || echo 0)
         if [ "$HIT_COUNT" -gt 0 ]; then
-          jq -r '.[] | "- [" + ((.score // 0) | tostring) + "] " + (.title // "untitled") + " :: " + (.snippet // "")' "$KNOWLEDGE_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
+          jq -r '.[] | "- [" + (((.relevance_score // .score) // 0) | tostring) + "] " + (.source // "knowledge") + " :: " + (.title // "untitled") + " :: " + (.snippet // "")' "$KNOWLEDGE_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
         else
           echo "No direct knowledge-base hits." >> "$KB_OUTPUT"
         fi
       else
         echo "Knowledge search output unavailable." >> "$KB_OUTPUT"
+      fi
+      echo "" >> "$KB_OUTPUT"
+
+      echo "## Direct Vector KB Hits" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      if jq empty "$VECTOR_KB_JSON" 2>/dev/null; then
+        VKB_HITS=$(jq 'length' "$VECTOR_KB_JSON" 2>/dev/null || echo 0)
+        if [ "$VKB_HITS" -gt 0 ]; then
+          jq -r '.[] | "- [" + (((.relevance_score // .score) // 0) | tostring) + "] " + (.title // "untitled") + " :: " + (.snippet // "")' "$VECTOR_KB_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
+        else
+          echo "No direct vector-kb hits." >> "$KB_OUTPUT"
+        fi
+      else
+        echo "Vector KB search output unavailable." >> "$KB_OUTPUT"
       fi
       echo "" >> "$KB_OUTPUT"
 

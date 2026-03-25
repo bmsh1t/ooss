@@ -26,10 +26,11 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Distributed Execution** - Redis-based master-worker pattern with queue system, webhook triggers, and file sync across workers
 - **Rich Function Library** - 80+ utility functions including nmap integration, tmux sessions, SSH execution, TypeScript/Python scripting, SARIF parsing, and CDN/WAF classification
 - **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), search them from CLI/API, and synthesize scan findings back into reusable workspace knowledge
+- **Independent Vector Knowledge DB** - Store reusable semantic knowledge in a standalone `vector-kb.sqlite`, auto-index on `kb ingest` / `kb learn`, and let workflows query it directly
 - **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
 - **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, and workspace risk boards
 - **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report
-- **Superdomain AI Workflow Family** - `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
+- **Superdomain AI Workflow Family** - `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
 - **Event-Driven Scheduling** - Cron, file-watch, and event triggers with filtering, deduplication, and delayed task queues
 - **Agentic LLM Steps** - Tool-calling agent loops with sub-agent orchestration, memory management, and structured output; plus ACP subprocess agents (Claude Code, Codex, OpenCode, Gemini)
 - **Cloud Infrastructure** - Provision and run scans across DigitalOcean, AWS, GCP, Linode, and Azure with cost controls and automatic cleanup
@@ -106,6 +107,13 @@ osmedeus kb search --query "jwt bypass" -w example.com
 osmedeus kb docs -w example.com
 osmedeus kb learn -w example.com
 osmedeus kb export -w example.com --output ./knowledge-index.txt
+osmedeus kb vector index -w example.com
+osmedeus kb vector search --query "jwt bypass" -w example.com
+osmedeus kb vector stats
+osmedeus kb vector doctor -w example.com
+osmedeus kb vector rebuild -w example.com
+osmedeus kb vector purge -w example.com
+osmedeus kb vector sync -w example.com
 
 # AI-heavy recon workflows
 osmedeus run -f superdomain-extensive-stable -t example.com
@@ -128,7 +136,12 @@ osmedeus --usage-example
 
 ## Knowledge Base and Vector Workflow Usage
 
-You can now extend the local knowledge base with your own documents and have the `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` workflow family consume that knowledge during semantic search.
+You can now extend the local knowledge base with your own documents and have `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` consume that knowledge during semantic search.
+
+The practical storage layout is now split into two layers:
+
+- Main DB: `knowledge_documents` / `knowledge_chunks` stay in the primary Osmedeus database as the source of truth
+- Independent vector DB: semantic embeddings are stored in a separate SQLite file, defaulting to `{{base_folder}}/knowledge/vector-kb.sqlite`
 
 ### Supported document types
 
@@ -153,9 +166,34 @@ You can now extend the local knowledge base with your own documents and have the
 ### Optional dependencies
 
 - `JINA_API_KEY` or `OPENAI_API_KEY`
-  - Enables vector embeddings during `ai-semantic-search`
+  - Enables vector embeddings during `ai-semantic-search` and `kb vector index/search`
 - `chromadb`
   - Needed only when you run the `ai-semantic-search-hybrid` fragment directly; the fragment will try to install it if missing
+
+### Vector knowledge config
+
+Add or verify this section in `~/osmedeus-base/osm-settings.yaml`:
+
+```yaml
+knowledge_vector:
+  enabled: true
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+  default_provider: openai
+  default_model: text-embedding-3-small
+  auto_index_on_ingest: true
+  auto_index_on_learn: true
+  top_k: 20
+  hybrid_weight: 0.7
+  keyword_weight: 0.3
+  batch_size: 32
+  max_indexing_chunks: 5000
+```
+
+Reference files:
+
+- `public/presets/superdomain-ai-kb.example.yaml`
+- `docs/knowledge-kb-layout.md`
+- `docs/knowledge-kb-ingest-guide.md`
 
 ### CLI workflow
 
@@ -171,6 +209,8 @@ osmedeus kb ingest --path /data/kb/playbook.pdf --workspace example.com
 ```bash
 osmedeus kb docs -w example.com
 osmedeus kb search --query "authentication bypass" -w example.com
+osmedeus kb vector search --query "authentication bypass" -w example.com
+osmedeus kb vector doctor -w example.com
 ```
 
 3. Optionally synthesize scan findings back into the same workspace knowledge:
@@ -179,10 +219,21 @@ osmedeus kb search --query "authentication bypass" -w example.com
 osmedeus kb learn -w example.com --include-ai
 ```
 
+When `knowledge_vector.auto_index_on_ingest=true` or `knowledge_vector.auto_index_on_learn=true`, Osmedeus will refresh `vector-kb.sqlite` automatically after these commands succeed.
+
+If the vector DB drifts over time, use:
+
+```bash
+osmedeus kb vector doctor -w example.com
+osmedeus kb vector sync -w example.com
+osmedeus kb vector purge -w example.com
+osmedeus kb vector rebuild -w example.com
+```
+
 4. Run an AI workflow that will automatically use the same knowledge workspace during semantic search:
 
 ```bash
-osmedeus run -f superdomain-extensive-ai-hybrid -t example.com
+osmedeus run -f superdomain-extensive-hybrid -t example.com
 ```
 
 ### Using a custom knowledge workspace
@@ -197,18 +248,40 @@ maxKnowledgeChunks: 400
 ```
 
 ```bash
-osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
+osmedeus run -f superdomain-extensive-hybrid -t example.com -P params.yaml
 ```
 
 ### What happens inside the workflow
 
 - `kb export` turns stored knowledge chunks into a line-oriented corpus for retrieval
 - `ai-semantic-search` now:
-  - performs direct `kb search` hits against the stored knowledge base
+  - performs direct `kb vector search` hits against the standalone `vector-kb.sqlite`
+  - merges those results with direct `kb search` keyword hits as fallback/supplement
   - exports knowledge chunks into the semantic index
   - includes those chunks in vector embedding generation when embeddings are configured
   - feeds both direct knowledge hits and vector recall candidates into the downstream semantic-search agent
+- `ai-apply-decision` normalizes the AI output into `applied-ai-decision-{{TargetSpace}}.json`, `dynamic-config.yaml`, and `scan-env.sh`, so downstream modules consume one stable decision layer
+- `targeted-rescan` now feeds verified follow-up hits back into the main nuclei result set instead of leaving them isolated in a side artifact
+- `ai-post-followup-coordination` aggregates retest, operator queue, campaign handoff/create, and rescan outputs into `followup-decision-{{TargetSpace}}.json` and `.md`
+- the default follow-up workflow for retest/campaign execution is `web-analysis`
 - `ai-knowledge-autolearn` still runs after reporting so future runs can reuse newly learned findings
+
+### API usage
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/vector/index \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace":"example.com"}'
+
+curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace":"example.com","query":"authentication bypass","limit":10}'
+
+curl http://localhost:8002/osm/api/knowledge/vector/stats \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Recent Backend Additions
 
@@ -216,6 +289,7 @@ osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
   - Ingest local files into a searchable workspace-scoped knowledge store
   - Search/list stored documents from CLI and REST API
   - Auto-learn scan results back into the knowledge base for later reuse
+  - Maintain a standalone `vector-kb.sqlite` with direct CLI/API semantic search
 - **Campaign APIs**
   - `GET /osm/api/campaigns`
   - `POST /osm/api/campaigns`
@@ -233,6 +307,8 @@ osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
 - **Superdomain AI workflow closure**
   - `stable` and `hybrid` now generate persisted attack-chain visualization artifacts in addition to the attack-chain report
   - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
+  - All four workflows now emit a normalized `applied-ai-decision` artifact and a post-execution `followup-decision` artifact for downstream reuse and reporting
+  - Retest, operator queue, campaign handoff, and targeted rescan are now folded back into the same decision chain instead of remaining isolated outputs
   - Retest lifecycle now propagates source run UUIDs so post-retest state can converge back to `verified`, `closed`, or `triaged`
 - **Verification snapshot**
   - Current source builds successfully with `make build`

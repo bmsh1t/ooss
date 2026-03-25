@@ -22,6 +22,8 @@ params:
     default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
 
   - name: enableOperatorQueue
     type: bool
@@ -55,6 +57,7 @@ steps:
         --arg semantic_file "{{semanticSearchFile}}" \
         --arg retest_file "{{retestPlanOutput}}" \
         --arg decision_file "{{aiDecisionFile}}" \
+        --arg applied_decision_file "{{appliedDecisionFile}}" \
         --argjson vuln_count "$VULN_COUNT" \
         --argjson chain_count "$CHAIN_COUNT" \
         --argjson phase_count "$PHASE_COUNT" \
@@ -68,6 +71,8 @@ steps:
             semantic_search: $semantic_file,
             retest_plan: $retest_file,
             ai_decision: $decision_file
+            ,
+            applied_ai_decision: $applied_decision_file
           },
           counts: {
             confirmed_vulns: $vuln_count,

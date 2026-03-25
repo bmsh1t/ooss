@@ -26,6 +26,12 @@ params:
     default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
   - name: entryPointsFile
     default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: knowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # 配置
   - name: enablePathPlanning
@@ -57,9 +63,41 @@ steps:
         # 提取入口点
         jq -r '.attack_chain_summary.most_likely_entry_points[]' "{{attackChainFile}}" 2>/dev/null > {{Output}}/ai-analysis/.input/entry-points.txt || true
       fi
+
+      if [ -f "{{semanticSearchFile}}" ] && jq empty "{{semanticSearchFile}}" 2>/dev/null; then
+        jq -r '.results[0:8][]? | [
+          (.target // .title // "unknown"),
+          (.category // "general"),
+          ("severity=" + ((.severity_hint // "info") | tostring)),
+          (.content // .snippet // "")
+        ] | @tsv' "{{semanticSearchFile}}" > {{Output}}/ai-analysis/.input/semantic-priority.txt 2>/dev/null || true
+      fi
+
+      {
+        if [ -f "{{vectorKnowledgeSearchFile}}" ] && jq empty "{{vectorKnowledgeSearchFile}}" 2>/dev/null; then
+          jq -r '.[]? | [
+            "vector-kb",
+            (.title // .source_path // "unknown"),
+            (.section // "general"),
+            ("score=" + (((.relevance_score // .score) // 0) | tostring)),
+            (.snippet // .content // "")
+          ] | @tsv' "{{vectorKnowledgeSearchFile}}" 2>/dev/null || true
+        fi
+        if [ -f "{{knowledgeSearchFile}}" ] && jq empty "{{knowledgeSearchFile}}" 2>/dev/null; then
+          jq -r '.[]? | [
+            (.source // "knowledge"),
+            (.title // .source_path // "unknown"),
+            (.section // "general"),
+            ("score=" + (((.relevance_score // .score) // 0) | tostring)),
+            (.snippet // .content // "")
+          ] | @tsv' "{{knowledgeSearchFile}}" 2>/dev/null || true
+        fi
+      } | awk 'NF && !seen[$0]++' | head -12 > {{Output}}/ai-analysis/.input/knowledge-priority.txt || true
       
       CHAIN_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || echo 0)
-      echo "[Path Planning] Input prepared: $CHAIN_SIZE bytes"
+      SEMANTIC_SIZE=$(wc -l < {{Output}}/ai-analysis/.input/semantic-priority.txt 2>/dev/null || echo 0)
+      KNOWLEDGE_SIZE=$(wc -l < {{Output}}/ai-analysis/.input/knowledge-priority.txt 2>/dev/null || echo 0)
+      echo "[Path Planning] Input prepared: chains=$CHAIN_SIZE semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
 
   - name: check-path-planning-data
     type: bash
@@ -154,8 +192,15 @@ steps:
       基于攻击链为 {{Target}} 生成详细执行计划。
       
       攻击链数据：{{Output}}/ai-analysis/.input/chains.json
+      语义优先目标：{{Output}}/ai-analysis/.input/semantic-priority.txt
+      知识库利用经验：{{Output}}/ai-analysis/.input/knowledge-priority.txt
       
       请读取数据，生成执行计划。
+
+      额外要求：
+      - 优先围绕“攻击链入口 + 语义优先目标 + 知识库命中经验”的交集来规划执行顺序
+      - 如果知识库提示某类入口通常伴随认证、权限、文件处理或业务逻辑问题，要把对应验证动作前移
+      - 每个阶段优先选择真实可执行、可验证、低噪音的动作
       
       输出格式：
       1. 文字计划

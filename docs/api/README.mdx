@@ -36,7 +36,7 @@ See [Authentication](authentication.mdx) for details.
 | [Workspaces](workspaces.mdx) | List and manage workspaces |
 | [Artifacts](artifacts.mdx) | List and download output artifacts |
 | [Assets](assets.mdx) | View discovered assets |
-| [Knowledge Base](knowledge.mdx) | Ingest documents, search stored chunks, and auto-learn workspace findings |
+| [Knowledge Base](knowledge.mdx) | Ingest documents, search stored chunks, auto-learn workspace findings, and query the standalone vector knowledge DB |
 | [Campaigns](campaigns.mdx) | Group queued runs, rerun failed targets, and queue deep scans |
 | [Vulnerabilities](vulnerabilities.mdx) | View and manage vulnerabilities |
 | [Attack Chains](attack-chains.mdx) | Import and query AI attack-chain workbench reports |
@@ -104,3 +104,7 @@ Optional vector-search dependencies:
 
 - `JINA_API_KEY` or `OPENAI_API_KEY` to enable embeddings-backed retrieval
 - `chromadb` when running the Chroma hybrid-search fragment directly
+
+The standalone vector knowledge DB defaults to `{{base_folder}}/knowledge/vector-kb.sqlite` and can be queried from both CLI and API.
+
+`superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` consume the same knowledge workspace during semantic search, then persist normalized `applied-ai-decision` and `followup-decision` artifacts for downstream retest, operator, and campaign handling.

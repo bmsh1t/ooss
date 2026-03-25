@@ -90,6 +90,38 @@ database:
   ssl_mode: disable
 
 # =============================================================================
+# Independent Vector Knowledge DB
+# =============================================================================
+# Stores vectorized knowledge in a standalone SQLite file for reusable semantic search
+knowledge_vector:
+  # Enable the independent vector knowledge DB
+  enabled: true
+
+  # Standalone vector DB path
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+
+  # Default embedding provider/model used for indexing and search
+  default_provider: openai
+  default_model: text-embedding-3-small
+
+  # Informational settings for current implementation
+  dimension: 1536
+  metric: cosine
+
+  # Hybrid retrieval tuning
+  top_k: 20
+  hybrid_weight: 0.7
+  keyword_weight: 0.3
+
+  # Automatically refresh vector index after kb ingest / kb learn
+  auto_index_on_ingest: true
+  auto_index_on_learn: true
+
+  # Indexing controls
+  batch_size: 32
+  max_indexing_chunks: 5000
+
+# =============================================================================
 # Server Configuration
 # =============================================================================
 # REST API server settings for the web interface
@@ -406,17 +438,18 @@ var (
 
 // Config holds the complete application configuration
 type Config struct {
-	BaseFolder   string             `yaml:"base_folder"`
-	Environments EnvironmentConfig  `yaml:"environments"`
-	Database     DatabaseConfig     `yaml:"database"`
-	Server       ServerConfig       `yaml:"server"`
-	ScanTactic   ScanTacticConfig   `yaml:"scan_tactic"`
-	Redis        RedisConfig        `yaml:"redis"`
-	GlobalVars   GlobalVarsConfig   `yaml:"global_vars"`
-	Notification NotificationConfig `yaml:"notification"`
-	Storage      StorageConfig      `yaml:"storage"`
-	LLM          LLMConfig          `yaml:"llm_config"`
-	Cloud        CloudConfig        `yaml:"cloud"`
+	BaseFolder      string                `yaml:"base_folder"`
+	Environments    EnvironmentConfig     `yaml:"environments"`
+	Database        DatabaseConfig        `yaml:"database"`
+	KnowledgeVector KnowledgeVectorConfig `yaml:"knowledge_vector"`
+	Server          ServerConfig          `yaml:"server"`
+	ScanTactic      ScanTacticConfig      `yaml:"scan_tactic"`
+	Redis           RedisConfig           `yaml:"redis"`
+	GlobalVars      GlobalVarsConfig      `yaml:"global_vars"`
+	Notification    NotificationConfig    `yaml:"notification"`
+	Storage         StorageConfig         `yaml:"storage"`
+	LLM             LLMConfig             `yaml:"llm_config"`
+	Cloud           CloudConfig           `yaml:"cloud"`
 
 	// Runtime paths (resolved from templates)
 	BinariesPath                string `yaml:"-"`
@@ -455,6 +488,23 @@ type DatabaseConfig struct {
 	DBName            string `yaml:"db_name"`
 	ConnectionTimeout int    `yaml:"connection_timeout"`
 	SSLMode           string `yaml:"ssl_mode"`
+}
+
+// KnowledgeVectorConfig holds configuration for the independent vector knowledge store.
+type KnowledgeVectorConfig struct {
+	Enabled           *bool   `yaml:"enabled,omitempty"`
+	DBPath            string  `yaml:"db_path"`
+	DefaultProvider   string  `yaml:"default_provider"`
+	DefaultModel      string  `yaml:"default_model"`
+	Dimension         int     `yaml:"dimension"`
+	Metric            string  `yaml:"metric"`
+	TopK              int     `yaml:"top_k"`
+	HybridWeight      float64 `yaml:"hybrid_weight"`
+	KeywordWeight     float64 `yaml:"keyword_weight"`
+	AutoIndexOnIngest *bool   `yaml:"auto_index_on_ingest,omitempty"`
+	AutoIndexOnLearn  *bool   `yaml:"auto_index_on_learn,omitempty"`
+	BatchSize         int     `yaml:"batch_size"`
+	MaxIndexingChunks int     `yaml:"max_indexing_chunks"`
 }
 
 // ServerConfig holds API server settings
@@ -897,6 +947,71 @@ func (c *Config) GetDBPath() string {
 	return c.resolvePath(c.Database.DBPath, c.BaseFolder)
 }
 
+// GetKnowledgeVectorDBPath returns the resolved vector knowledge database path.
+func (c *Config) GetKnowledgeVectorDBPath() string {
+	if strings.TrimSpace(c.KnowledgeVector.DBPath) == "" {
+		return filepath.Join(c.BaseFolder, "knowledge", "vector-kb.sqlite")
+	}
+	return c.resolvePath(c.KnowledgeVector.DBPath, c.BaseFolder)
+}
+
+// IsKnowledgeVectorEnabled returns true if the independent vector knowledge DB is enabled.
+func (c *Config) IsKnowledgeVectorEnabled() bool {
+	if c.KnowledgeVector.Enabled == nil {
+		return true
+	}
+	return *c.KnowledgeVector.Enabled
+}
+
+// IsKnowledgeVectorAutoIndexOnIngest returns true if ingest should auto-index into vector DB.
+func (c *Config) IsKnowledgeVectorAutoIndexOnIngest() bool {
+	if c.KnowledgeVector.AutoIndexOnIngest == nil {
+		return true
+	}
+	return *c.KnowledgeVector.AutoIndexOnIngest
+}
+
+// IsKnowledgeVectorAutoIndexOnLearn returns true if learn should auto-index into vector DB.
+func (c *Config) IsKnowledgeVectorAutoIndexOnLearn() bool {
+	if c.KnowledgeVector.AutoIndexOnLearn == nil {
+		return true
+	}
+	return *c.KnowledgeVector.AutoIndexOnLearn
+}
+
+// GetKnowledgeVectorTopK returns the configured top-k with a safe default.
+func (c *Config) GetKnowledgeVectorTopK() int {
+	if c.KnowledgeVector.TopK <= 0 {
+		return 20
+	}
+	return c.KnowledgeVector.TopK
+}
+
+// GetKnowledgeVectorBatchSize returns the configured indexing batch size with a safe default.
+func (c *Config) GetKnowledgeVectorBatchSize() int {
+	if c.KnowledgeVector.BatchSize <= 0 {
+		return 32
+	}
+	return c.KnowledgeVector.BatchSize
+}
+
+// GetKnowledgeVectorHybridWeights returns normalized hybrid and keyword weights.
+func (c *Config) GetKnowledgeVectorHybridWeights() (float64, float64) {
+	hybrid := c.KnowledgeVector.HybridWeight
+	keyword := c.KnowledgeVector.KeywordWeight
+	if hybrid <= 0 {
+		hybrid = 0.7
+	}
+	if keyword <= 0 {
+		keyword = 0.3
+	}
+	total := hybrid + keyword
+	if total <= 0 {
+		return 0.7, 0.3
+	}
+	return hybrid / total, keyword / total
+}
+
 // IsSQLite returns true if the database engine is SQLite
 func (c *Config) IsSQLite() bool {
 	return c.Database.DBEngine == "" || c.Database.DBEngine == "sqlite"
@@ -1158,6 +1273,18 @@ func DefaultConfig() *Config {
 			DBName:            "osmedeus",
 			ConnectionTimeout: 60,
 			SSLMode:           "disable",
+		},
+		KnowledgeVector: KnowledgeVectorConfig{
+			DBPath:            "{{base_folder}}/knowledge/vector-kb.sqlite",
+			DefaultProvider:   "openai",
+			DefaultModel:      "text-embedding-3-small",
+			Dimension:         1536,
+			Metric:            "cosine",
+			TopK:              20,
+			HybridWeight:      0.7,
+			KeywordWeight:     0.3,
+			BatchSize:         32,
+			MaxIndexingChunks: 5000,
 		},
 		Server: ServerConfig{
 			Host:               "0.0.0.0",

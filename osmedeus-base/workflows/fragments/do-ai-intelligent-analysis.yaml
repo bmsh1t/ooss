@@ -38,6 +38,14 @@ params:
     default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
   - name: initialSemanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: knowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: initialKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: initialVectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
   - name: semanticHighlightsFile
     default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
   - name: initialSemanticHighlightsFile
@@ -217,6 +225,20 @@ steps:
         INITIAL_SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$INITIAL_SEMANTIC_FILE" 2>/dev/null || echo 0)
       fi
 
+      INITIAL_KNOWLEDGE_STATUS="not_available"
+      INITIAL_KNOWLEDGE_RESULTS=0
+      if check_file "{{initialKnowledgeSearchFile}}" "Initial knowledge search"; then
+        INITIAL_KNOWLEDGE_STATUS="available"
+        INITIAL_KNOWLEDGE_RESULTS=$(jq -r 'length // 0' "{{initialKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+      fi
+
+      INITIAL_VECTOR_KNOWLEDGE_STATUS="not_available"
+      INITIAL_VECTOR_KNOWLEDGE_RESULTS=0
+      if check_file "{{initialVectorKnowledgeSearchFile}}" "Initial vector knowledge search"; then
+        INITIAL_VECTOR_KNOWLEDGE_STATUS="available"
+        INITIAL_VECTOR_KNOWLEDGE_RESULTS=$(jq -r 'length // 0' "{{initialVectorKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+      fi
+
       SEMANTIC_STATUS="not_available"
       SEMANTIC_RESULTS=0
       if check_file "$SEMANTIC_FILE" "Semantic search"; then
@@ -224,9 +246,23 @@ steps:
         SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
       fi
 
+      KNOWLEDGE_STATUS="not_available"
+      KNOWLEDGE_RESULTS=0
+      if check_file "{{knowledgeSearchFile}}" "Knowledge search"; then
+        KNOWLEDGE_STATUS="available"
+        KNOWLEDGE_RESULTS=$(jq -r 'length // 0' "{{knowledgeSearchFile}}" 2>/dev/null || echo 0)
+      fi
+
+      VECTOR_KNOWLEDGE_STATUS="not_available"
+      VECTOR_KNOWLEDGE_RESULTS=0
+      if check_file "{{vectorKnowledgeSearchFile}}" "Vector knowledge search"; then
+        VECTOR_KNOWLEDGE_STATUS="available"
+        VECTOR_KNOWLEDGE_RESULTS=$(jq -r 'length // 0' "{{vectorKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+      fi
+
       # 检查是否有任何模块产生了有效结果
       ANY_DATA="false"
-      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ] || [ "$INITIAL_SEMANTIC_STATUS" = "available" ]; then
+      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ] || [ "$INITIAL_SEMANTIC_STATUS" = "available" ] || [ "$KNOWLEDGE_STATUS" = "available" ] || [ "$VECTOR_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_VECTOR_KNOWLEDGE_STATUS" = "available" ]; then
         ANY_DATA="true"
       fi
 
@@ -246,8 +282,16 @@ steps:
         --argjson total_phases "$TOTAL_PHASES" \
         --arg initial_semantic_status "$INITIAL_SEMANTIC_STATUS" \
         --argjson initial_semantic_results "$INITIAL_SEMANTIC_RESULTS" \
+        --arg initial_knowledge_status "$INITIAL_KNOWLEDGE_STATUS" \
+        --argjson initial_knowledge_results "$INITIAL_KNOWLEDGE_RESULTS" \
+        --arg initial_vector_knowledge_status "$INITIAL_VECTOR_KNOWLEDGE_STATUS" \
+        --argjson initial_vector_knowledge_results "$INITIAL_VECTOR_KNOWLEDGE_RESULTS" \
         --arg semantic_status "$SEMANTIC_STATUS" \
         --argjson semantic_results "$SEMANTIC_RESULTS" \
+        --arg knowledge_status "$KNOWLEDGE_STATUS" \
+        --argjson knowledge_results "$KNOWLEDGE_RESULTS" \
+        --arg vector_knowledge_status "$VECTOR_KNOWLEDGE_STATUS" \
+        --argjson vector_knowledge_results "$VECTOR_KNOWLEDGE_RESULTS" \
         '{
           aggregation_timestamp: $aggregation_timestamp,
           any_data_available: $any_data_available,
@@ -270,9 +314,25 @@ steps:
               status: $initial_semantic_status,
               results: $initial_semantic_results
             },
+            knowledge_search_initial: {
+              status: $initial_knowledge_status,
+              results: $initial_knowledge_results
+            },
+            vector_knowledge_search_initial: {
+              status: $initial_vector_knowledge_status,
+              results: $initial_vector_knowledge_results
+            },
             semantic_search: {
               status: $semantic_status,
               results: $semantic_results
+            },
+            knowledge_search: {
+              status: $knowledge_status,
+              results: $knowledge_results
+            },
+            vector_knowledge_search: {
+              status: $vector_knowledge_status,
+              results: $vector_knowledge_results
             }
           }
         }' > {{Output}}/ai-analysis/aggregated-results.json
@@ -360,6 +420,28 @@ steps:
         REASONING="$REASONING + $TOTAL_SEMANTIC_CRITICAL semantic highlights"
       fi
 
+      TOTAL_KNOWLEDGE_HITS=0
+      if [ -f "{{initialKnowledgeSearchFile}}" ] && jq empty "{{initialKnowledgeSearchFile}}" 2>/dev/null; then
+        INITIAL_KNOWLEDGE_HITS=$(jq -r 'length // 0' "{{initialKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+        TOTAL_KNOWLEDGE_HITS=$((TOTAL_KNOWLEDGE_HITS + INITIAL_KNOWLEDGE_HITS))
+      fi
+      if [ -f "{{knowledgeSearchFile}}" ] && jq empty "{{knowledgeSearchFile}}" 2>/dev/null; then
+        KNOWLEDGE_HITS=$(jq -r 'length // 0' "{{knowledgeSearchFile}}" 2>/dev/null || echo 0)
+        TOTAL_KNOWLEDGE_HITS=$((TOTAL_KNOWLEDGE_HITS + KNOWLEDGE_HITS))
+      fi
+      if [ -f "{{initialVectorKnowledgeSearchFile}}" ] && jq empty "{{initialVectorKnowledgeSearchFile}}" 2>/dev/null; then
+        INITIAL_VECTOR_KNOWLEDGE_HITS=$(jq -r 'length // 0' "{{initialVectorKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+        TOTAL_KNOWLEDGE_HITS=$((TOTAL_KNOWLEDGE_HITS + INITIAL_VECTOR_KNOWLEDGE_HITS))
+      fi
+      if [ -f "{{vectorKnowledgeSearchFile}}" ] && jq empty "{{vectorKnowledgeSearchFile}}" 2>/dev/null; then
+        VECTOR_KNOWLEDGE_HITS=$(jq -r 'length // 0' "{{vectorKnowledgeSearchFile}}" 2>/dev/null || echo 0)
+        TOTAL_KNOWLEDGE_HITS=$((TOTAL_KNOWLEDGE_HITS + VECTOR_KNOWLEDGE_HITS))
+      fi
+
+      if [ "$TOTAL_KNOWLEDGE_HITS" -gt 0 ]; then
+        REASONING="$REASONING + $TOTAL_KNOWLEDGE_HITS knowledge context hits"
+      fi
+
       FOCUS_TMP="{{Output}}/ai-analysis/.focus-areas-{{TargetSpace}}.txt"
       RESCAN_TMP="{{Output}}/ai-analysis/.rescan-targets-{{TargetSpace}}.txt"
       : > "$FOCUS_TMP"
@@ -411,6 +493,7 @@ steps:
         --arg waf_recommended_delay "$WAF_DELAY" \
         --argjson focus_areas "$FOCUS_JSON" \
         --argjson rescan_targets "$RESCAN_TARGETS_JSON" \
+        --argjson knowledge_context_hits "$TOTAL_KNOWLEDGE_HITS" \
         --arg reasoning "$REASONING" \
         '{
           nuclei_severity: $nuclei_severity,
@@ -428,6 +511,11 @@ steps:
           focus_areas: $focus_areas,
           priority_targets: $focus_areas,
           rescan_targets: $rescan_targets,
+          decision_inputs: {
+            knowledge_context_hits: $knowledge_context_hits,
+            focus_area_count: ($focus_areas | length),
+            rescan_target_count: ($rescan_targets | length)
+          },
           reasoning: $reasoning
         }' > {{aiDecisionFile}}
 
@@ -484,7 +572,7 @@ steps:
 
       # 添加各组件状态
       if [ -f "$AGG_FILE" ]; then
-        jq -r '.components | "### 漏洞验证\n- 状态: \(.vuln_validation.status)\n- 确认漏洞: \(.vuln_validation.confirmed_vulns)\n- 假阳性: \(.vuln_validation.false_positives)\n\n### 攻击链分析\n- 状态: \(.attack_chain.status)\n- 总攻击链: \(.attack_chain.total_chains)\n- 关键攻击链: \(.attack_chain.critical_chains)\n\n### 路径规划\n- 状态: \(.path_planning.status)\n- 规划阶段: \(.path_planning.total_phases)\n\n### 语义搜索\n- 状态: \(.semantic_search.status)\n- 搜索结果: \(.semantic_search.results)\n"' "$AGG_FILE" 2>/dev/null >> {{analysisOutputMd}} || true
+        jq -r '.components | "### 漏洞验证\n- 状态: \(.vuln_validation.status)\n- 确认漏洞: \(.vuln_validation.confirmed_vulns)\n- 假阳性: \(.vuln_validation.false_positives)\n\n### 攻击链分析\n- 状态: \(.attack_chain.status)\n- 总攻击链: \(.attack_chain.total_chains)\n- 关键攻击链: \(.attack_chain.critical_chains)\n\n### 路径规划\n- 状态: \(.path_planning.status)\n- 规划阶段: \(.path_planning.total_phases)\n\n### 语义搜索\n- 状态: \(.semantic_search.status)\n- 搜索结果: \(.semantic_search.results)\n\n### 知识库上下文\n- 初始知识命中: \(.knowledge_search_initial.results)\n- 初始向量知识命中: \(.vector_knowledge_search_initial.results)\n- 漏洞后知识命中: \(.knowledge_search.results)\n- 漏洞后向量知识命中: \(.vector_knowledge_search.results)\n"' "$AGG_FILE" 2>/dev/null >> {{analysisOutputMd}} || true
       fi
 
       # 添加 AI 决策配置
