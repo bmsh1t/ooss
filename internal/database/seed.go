@@ -2,8 +2,13 @@ package database
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +17,13 @@ import (
 )
 
 var ErrVulnerabilityRetestInProgress = errors.New("vulnerability retest already queued or running")
+
+// CreateVulnerabilityResult reports whether a vulnerability was inserted or merged.
+type CreateVulnerabilityResult struct {
+	Vulnerability *Vulnerability `json:"vulnerability"`
+	Created       bool           `json:"created"`
+	Merged        bool           `json:"merged"`
+}
 
 // SeedDatabase populates the database with sample data for development and testing
 func SeedDatabase(ctx context.Context) error {
@@ -3919,21 +3931,439 @@ func GetVulnerabilityByID(ctx context.Context, id int64) (*Vulnerability, error)
 	return &vuln, nil
 }
 
-// CreateVulnerabilityRecord creates a new vulnerability in the database
-func CreateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) error {
+// CreateVulnerabilityRecord creates or merges a vulnerability record using a stable fingerprint key.
+func CreateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) (*CreateVulnerabilityResult, error) {
 	if db == nil {
-		return fmt.Errorf("database not connected")
+		return nil, fmt.Errorf("database not connected")
 	}
+	if vuln == nil {
+		return nil, fmt.Errorf("vulnerability is required")
+	}
+
+	now := time.Now()
+	vuln.Workspace = strings.TrimSpace(vuln.Workspace)
+	vuln.FingerprintKey = buildVulnerabilityFingerprint(vuln)
 	if strings.TrimSpace(vuln.VulnStatus) == "" {
 		vuln.VulnStatus = "new"
 	}
-
-	_, err := db.NewInsert().Model(vuln).Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create vulnerability: %w", err)
+	if vuln.CreatedAt.IsZero() {
+		vuln.CreatedAt = now
+	}
+	if vuln.UpdatedAt.IsZero() {
+		vuln.UpdatedAt = now
+	}
+	if vuln.FirstSeenAt.IsZero() {
+		vuln.FirstSeenAt = vuln.CreatedAt
+	}
+	if vuln.LastSeenAt.IsZero() {
+		vuln.LastSeenAt = now
+	}
+	if vuln.EvidenceVersion <= 0 {
+		vuln.EvidenceVersion = 1
 	}
 
-	return nil
+	evidence := buildVulnerabilityEvidence(vuln, now)
+	returnResult := &CreateVulnerabilityResult{}
+
+	err := Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var existing Vulnerability
+		err := tx.NewSelect().
+			Model(&existing).
+			Where("workspace = ?", vuln.Workspace).
+			Where("fingerprint_key = ?", vuln.FingerprintKey).
+			Limit(1).
+			Scan(ctx)
+		switch {
+		case err == nil:
+			merged := mergeVulnerabilityRecords(&existing, vuln, evidence, now)
+			if _, err := tx.NewUpdate().
+				Model(merged).
+				Column(
+					"vuln_info",
+					"vuln_title",
+					"vuln_desc",
+					"vuln_poc",
+					"severity",
+					"confidence",
+					"asset_type",
+					"asset_value",
+					"tags",
+					"detail_http_request",
+					"detail_http_response",
+					"raw_vuln_json",
+					"fingerprint_key",
+					"vuln_status",
+					"source_run_uuid",
+					"ai_verdict",
+					"ai_summary",
+					"analyst_verdict",
+					"analyst_notes",
+					"retest_status",
+					"retest_run_uuid",
+					"attack_chain_ref",
+					"related_assets",
+					"report_refs",
+					"evidence_version",
+					"evidence_history_json",
+					"first_seen_at",
+					"verified_at",
+					"closed_at",
+					"updated_at",
+					"last_seen_at",
+				).
+				WherePK().
+				Exec(ctx); err != nil {
+				return fmt.Errorf("failed to merge vulnerability: %w", err)
+			}
+			*returnResult = CreateVulnerabilityResult{
+				Vulnerability: merged,
+				Created:       false,
+				Merged:        true,
+			}
+			*vuln = *merged
+			return nil
+		case err != nil && err != sql.ErrNoRows:
+			return fmt.Errorf("failed to query existing vulnerability: %w", err)
+		}
+
+		vuln.EvidenceHistory = marshalVulnerabilityEvidenceHistory([]VulnerabilityEvidence{evidence})
+		_, err = tx.NewInsert().Model(vuln).Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create vulnerability: %w", err)
+		}
+		*returnResult = CreateVulnerabilityResult{
+			Vulnerability: vuln,
+			Created:       true,
+			Merged:        false,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return returnResult, nil
+}
+
+func buildVulnerabilityFingerprint(vuln *Vulnerability) string {
+	parts := []string{
+		normalizeVulnerabilityFingerprintPart(vuln.Workspace),
+		normalizeVulnerabilityFingerprintPart(firstNonEmpty(vuln.VulnInfo, vuln.VulnTitle)),
+		normalizeVulnerabilityFingerprintPart(vuln.AssetType),
+		normalizeVulnerabilityFingerprintPart(vuln.AssetValue),
+	}
+	raw := strings.Join(parts, "::")
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeVulnerabilityFingerprintPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.Join(strings.Fields(value), " ")
+	return value
+}
+
+func buildVulnerabilityEvidence(vuln *Vulnerability, observedAt time.Time) VulnerabilityEvidence {
+	return VulnerabilityEvidence{
+		ObservedAt:         observedAt,
+		SourceRunUUID:      strings.TrimSpace(vuln.SourceRunUUID),
+		Severity:           strings.TrimSpace(vuln.Severity),
+		Confidence:         strings.TrimSpace(vuln.Confidence),
+		VulnStatus:         strings.TrimSpace(vuln.VulnStatus),
+		AssetValue:         strings.TrimSpace(vuln.AssetValue),
+		DetailRequestHash:  hashVulnerabilityBlob(vuln.DetailHTTPRequest),
+		DetailResponseHash: hashVulnerabilityBlob(vuln.DetailHTTPResponse),
+		RawVulnHash:        hashVulnerabilityBlob(vuln.RawVulnJSON),
+		ReportRefs:         dedupeStrings(vuln.ReportRefs),
+		AttackChainRef:     strings.TrimSpace(vuln.AttackChainRef),
+	}
+}
+
+func hashVulnerabilityBlob(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func mergeVulnerabilityRecords(existing, incoming *Vulnerability, evidence VulnerabilityEvidence, now time.Time) *Vulnerability {
+	merged := *existing
+	merged.VulnInfo = chooseLongerOrIncoming(existing.VulnInfo, incoming.VulnInfo)
+	merged.VulnTitle = chooseLongerOrIncoming(existing.VulnTitle, incoming.VulnTitle)
+	merged.VulnDesc = chooseLongerOrIncoming(existing.VulnDesc, incoming.VulnDesc)
+	merged.VulnPOC = chooseLongerOrIncoming(existing.VulnPOC, incoming.VulnPOC)
+	merged.Severity = chooseHigherSeverity(existing.Severity, incoming.Severity)
+	merged.Confidence = chooseHigherConfidence(existing.Confidence, incoming.Confidence)
+	merged.AssetType = chooseNonEmpty(incoming.AssetType, existing.AssetType)
+	merged.AssetValue = chooseNonEmpty(incoming.AssetValue, existing.AssetValue)
+	merged.Tags = dedupeStrings(append(existing.Tags, incoming.Tags...))
+	merged.DetailHTTPRequest = chooseLongerOrIncoming(existing.DetailHTTPRequest, incoming.DetailHTTPRequest)
+	merged.DetailHTTPResponse = chooseLongerOrIncoming(existing.DetailHTTPResponse, incoming.DetailHTTPResponse)
+	merged.RawVulnJSON = chooseLongerOrIncoming(existing.RawVulnJSON, incoming.RawVulnJSON)
+	merged.FingerprintKey = chooseNonEmpty(incoming.FingerprintKey, existing.FingerprintKey)
+	merged.VulnStatus = choosePreferredVulnerabilityStatus(existing.VulnStatus, incoming.VulnStatus)
+	merged.SourceRunUUID = chooseNonEmpty(incoming.SourceRunUUID, existing.SourceRunUUID)
+	merged.AIVerdict = chooseNonEmpty(incoming.AIVerdict, existing.AIVerdict)
+	merged.AISummary = chooseLongerOrIncoming(existing.AISummary, incoming.AISummary)
+	merged.AnalystVerdict = chooseNonEmpty(existing.AnalystVerdict, incoming.AnalystVerdict)
+	merged.AnalystNotes = chooseLongerOrIncoming(existing.AnalystNotes, incoming.AnalystNotes)
+	merged.RetestStatus = choosePreferredRetestStatus(existing.RetestStatus, incoming.RetestStatus)
+	merged.RetestRunUUID = chooseNonEmpty(existing.RetestRunUUID, incoming.RetestRunUUID)
+	merged.AttackChainRef = chooseNonEmpty(incoming.AttackChainRef, existing.AttackChainRef)
+	merged.RelatedAssets = dedupeStrings(append(existing.RelatedAssets, incoming.RelatedAssets...))
+	merged.ReportRefs = dedupeStrings(append(existing.ReportRefs, incoming.ReportRefs...))
+	merged.FirstSeenAt = minNonZeroTime(existing.FirstSeenAt, incoming.FirstSeenAt, existing.CreatedAt, incoming.CreatedAt, now)
+	merged.LastSeenAt = maxNonZeroTime(existing.LastSeenAt, incoming.LastSeenAt, now)
+	merged.UpdatedAt = now
+	merged.CreatedAt = existing.CreatedAt
+
+	if merged.VerifiedAt == nil && incoming.VerifiedAt != nil {
+		merged.VerifiedAt = incoming.VerifiedAt
+	}
+	if merged.ClosedAt == nil && incoming.ClosedAt != nil {
+		merged.ClosedAt = incoming.ClosedAt
+	}
+	if merged.VulnStatus == "verified" && merged.VerifiedAt == nil {
+		verifiedAt := now
+		merged.VerifiedAt = &verifiedAt
+	}
+	if merged.VulnStatus == "closed" && merged.ClosedAt == nil {
+		closedAt := now
+		merged.ClosedAt = &closedAt
+	}
+	if merged.VulnStatus != "closed" {
+		merged.ClosedAt = nil
+	}
+
+	history := unmarshalVulnerabilityEvidenceHistory(existing.EvidenceHistory)
+	if len(history) == 0 {
+		history = append(history, buildVulnerabilityEvidence(existing, existing.LastSeenAt))
+	}
+	if appendEvidenceIfChanged(&history, evidence) {
+		merged.EvidenceVersion = maxInt(existing.EvidenceVersion, 1) + 1
+	} else {
+		merged.EvidenceVersion = maxInt(existing.EvidenceVersion, 1)
+	}
+	merged.EvidenceHistory = marshalVulnerabilityEvidenceHistory(history)
+	return &merged
+}
+
+func unmarshalVulnerabilityEvidenceHistory(raw string) []VulnerabilityEvidence {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var history []VulnerabilityEvidence
+	if err := json.Unmarshal([]byte(raw), &history); err != nil {
+		return nil
+	}
+	return history
+}
+
+func marshalVulnerabilityEvidenceHistory(history []VulnerabilityEvidence) string {
+	if len(history) == 0 {
+		return "[]"
+	}
+	data, err := json.Marshal(history)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+func appendEvidenceIfChanged(history *[]VulnerabilityEvidence, evidence VulnerabilityEvidence) bool {
+	if history == nil {
+		return false
+	}
+	if len(*history) > 0 && evidenceComparableKey((*history)[len(*history)-1]) == evidenceComparableKey(evidence) {
+		return false
+	}
+	*history = append(*history, evidence)
+	return true
+}
+
+func evidenceComparableKey(item VulnerabilityEvidence) string {
+	reportRefs := dedupeStrings(item.ReportRefs)
+	sort.Strings(reportRefs)
+	return strings.Join([]string{
+		item.SourceRunUUID,
+		item.Severity,
+		item.Confidence,
+		item.VulnStatus,
+		item.AssetValue,
+		item.DetailRequestHash,
+		item.DetailResponseHash,
+		item.RawVulnHash,
+		item.AttackChainRef,
+		strings.Join(reportRefs, ","),
+	}, "::")
+}
+
+func chooseLongerOrIncoming(current, incoming string) string {
+	incoming = strings.TrimSpace(incoming)
+	current = strings.TrimSpace(current)
+	switch {
+	case incoming == "":
+		return current
+	case current == "":
+		return incoming
+	case len(incoming) > len(current):
+		return incoming
+	default:
+		return current
+	}
+}
+
+func chooseNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func chooseHigherSeverity(left, right string) string {
+	rank := map[string]int{
+		"info":     1,
+		"low":      2,
+		"medium":   3,
+		"high":     4,
+		"critical": 5,
+	}
+	left = strings.ToLower(strings.TrimSpace(left))
+	right = strings.ToLower(strings.TrimSpace(right))
+	if rank[right] > rank[left] {
+		return right
+	}
+	return chooseNonEmpty(left, right)
+}
+
+func chooseHigherConfidence(left, right string) string {
+	rank := map[string]int{
+		"tentative":              1,
+		"manual review required": 2,
+		"firm":                   3,
+		"certain":                4,
+	}
+	leftNorm := strings.ToLower(strings.TrimSpace(left))
+	rightNorm := strings.ToLower(strings.TrimSpace(right))
+	if rank[rightNorm] > rank[leftNorm] {
+		return strings.TrimSpace(right)
+	}
+	return chooseNonEmpty(strings.TrimSpace(left), strings.TrimSpace(right))
+}
+
+func choosePreferredVulnerabilityStatus(current, incoming string) string {
+	rank := map[string]int{
+		"new":            1,
+		"triaged":        2,
+		"retest":         3,
+		"verified":       4,
+		"false_positive": 4,
+		"closed":         5,
+	}
+	current = strings.ToLower(strings.TrimSpace(current))
+	incoming = strings.ToLower(strings.TrimSpace(incoming))
+	if rank[incoming] > rank[current] {
+		if current == "verified" && incoming == "closed" {
+			return current
+		}
+		if current == "false_positive" && incoming != "closed" {
+			return current
+		}
+		return incoming
+	}
+	if current == "" {
+		return chooseNonEmpty(incoming, "new")
+	}
+	return current
+}
+
+func choosePreferredRetestStatus(current, incoming string) string {
+	rank := map[string]int{
+		"":          0,
+		"queued":    1,
+		"running":   2,
+		"completed": 3,
+		"failed":    3,
+		"cancelled": 3,
+	}
+	current = strings.ToLower(strings.TrimSpace(current))
+	incoming = strings.ToLower(strings.TrimSpace(incoming))
+	if rank[incoming] > rank[current] {
+		return incoming
+	}
+	return current
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func minNonZeroTime(values ...time.Time) time.Time {
+	var result time.Time
+	for _, value := range values {
+		if value.IsZero() {
+			continue
+		}
+		if result.IsZero() || value.Before(result) {
+			result = value
+		}
+	}
+	return result
+}
+
+func maxNonZeroTime(values ...time.Time) time.Time {
+	var result time.Time
+	for _, value := range values {
+		if value.IsZero() {
+			continue
+		}
+		if result.IsZero() || value.After(result) {
+			result = value
+		}
+	}
+	return result
+}
+
+func maxInt(values ...int) int {
+	result := 0
+	for _, value := range values {
+		if value > result {
+			result = value
+		}
+	}
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // UpdateVulnerabilityRecord updates review and lifecycle fields for a vulnerability.

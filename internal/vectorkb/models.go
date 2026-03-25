@@ -66,12 +66,14 @@ type IndexSummary struct {
 
 // SearchOptions controls vector search behavior.
 type SearchOptions struct {
-	Workspace     string
-	Provider      string
-	Model         string
-	Limit         int
-	HybridWeight  float64
-	KeywordWeight float64
+	Workspace       string
+	WorkspaceLayers []string
+	ScopeLayers     []string
+	Provider        string
+	Model           string
+	Limit           int
+	HybridWeight    float64
+	KeywordWeight   float64
 }
 
 // SearchHit is a normalized vector knowledge result.

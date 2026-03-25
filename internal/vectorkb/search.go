@@ -11,6 +11,7 @@ import (
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	illm "github.com/j3ssie/osmedeus/v5/internal/llm"
+	"github.com/uptrace/bun"
 )
 
 type searchRow struct {
@@ -25,6 +26,7 @@ type searchRow struct {
 	Provider      string `bun:"provider"`
 	Model         string `bun:"model"`
 	EmbeddingJSON string `bun:"embedding_json"`
+	ChunkMetadata string `bun:"chunk_metadata"`
 }
 
 // Search queries the independent vector knowledge DB.
@@ -36,6 +38,8 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 	if query == "" {
 		return []SearchHit{}, nil
 	}
+	workspaces := normalizeVectorWorkspaceLayers(opts.Workspace, opts.WorkspaceLayers)
+	scopeLayers := normalizeVectorScopeLayers(opts.ScopeLayers)
 
 	provider := strings.TrimSpace(opts.Provider)
 	if provider == "" {
@@ -77,12 +81,15 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		ColumnExpr("ve.provider AS provider").
 		ColumnExpr("ve.model AS model").
 		ColumnExpr("ve.embedding_json AS embedding_json").
+		ColumnExpr("COALESCE(vc.metadata_json, '') AS chunk_metadata").
 		Join("JOIN vector_chunks AS vc ON vc.id = ve.chunk_id").
 		Join("JOIN vector_documents AS vd ON vd.id = vc.document_id").
 		Where("ve.provider = ?", provider).
 		Where("ve.model = ?", model)
-	if workspace := strings.TrimSpace(opts.Workspace); workspace != "" {
-		q = q.Where("vd.workspace = ?", workspace)
+	if len(workspaces) == 1 {
+		q = q.Where("vd.workspace = ?", workspaces[0])
+	} else if len(workspaces) > 1 {
+		q = q.Where("vd.workspace IN (?)", bun.In(workspaces))
 	}
 	if err := q.Scan(ctx, &rows); err != nil && err != sql.ErrNoRows {
 		return nil, err
@@ -108,6 +115,8 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		}
 		vectorScore := cosineSimilarity(queryVector, vector)
 		keywordScore := computeKeywordScore(query, row.Title, row.SourcePath, row.Content)
+		layerBoost := computeVectorLayerBoost(workspaces, row.Workspace)
+		scopeBoost := computeVectorScopeBoost(scopeLayers, row.ChunkMetadata)
 		if vectorScore <= 0 && keywordScore <= 0 {
 			continue
 		}
@@ -125,7 +134,7 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 			Model:          row.Model,
 			VectorScore:    vectorScore,
 			KeywordScore:   keywordScore,
-			RelevanceScore: (vectorScore * hybridWeight) + (keywordScore * keywordWeight),
+			RelevanceScore: (vectorScore * hybridWeight) + (keywordScore * keywordWeight) + layerBoost + scopeBoost,
 			Type:           "vector_kb",
 		})
 	}
@@ -140,6 +149,83 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func normalizeVectorWorkspaceLayers(workspace string, layers []string) []string {
+	if len(layers) == 0 {
+		if trimmed := strings.TrimSpace(workspace); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	}
+	result := make([]string, 0, len(layers))
+	seen := make(map[string]struct{}, len(layers))
+	for _, layer := range layers {
+		layer = strings.TrimSpace(layer)
+		if layer == "" {
+			continue
+		}
+		if _, ok := seen[layer]; ok {
+			continue
+		}
+		seen[layer] = struct{}{}
+		result = append(result, layer)
+	}
+	return result
+}
+
+func normalizeVectorScopeLayers(layers []string) []string {
+	if len(layers) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(layers))
+	seen := make(map[string]struct{}, len(layers))
+	for _, layer := range layers {
+		layer = strings.ToLower(strings.TrimSpace(layer))
+		if layer == "" {
+			continue
+		}
+		if _, ok := seen[layer]; ok {
+			continue
+		}
+		seen[layer] = struct{}{}
+		result = append(result, layer)
+	}
+	return result
+}
+
+func computeVectorLayerBoost(workspaces []string, workspace string) float64 {
+	if len(workspaces) == 0 {
+		return 0
+	}
+	workspace = strings.TrimSpace(workspace)
+	for idx, layer := range workspaces {
+		if layer == workspace {
+			return float64(len(workspaces)-idx) * 0.35
+		}
+	}
+	return 0
+}
+
+func computeVectorScopeBoost(scopeLayers []string, metadata string) float64 {
+	if len(scopeLayers) == 0 {
+		return 0
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(metadata), &parsed); err != nil {
+		return 0
+	}
+	scope, _ := parsed["scope"].(string)
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		return 0
+	}
+	for idx, layer := range scopeLayers {
+		if layer == scope {
+			return float64(len(scopeLayers)-idx) * 0.2
+		}
+	}
+	return 0
 }
 
 func cosineSimilarity(left, right []float64) float64 {

@@ -203,6 +203,21 @@ type KnowledgeChunk struct {
 	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
+// VulnerabilityEvidence stores an observed evidence snapshot for a merged finding.
+type VulnerabilityEvidence struct {
+	ObservedAt         time.Time `json:"observed_at"`
+	SourceRunUUID      string    `json:"source_run_uuid,omitempty"`
+	Severity           string    `json:"severity,omitempty"`
+	Confidence         string    `json:"confidence,omitempty"`
+	VulnStatus         string    `json:"vuln_status,omitempty"`
+	AssetValue         string    `json:"asset_value,omitempty"`
+	DetailRequestHash  string    `json:"detail_request_hash,omitempty"`
+	DetailResponseHash string    `json:"detail_response_hash,omitempty"`
+	RawVulnHash        string    `json:"raw_vuln_hash,omitempty"`
+	ReportRefs         []string  `json:"report_refs,omitempty"`
+	AttackChainRef     string    `json:"attack_chain_ref,omitempty"`
+}
+
 // Campaign stores batch-operation metadata for grouped queued runs.
 type Campaign struct {
 	bun.BaseModel `bun:"table:campaigns,alias:cp"`
@@ -412,6 +427,7 @@ type Vulnerability struct {
 	DetailHTTPRequest  string     `bun:"detail_http_request" json:"detail_http_request"`
 	DetailHTTPResponse string     `bun:"detail_http_response" json:"detail_http_response"`
 	RawVulnJSON        string     `bun:"raw_vuln_json" json:"raw_vuln_json"`
+	FingerprintKey     string     `bun:"fingerprint_key" json:"fingerprint_key,omitempty"`
 	VulnStatus         string     `bun:"vuln_status,notnull,default:'new'" json:"vuln_status"`
 	SourceRunUUID      string     `bun:"source_run_uuid" json:"source_run_uuid,omitempty"`
 	AIVerdict          string     `bun:"ai_verdict" json:"ai_verdict,omitempty"`
@@ -423,6 +439,9 @@ type Vulnerability struct {
 	AttackChainRef     string     `bun:"attack_chain_ref" json:"attack_chain_ref,omitempty"`
 	RelatedAssets      []string   `bun:"related_assets,type:json" json:"related_assets,omitempty"`
 	ReportRefs         []string   `bun:"report_refs,type:json" json:"report_refs,omitempty"`
+	EvidenceVersion    int        `bun:"evidence_version,notnull,default:1" json:"evidence_version"`
+	EvidenceHistory    string     `bun:"evidence_history_json" json:"evidence_history,omitempty"`
+	FirstSeenAt        time.Time  `bun:"first_seen_at" json:"first_seen_at,omitempty"`
 	VerifiedAt         *time.Time `bun:"verified_at" json:"verified_at,omitempty"`
 	ClosedAt           *time.Time `bun:"closed_at" json:"closed_at,omitempty"`
 
@@ -436,24 +455,27 @@ type Vulnerability struct {
 type AttackChainReport struct {
 	bun.BaseModel `bun:"table:attack_chain_reports,alias:acr"`
 
-	ID                     int64     `bun:"id,pk,autoincrement" json:"id"`
-	Workspace              string    `bun:"workspace,notnull" json:"workspace"`
-	Target                 string    `bun:"target" json:"target,omitempty"`
-	RunUUID                string    `bun:"run_uuid" json:"run_uuid,omitempty"`
-	SourcePath             string    `bun:"source_path,notnull" json:"source_path"`
-	SourceHash             string    `bun:"source_hash,notnull" json:"source_hash"`
-	Status                 string    `bun:"status,notnull,default:'ready'" json:"status"`
-	TotalChains            int       `bun:"total_chains,default:0" json:"total_chains"`
-	CriticalChains         int       `bun:"critical_chains,default:0" json:"critical_chains"`
-	HighImpactChains       int       `bun:"high_impact_chains,default:0" json:"high_impact_chains"`
-	MostLikelyEntryPoints  []string  `bun:"most_likely_entry_points,type:json" json:"most_likely_entry_points,omitempty"`
-	AttackChainsJSON       string    `bun:"attack_chains_json" json:"attack_chains_json,omitempty"`
-	CriticalPathsJSON      string    `bun:"critical_paths_json" json:"critical_paths_json,omitempty"`
-	DefenseRecommendations []string  `bun:"defense_recommendations,type:json" json:"defense_recommendations,omitempty"`
-	MermaidPath            string    `bun:"mermaid_path" json:"mermaid_path,omitempty"`
-	TextPath               string    `bun:"text_path" json:"text_path,omitempty"`
-	CreatedAt              time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt              time.Time `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	ID                     int64      `bun:"id,pk,autoincrement" json:"id"`
+	Workspace              string     `bun:"workspace,notnull" json:"workspace"`
+	Target                 string     `bun:"target" json:"target,omitempty"`
+	RunUUID                string     `bun:"run_uuid" json:"run_uuid,omitempty"`
+	SourcePath             string     `bun:"source_path,notnull" json:"source_path"`
+	SourceHash             string     `bun:"source_hash,notnull" json:"source_hash"`
+	Status                 string     `bun:"status,notnull,default:'ready'" json:"status"`
+	TotalChains            int        `bun:"total_chains,default:0" json:"total_chains"`
+	CriticalChains         int        `bun:"critical_chains,default:0" json:"critical_chains"`
+	HighImpactChains       int        `bun:"high_impact_chains,default:0" json:"high_impact_chains"`
+	MostLikelyEntryPoints  []string   `bun:"most_likely_entry_points,type:json" json:"most_likely_entry_points,omitempty"`
+	AttackChainsJSON       string     `bun:"attack_chains_json" json:"attack_chains_json,omitempty"`
+	CriticalPathsJSON      string     `bun:"critical_paths_json" json:"critical_paths_json,omitempty"`
+	DefenseRecommendations []string   `bun:"defense_recommendations,type:json" json:"defense_recommendations,omitempty"`
+	MermaidPath            string     `bun:"mermaid_path" json:"mermaid_path,omitempty"`
+	TextPath               string     `bun:"text_path" json:"text_path,omitempty"`
+	QueueHits              int        `bun:"queue_hits,default:0" json:"queue_hits"`
+	VerifiedHits           int        `bun:"verified_hits,default:0" json:"verified_hits"`
+	LastQueuedAt           *time.Time `bun:"last_queued_at" json:"last_queued_at,omitempty"`
+	CreatedAt              time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt              time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 }
 
 // AssetDiffSnapshot stores a point-in-time diff calculation for assets

@@ -326,6 +326,16 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Add vulnerability evidence/dedup columns to vulnerabilities table if they don't exist
+	if err := addVulnerabilityEvidenceColumns(ctx); err != nil {
+		return err
+	}
+
+	// Add attack-chain queue metrics columns if they don't exist
+	if err := addAttackChainMetricsColumns(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -661,9 +671,12 @@ func createVulnerabilityIndexes(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity ON vulnerabilities(severity)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_confidence ON vulnerabilities(confidence)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_asset_value ON vulnerabilities(asset_value)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_fingerprint_key ON vulnerabilities(fingerprint_key)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_vuln_status ON vulnerabilities(vuln_status)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_status ON vulnerabilities(retest_status)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_run_uuid ON vulnerabilities(retest_run_uuid)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_first_seen_at ON vulnerabilities(first_seen_at)",
+		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_last_seen_at ON vulnerabilities(last_seen_at)",
 	}
 
 	for _, idx := range indexes {
@@ -681,6 +694,9 @@ func createAttackChainIndexes(ctx context.Context) error {
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_attack_chain_reports_workspace_source_path ON attack_chain_reports(workspace, source_path)",
 		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_workspace ON attack_chain_reports(workspace)",
 		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_run_uuid ON attack_chain_reports(run_uuid)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_queue_hits ON attack_chain_reports(queue_hits)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_verified_hits ON attack_chain_reports(verified_hits)",
+		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_last_queued_at ON attack_chain_reports(last_queued_at)",
 		"CREATE INDEX IF NOT EXISTS idx_attack_chain_reports_updated_at ON attack_chain_reports(updated_at)",
 	}
 
@@ -721,6 +737,51 @@ func addVulnerabilityLifecycleColumns(ctx context.Context) error {
 				continue
 			}
 			return fmt.Errorf("failed to add vulnerability lifecycle column: %w", err)
+		}
+	}
+	return nil
+}
+
+func addVulnerabilityEvidenceColumns(ctx context.Context) error {
+	columns := []string{
+		"ALTER TABLE vulnerabilities ADD COLUMN fingerprint_key TEXT DEFAULT ''",
+		"ALTER TABLE vulnerabilities ADD COLUMN evidence_version INTEGER DEFAULT 1",
+		"ALTER TABLE vulnerabilities ADD COLUMN evidence_history_json TEXT DEFAULT '[]'",
+		"ALTER TABLE vulnerabilities ADD COLUMN first_seen_at TIMESTAMP NULL",
+	}
+
+	for _, ddl := range columns {
+		_, err := db.ExecContext(ctx, ddl)
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "duplicate column") ||
+				strings.Contains(errStr, "already exists") ||
+				strings.Contains(errStr, "sqlstate 42701") {
+				continue
+			}
+			return fmt.Errorf("failed to add vulnerability evidence column: %w", err)
+		}
+	}
+	return nil
+}
+
+func addAttackChainMetricsColumns(ctx context.Context) error {
+	columns := []string{
+		"ALTER TABLE attack_chain_reports ADD COLUMN queue_hits INTEGER DEFAULT 0",
+		"ALTER TABLE attack_chain_reports ADD COLUMN verified_hits INTEGER DEFAULT 0",
+		"ALTER TABLE attack_chain_reports ADD COLUMN last_queued_at TIMESTAMP NULL",
+	}
+
+	for _, ddl := range columns {
+		_, err := db.ExecContext(ctx, ddl)
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "duplicate column") ||
+				strings.Contains(errStr, "already exists") ||
+				strings.Contains(errStr, "sqlstate 42701") {
+				continue
+			}
+			return fmt.Errorf("failed to add attack chain metrics column: %w", err)
 		}
 	}
 	return nil

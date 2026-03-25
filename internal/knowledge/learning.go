@@ -44,6 +44,7 @@ type LearnSummary struct {
 	RunsIncluded    int      `json:"runs_included"`
 	AIFilesIncluded []string `json:"ai_files_included,omitempty"`
 	SourcePath      string   `json:"source_path"`
+	SourcePaths     []string `json:"source_paths,omitempty"`
 }
 
 // LearnWorkspace builds a synthetic knowledge document from a workspace's existing findings.
@@ -102,40 +103,115 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 	workspaceDir := resolveWorkspacePath(ctx, cfg, workspace)
 	aiSections, aiFiles := collectLearnedAISections(workspaceDir, includeAIAnalysis)
 
-	content := buildLearnedKnowledgeMarkdown(workspace, scope, assetResult, vulnResult, runResult, vulnSummary, assetStats, aiSections)
-	content = normalizeContent(content)
-	chunks := chunkContent(content)
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("generated learned knowledge is empty")
-	}
-
-	sourcePath := fmt.Sprintf("kb://learned/%s/%s/workspace-summary.md", scope, workspace)
-	metadata := map[string]interface{}{
+	targetTypes := collectLearnedTargetTypes(assetResult)
+	generatedAt := time.Now().Format(time.RFC3339)
+	baseMetadata := map[string]interface{}{
 		"scope":                    scope,
 		"source":                   "auto-learn",
 		"workspace":                workspace,
-		"kind":                     "workspace-summary",
 		"assets_included":          len(assetResult.Data),
 		"vulnerabilities_included": len(vulnResult.Data),
 		"runs_included":            len(runResult.Data),
 		"ai_files":                 aiFiles,
-		"generated_at":             time.Now().Format(time.RFC3339),
+		"target_types":             targetTypes,
+		"generated_at":             generatedAt,
 	}
 
-	if err := upsertKnowledgeContent(ctx, workspace, sourcePath, "learned-summary", fmt.Sprintf("Learned Security Notes - %s", workspace), content, metadata); err != nil {
-		return nil, err
+	type learnedDocument struct {
+		sourcePath string
+		docType    string
+		title      string
+		content    string
+		metadata   map[string]interface{}
+	}
+
+	docs := []learnedDocument{
+		{
+			sourcePath: fmt.Sprintf("kb://learned/%s/%s/workspace-summary.md", scope, workspace),
+			docType:    "learned-summary",
+			title:      fmt.Sprintf("Learned Security Notes - %s", workspace),
+			content:    buildLearnedKnowledgeMarkdown(workspace, scope, assetResult, vulnResult, runResult, vulnSummary, assetStats, aiSections),
+			metadata: mergeLearnMetadata(baseMetadata, map[string]interface{}{
+				"kind":              "workspace-summary",
+				"source_confidence": 0.72,
+				"sample_type":       "workspace-summary",
+			}),
+		},
+		{
+			sourcePath: fmt.Sprintf("kb://learned/%s/%s/verified-findings.md", scope, workspace),
+			docType:    "learned-findings",
+			title:      fmt.Sprintf("Verified Findings - %s", workspace),
+			content:    buildVerifiedFindingsMarkdown(workspace, scope, vulnResult),
+			metadata: mergeLearnMetadata(baseMetadata, map[string]interface{}{
+				"kind":              "verified-findings",
+				"source_confidence": 0.95,
+				"sample_type":       "verified",
+			}),
+		},
+		{
+			sourcePath: fmt.Sprintf("kb://learned/%s/%s/false-positive-samples.md", scope, workspace),
+			docType:    "learned-false-positives",
+			title:      fmt.Sprintf("False Positive Samples - %s", workspace),
+			content:    buildFalsePositiveSamplesMarkdown(workspace, scope, vulnResult),
+			metadata: mergeLearnMetadata(baseMetadata, map[string]interface{}{
+				"kind":              "false-positive-samples",
+				"source_confidence": 0.90,
+				"sample_type":       "false_positive",
+			}),
+		},
+		{
+			sourcePath: fmt.Sprintf("kb://learned/%s/%s/ai-insights.md", scope, workspace),
+			docType:    "learned-ai-insights",
+			title:      fmt.Sprintf("AI Insights - %s", workspace),
+			content:    buildAIInsightsMarkdown(workspace, scope, aiSections),
+			metadata: mergeLearnMetadata(baseMetadata, map[string]interface{}{
+				"kind":              "ai-insights",
+				"source_confidence": 0.64,
+				"sample_type":       "ai-analysis",
+			}),
+		},
+	}
+
+	var (
+		totalChunks int
+		totalDocs   int
+		sourcePath  string
+		sourcePaths []string
+	)
+	for _, doc := range docs {
+		content := normalizeContent(doc.content)
+		if content == "" {
+			continue
+		}
+		chunks := chunkContent(content)
+		if len(chunks) == 0 {
+			continue
+		}
+		if err := upsertKnowledgeContent(ctx, workspace, doc.sourcePath, doc.docType, doc.title, content, doc.metadata); err != nil {
+			return nil, err
+		}
+		totalDocs++
+		totalChunks += len(chunks)
+		if sourcePath == "" {
+			sourcePath = doc.sourcePath
+		}
+		sourcePaths = append(sourcePaths, doc.sourcePath)
+	}
+	if totalDocs == 0 {
+		return nil, fmt.Errorf("generated learned knowledge is empty")
 	}
 
 	return &LearnSummary{
 		Workspace:       workspace,
 		Scope:           scope,
-		Documents:       1,
-		Chunks:          len(chunks),
+		Documents:       totalDocs,
+		Chunks:          totalChunks,
 		AssetsIncluded:  len(assetResult.Data),
 		VulnsIncluded:   len(vulnResult.Data),
 		RunsIncluded:    len(runResult.Data),
 		AIFilesIncluded: aiFiles,
 		SourcePath:      sourcePath,
+		SourcePaths:     sourcePaths,
 	}, nil
 }
 
@@ -399,6 +475,121 @@ func buildLearnedKnowledgeMarkdown(
 	builder.WriteString("This document is auto-generated from existing scan records and AI analysis artifacts. Treat it as retrievable context, not as source-of-truth evidence.\n")
 
 	return builder.String()
+}
+
+func buildVerifiedFindingsMarkdown(workspace, scope string, vulnResult *database.VulnerabilityResult) string {
+	var builder strings.Builder
+
+	builder.WriteString(fmt.Sprintf("# Verified Findings Memory: %s\n\n", workspace))
+	builder.WriteString(fmt.Sprintf("- Scope: %s\n", scope))
+	builder.WriteString(fmt.Sprintf("- Generated: %s\n\n", time.Now().Format(time.RFC3339)))
+
+	count := 0
+	for _, vuln := range vulnResult.Data {
+		if strings.ToLower(strings.TrimSpace(vuln.VulnStatus)) != "verified" {
+			continue
+		}
+		count++
+		builder.WriteString(fmt.Sprintf("## %s\n\n", normalizeLearnedValue(vuln.VulnTitle, normalizeLearnedValue(vuln.VulnInfo, "Untitled vulnerability"))))
+		builder.WriteString(fmt.Sprintf("- Severity: %s\n", normalizeLearnedValue(vuln.Severity, "unknown")))
+		builder.WriteString(fmt.Sprintf("- Asset: %s (%s)\n", normalizeLearnedValue(vuln.AssetValue, "n/a"), normalizeLearnedValue(vuln.AssetType, "unknown")))
+		builder.WriteString(fmt.Sprintf("- Confidence: %s\n", normalizeLearnedValue(vuln.Confidence, "unknown")))
+		builder.WriteString(fmt.Sprintf("- Evidence version: %d\n", vuln.EvidenceVersion))
+		if strings.TrimSpace(vuln.VulnDesc) != "" {
+			builder.WriteString(fmt.Sprintf("- Description: %s\n", squashLearnedText(vuln.VulnDesc, 320)))
+		}
+		if strings.TrimSpace(vuln.AISummary) != "" {
+			builder.WriteString(fmt.Sprintf("- AI summary: %s\n", squashLearnedText(vuln.AISummary, 320)))
+		}
+		if len(vuln.Tags) > 0 {
+			builder.WriteString(fmt.Sprintf("- Tags: %s\n", strings.Join(vuln.Tags, ", ")))
+		}
+		builder.WriteString("\n")
+	}
+	if count == 0 {
+		return ""
+	}
+	return builder.String()
+}
+
+func buildFalsePositiveSamplesMarkdown(workspace, scope string, vulnResult *database.VulnerabilityResult) string {
+	var builder strings.Builder
+
+	builder.WriteString(fmt.Sprintf("# False Positive Samples: %s\n\n", workspace))
+	builder.WriteString(fmt.Sprintf("- Scope: %s\n", scope))
+	builder.WriteString(fmt.Sprintf("- Generated: %s\n\n", time.Now().Format(time.RFC3339)))
+
+	count := 0
+	for _, vuln := range vulnResult.Data {
+		if strings.ToLower(strings.TrimSpace(vuln.VulnStatus)) != "false_positive" {
+			continue
+		}
+		count++
+		builder.WriteString(fmt.Sprintf("## %s\n\n", normalizeLearnedValue(vuln.VulnTitle, normalizeLearnedValue(vuln.VulnInfo, "Untitled vulnerability"))))
+		builder.WriteString(fmt.Sprintf("- Asset: %s (%s)\n", normalizeLearnedValue(vuln.AssetValue, "n/a"), normalizeLearnedValue(vuln.AssetType, "unknown")))
+		builder.WriteString(fmt.Sprintf("- Confidence: %s\n", normalizeLearnedValue(vuln.Confidence, "unknown")))
+		if strings.TrimSpace(vuln.AnalystNotes) != "" {
+			builder.WriteString(fmt.Sprintf("- Analyst notes: %s\n", squashLearnedText(vuln.AnalystNotes, 320)))
+		}
+		if strings.TrimSpace(vuln.AISummary) != "" {
+			builder.WriteString(fmt.Sprintf("- AI summary: %s\n", squashLearnedText(vuln.AISummary, 320)))
+		}
+		if strings.TrimSpace(vuln.RawVulnJSON) != "" {
+			builder.WriteString(fmt.Sprintf("- Raw sample hash hint: %s\n", hashString(vuln.RawVulnJSON)[:16]))
+		}
+		builder.WriteString("\n")
+	}
+	if count == 0 {
+		return ""
+	}
+	return builder.String()
+}
+
+func buildAIInsightsMarkdown(workspace, scope string, aiSections []string) string {
+	if len(aiSections) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("# AI Insights Memory: %s\n\n", workspace))
+	builder.WriteString(fmt.Sprintf("- Scope: %s\n", scope))
+	builder.WriteString(fmt.Sprintf("- Generated: %s\n\n", time.Now().Format(time.RFC3339)))
+	for _, section := range aiSections {
+		builder.WriteString(section)
+		builder.WriteString("\n\n")
+	}
+	return builder.String()
+}
+
+func mergeLearnMetadata(base map[string]interface{}, extra map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{}, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
+}
+
+func collectLearnedTargetTypes(assetResult *database.AssetResult) []string {
+	if assetResult == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var result []string
+	for _, asset := range assetResult.Data {
+		assetType := strings.TrimSpace(asset.AssetType)
+		if assetType == "" {
+			continue
+		}
+		if _, ok := seen[assetType]; ok {
+			continue
+		}
+		seen[assetType] = struct{}{}
+		result = append(result, assetType)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func normalizeLearnedValue(value, fallback string) string {

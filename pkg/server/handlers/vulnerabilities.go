@@ -241,16 +241,26 @@ func CreateVulnerability(cfg *config.Config) fiber.Handler {
 		}
 		applyVulnerabilityStatusTimestamps(vuln)
 
-		if err := database.CreateVulnerabilityRecord(ctx, vuln); err != nil {
+		result, err := database.CreateVulnerabilityRecord(ctx, vuln)
+		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   true,
 				"message": err.Error(),
 			})
 		}
 
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		statusCode := fiber.StatusCreated
+		message := "Vulnerability created successfully"
+		if result != nil && result.Merged {
+			statusCode = fiber.StatusOK
+			message = "Vulnerability merged into existing record"
+		}
+
+		return c.Status(statusCode).JSON(fiber.Map{
 			"data":    vuln,
-			"message": "Vulnerability created successfully",
+			"message": message,
+			"merged":  result != nil && result.Merged,
+			"created": result != nil && result.Created,
 		})
 	}
 }

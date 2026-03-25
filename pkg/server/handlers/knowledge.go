@@ -21,9 +21,11 @@ type KnowledgeIngestRequest struct {
 
 // KnowledgeSearchRequest performs keyword search across ingested knowledge chunks.
 type KnowledgeSearchRequest struct {
-	Query     string `json:"query"`
-	Workspace string `json:"workspace,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Query           string   `json:"query"`
+	Workspace       string   `json:"workspace,omitempty"`
+	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
+	ScopeLayers     []string `json:"scope_layers,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
 }
 
 // KnowledgeVectorIndexRequest indexes a workspace into the standalone vector DB.
@@ -36,11 +38,13 @@ type KnowledgeVectorIndexRequest struct {
 
 // KnowledgeVectorSearchRequest performs semantic search against the standalone vector DB.
 type KnowledgeVectorSearchRequest struct {
-	Query     string `json:"query"`
-	Workspace string `json:"workspace,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Query           string   `json:"query"`
+	Workspace       string   `json:"workspace,omitempty"`
+	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
+	ScopeLayers     []string `json:"scope_layers,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
 }
 
 // KnowledgeLearnRequest synthesizes learned knowledge from an existing workspace.
@@ -155,7 +159,13 @@ func SearchKnowledge(cfg *config.Config) fiber.Handler {
 		}
 
 		ctx := context.Background()
-		results, err := knowledge.Search(ctx, req.Workspace, req.Query, req.Limit)
+		results, err := knowledge.SearchWithOptions(ctx, knowledge.SearchOptions{
+			Workspace:       req.Workspace,
+			WorkspaceLayers: req.WorkspaceLayers,
+			ScopeLayers:     req.ScopeLayers,
+			Query:           req.Query,
+			Limit:           req.Limit,
+		})
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   true,
@@ -273,10 +283,12 @@ func SearchVectorKnowledge(cfg *config.Config) fiber.Handler {
 
 		ctx := context.Background()
 		results, err := vectorkb.Search(ctx, cfg, vectorkb.SearchOptions{
-			Workspace: strings.TrimSpace(req.Workspace),
-			Provider:  strings.TrimSpace(req.Provider),
-			Model:     strings.TrimSpace(req.Model),
-			Limit:     req.Limit,
+			Workspace:       strings.TrimSpace(req.Workspace),
+			WorkspaceLayers: req.WorkspaceLayers,
+			ScopeLayers:     req.ScopeLayers,
+			Provider:        strings.TrimSpace(req.Provider),
+			Model:           strings.TrimSpace(req.Model),
+			Limit:           req.Limit,
 		}, req.Query)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{

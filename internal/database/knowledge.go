@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -39,15 +40,26 @@ type KnowledgeSearchHit struct {
 	Score      float64 `json:"score"`
 }
 
+// KnowledgeSearchOptions controls layered keyword search.
+type KnowledgeSearchOptions struct {
+	Workspace       string
+	WorkspaceLayers []string
+	ScopeLayers     []string
+	Query           string
+	Limit           int
+}
+
 type knowledgeSearchCandidate struct {
-	DocumentID int64  `bun:"document_id"`
-	ChunkID    int64  `bun:"chunk_id"`
-	Workspace  string `bun:"workspace"`
-	Title      string `bun:"title"`
-	SourcePath string `bun:"source_path"`
-	DocType    string `bun:"doc_type"`
-	Section    string `bun:"section"`
-	Content    string `bun:"content"`
+	DocumentID    int64  `bun:"document_id"`
+	ChunkID       int64  `bun:"chunk_id"`
+	Workspace     string `bun:"workspace"`
+	Title         string `bun:"title"`
+	SourcePath    string `bun:"source_path"`
+	DocType       string `bun:"doc_type"`
+	Section       string `bun:"section"`
+	Content       string `bun:"content"`
+	ChunkMetadata string `bun:"chunk_metadata"`
+	DocMetadata   string `bun:"doc_metadata"`
 }
 
 // KnowledgeChunkExportRow contains a normalized chunk plus its parent document metadata.
@@ -170,13 +182,25 @@ func ListKnowledgeDocuments(ctx context.Context, query KnowledgeDocumentQuery) (
 
 // SearchKnowledge performs simple keyword search across knowledge chunks.
 func SearchKnowledge(ctx context.Context, workspace, query string, limit int) ([]KnowledgeSearchHit, error) {
+	return SearchKnowledgeWithOptions(ctx, KnowledgeSearchOptions{
+		Workspace: strings.TrimSpace(workspace),
+		Query:     query,
+		Limit:     limit,
+	})
+}
+
+// SearchKnowledgeWithOptions performs keyword search across one or more knowledge layers.
+func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions) ([]KnowledgeSearchHit, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
-	query = strings.TrimSpace(query)
+	query := strings.TrimSpace(opts.Query)
 	if query == "" {
 		return []KnowledgeSearchHit{}, nil
 	}
+	workspaces := normalizeKnowledgeWorkspaceLayers(opts.Workspace, opts.WorkspaceLayers)
+	scopeLayers := normalizeKnowledgeScopeLayers(opts.ScopeLayers)
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 10
 	}
@@ -197,11 +221,25 @@ func SearchKnowledge(ctx context.Context, workspace, query string, limit int) ([
 		ColumnExpr("kd.doc_type AS doc_type").
 		ColumnExpr("kc.section AS section").
 		ColumnExpr("kc.content AS content").
+		ColumnExpr("COALESCE(kc.metadata_json, '') AS chunk_metadata").
+		ColumnExpr("COALESCE(kd.metadata_json, '') AS doc_metadata").
 		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id").
 		Where("(LOWER(kc.content) LIKE ? ESCAPE '\\' OR LOWER(kd.title) LIKE ? ESCAPE '\\' OR LOWER(kd.source_path) LIKE ? ESCAPE '\\')", pattern, pattern, pattern)
 
-	if trimmed := strings.TrimSpace(workspace); trimmed != "" {
-		q = q.Where("kc.workspace = ?", trimmed)
+	if len(workspaces) == 1 {
+		q = q.Where("kc.workspace = ?", workspaces[0])
+	} else if len(workspaces) > 1 {
+		q = q.Where("kc.workspace IN (?)", bun.In(workspaces))
+	}
+	if len(scopeLayers) > 0 {
+		q = q.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+			for _, scope := range scopeLayers {
+				pattern := "%\"scope\":\"" + escapeKnowledgeLike(scope) + "\"%"
+				query = query.WhereOr("LOWER(COALESCE(kc.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+				query = query.WhereOr("LOWER(COALESCE(kd.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+			}
+			return query
+		})
 	}
 
 	if err := q.Limit(limit*8).Scan(ctx, &candidates); err != nil {
@@ -211,6 +249,8 @@ func SearchKnowledge(ctx context.Context, workspace, query string, limit int) ([
 	results := make([]KnowledgeSearchHit, 0, len(candidates))
 	for _, candidate := range candidates {
 		score := computeKnowledgeScore(query, candidate.Title, candidate.SourcePath, candidate.Content)
+		score += computeKnowledgeLayerBoost(workspaces, candidate.Workspace)
+		score += computeKnowledgeScopeBoost(scopeLayers, candidate.ChunkMetadata, candidate.DocMetadata)
 		if score <= 0 {
 			continue
 		}
@@ -306,6 +346,49 @@ func normalizeKnowledgeWorkspace(workspace string) string {
 	return workspace
 }
 
+func normalizeKnowledgeWorkspaceLayers(workspace string, layers []string) []string {
+	if len(layers) == 0 {
+		if trimmed := strings.TrimSpace(workspace); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	}
+	result := make([]string, 0, len(layers))
+	seen := make(map[string]struct{}, len(layers))
+	for _, layer := range layers {
+		layer = strings.TrimSpace(layer)
+		if layer == "" {
+			continue
+		}
+		if _, ok := seen[layer]; ok {
+			continue
+		}
+		seen[layer] = struct{}{}
+		result = append(result, layer)
+	}
+	return result
+}
+
+func normalizeKnowledgeScopeLayers(layers []string) []string {
+	if len(layers) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(layers))
+	seen := make(map[string]struct{}, len(layers))
+	for _, layer := range layers {
+		layer = strings.ToLower(strings.TrimSpace(layer))
+		if layer == "" {
+			continue
+		}
+		if _, ok := seen[layer]; ok {
+			continue
+		}
+		seen[layer] = struct{}{}
+		result = append(result, layer)
+	}
+	return result
+}
+
 func computeKnowledgeScore(query, title, sourcePath, content string) float64 {
 	queryLower := strings.ToLower(strings.TrimSpace(query))
 	if queryLower == "" {
@@ -331,6 +414,54 @@ func computeKnowledgeScore(query, title, sourcePath, content string) float64 {
 	}
 
 	return score
+}
+
+func computeKnowledgeLayerBoost(workspaces []string, workspace string) float64 {
+	if len(workspaces) == 0 {
+		return 0
+	}
+	workspace = strings.TrimSpace(workspace)
+	for idx, layer := range workspaces {
+		if layer == workspace {
+			return float64(len(workspaces)-idx) * 0.35
+		}
+	}
+	return 0
+}
+
+func computeKnowledgeScopeBoost(scopeLayers []string, metadata ...string) float64 {
+	if len(scopeLayers) == 0 {
+		return 0
+	}
+	scope := extractKnowledgeScope(metadata...)
+	if scope == "" {
+		return 0
+	}
+	for idx, layer := range scopeLayers {
+		if layer == scope {
+			return float64(len(scopeLayers)-idx) * 0.2
+		}
+	}
+	return 0
+}
+
+func extractKnowledgeScope(metadata ...string) string {
+	for _, item := range metadata {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(item), &parsed); err != nil {
+			continue
+		}
+		scope, _ := parsed["scope"].(string)
+		scope = strings.ToLower(strings.TrimSpace(scope))
+		if scope != "" {
+			return scope
+		}
+	}
+	return ""
 }
 
 func uniqueKnowledgeTerms(terms []string) []string {

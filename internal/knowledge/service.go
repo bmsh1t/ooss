@@ -52,6 +52,15 @@ type extractedChunk struct {
 	Content string
 }
 
+// SearchOptions controls layered knowledge retrieval.
+type SearchOptions struct {
+	Workspace       string   `json:"workspace,omitempty"`
+	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
+	ScopeLayers     []string `json:"scope_layers,omitempty"`
+	Query           string   `json:"query"`
+	Limit           int      `json:"limit,omitempty"`
+}
+
 // IngestPath ingests a single file or a directory tree into the local knowledge base.
 func IngestPath(ctx context.Context, cfg *config.Config, rootPath, workspace string, recursive bool) (*IngestSummary, error) {
 	if cfg == nil {
@@ -760,7 +769,22 @@ func normalizeHTMLText(input string) string {
 
 // Search proxies the stored keyword search and keeps the internal package as the main entrypoint.
 func Search(ctx context.Context, workspace, query string, limit int) ([]database.KnowledgeSearchHit, error) {
-	return database.SearchKnowledge(ctx, strings.TrimSpace(workspace), query, limit)
+	return SearchWithOptions(ctx, SearchOptions{
+		Workspace: strings.TrimSpace(workspace),
+		Query:     query,
+		Limit:     limit,
+	})
+}
+
+// SearchWithOptions proxies layered search to the database-backed implementation.
+func SearchWithOptions(ctx context.Context, opts SearchOptions) ([]database.KnowledgeSearchHit, error) {
+	return database.SearchKnowledgeWithOptions(ctx, database.KnowledgeSearchOptions{
+		Workspace:       strings.TrimSpace(opts.Workspace),
+		WorkspaceLayers: opts.WorkspaceLayers,
+		ScopeLayers:     opts.ScopeLayers,
+		Query:           opts.Query,
+		Limit:           opts.Limit,
+	})
 }
 
 // ListDocuments returns paginated knowledge documents.

@@ -342,6 +342,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/attack-chains", handlers.ListAttackChains(s.config))
 	api.Get("/attack-chains/:id", handlers.GetAttackChain(s.config))
 	api.Post("/attack-chains/import", handlers.ImportAttackChain(s.config))
+	api.Post("/attack-chains/:id/queue-retest", handlers.QueueAttackChainRetest(s.config))
+	api.Post("/attack-chains/:id/queue-deep-scan", handlers.QueueAttackChainDeepScan(s.config))
 	api.Get("/vulnerabilities/:id", handlers.GetVulnerability(s.config))
 	api.Post("/vulnerabilities", handlers.CreateVulnerability(s.config))
 	api.Patch("/vulnerabilities/:id", handlers.UpdateVulnerability(s.config))

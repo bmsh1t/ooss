@@ -60,6 +60,15 @@ func UpsertAttackChainReport(ctx context.Context, report *AttackChainReport) err
 		if strings.TrimSpace(report.TextPath) == "" {
 			report.TextPath = existing.TextPath
 		}
+		if report.QueueHits == 0 {
+			report.QueueHits = existing.QueueHits
+		}
+		if report.VerifiedHits == 0 {
+			report.VerifiedHits = existing.VerifiedHits
+		}
+		if report.LastQueuedAt == nil {
+			report.LastQueuedAt = existing.LastQueuedAt
+		}
 		report.ID = existing.ID
 		report.CreatedAt = existing.CreatedAt
 		report.UpdatedAt = time.Now()
@@ -80,6 +89,9 @@ func UpsertAttackChainReport(ctx context.Context, report *AttackChainReport) err
 				"defense_recommendations",
 				"mermaid_path",
 				"text_path",
+				"queue_hits",
+				"verified_hits",
+				"last_queued_at",
 				"updated_at",
 			).
 			WherePK().
@@ -174,4 +186,24 @@ func GetAttackChainReportByID(ctx context.Context, id int64) (*AttackChainReport
 	}
 
 	return &report, nil
+}
+
+// RecordAttackChainQueueActivity updates queue/relevance metrics after queue generation.
+func RecordAttackChainQueueActivity(ctx context.Context, id int64, queuedHits, verifiedHits int) error {
+	if db == nil {
+		return fmt.Errorf("database not connected")
+	}
+	now := time.Now()
+	_, err := db.NewUpdate().
+		Model((*AttackChainReport)(nil)).
+		Set("queue_hits = queue_hits + ?", queuedHits).
+		Set("verified_hits = ?", verifiedHits).
+		Set("last_queued_at = ?", now).
+		Set("updated_at = ?", now).
+		Where("id = ?", id).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to update attack chain queue metrics: %w", err)
+	}
+	return nil
 }

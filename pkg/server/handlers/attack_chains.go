@@ -3,10 +3,13 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/j3ssie/osmedeus/v5/internal/attackchain"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
@@ -74,8 +77,20 @@ type linkedAsset struct {
 
 type attackChainWorkbenchItem struct {
 	attackChainItem
-	LinkedVulnerabilities []linkedVulnerability `json:"linked_vulnerabilities,omitempty"`
-	LinkedAssets          []linkedAsset         `json:"linked_assets,omitempty"`
+	LinkedVulnerabilities    []linkedVulnerability `json:"linked_vulnerabilities,omitempty"`
+	LinkedAssets             []linkedAsset         `json:"linked_assets,omitempty"`
+	LinkedVulnerabilityCount int                   `json:"linked_vulnerability_count"`
+	VerifiedLinkedCount      int                   `json:"verified_linked_count"`
+	VerificationRate         float64               `json:"verification_rate"`
+}
+
+type QueueAttackChainRequest struct {
+	Flow         string            `json:"flow,omitempty"`
+	Module       string            `json:"module,omitempty"`
+	Params       map[string]string `json:"params,omitempty"`
+	Priority     string            `json:"priority,omitempty"`
+	ChainIDs     []string          `json:"chain_ids,omitempty"`
+	VerifiedOnly bool              `json:"verified_only,omitempty"`
 }
 
 // ListAttackChains returns normalized attack-chain reports.
@@ -149,19 +164,221 @@ func GetAttackChain(cfg *config.Config) fiber.Handler {
 		}
 
 		enrichedChains := enrichAttackChains(context.Background(), report.Workspace, chains)
+		if c.QueryBool("verified_only", false) {
+			filtered := make([]attackChainWorkbenchItem, 0, len(enrichedChains))
+			for _, chain := range enrichedChains {
+				if chain.VerifiedLinkedCount > 0 {
+					filtered = append(filtered, chain)
+				}
+			}
+			enrichedChains = filtered
+		}
 
 		return c.JSON(fiber.Map{
 			"data": fiber.Map{
 				"report":              report,
 				"chains":              enrichedChains,
 				"critical_paths":      decodeAttackPaths(report.CriticalPathsJSON),
-				"execution_checklist": buildExecutionChecklist(chains),
+				"execution_checklist": buildExecutionChecklist(extractAttackChainItems(enrichedChains)),
 				"source_files": fiber.Map{
 					"json":    report.SourcePath,
 					"mermaid": report.MermaidPath,
 					"text":    report.TextPath,
 				},
 			},
+		})
+	}
+}
+
+// QueueAttackChainRetest turns selected linked vulnerabilities into queued retest runs.
+func QueueAttackChainRetest(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		report, req, workflowName, workflowKind, err := parseAttackChainQueueRequest(c)
+		if err != nil {
+			return err
+		}
+
+		ctx := context.Background()
+		chains := selectAttackChainQueueItems(ctx, report, req)
+		if len(chains) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": "No eligible attack chains selected",
+			})
+		}
+
+		runGroupID := fmt.Sprintf("attack-chain-report-%d", report.ID)
+		seen := make(map[int64]struct{})
+		var (
+			queued      int
+			skipped     int
+			runUUIDs    []string
+			verifiedHit int
+		)
+
+		for _, chain := range chains {
+			for _, linked := range chain.LinkedVulnerabilities {
+				if _, ok := seen[linked.ID]; ok {
+					continue
+				}
+				seen[linked.ID] = struct{}{}
+				if req.VerifiedOnly && linked.VulnStatus != "verified" {
+					continue
+				}
+				if linked.VulnStatus == "false_positive" || linked.VulnStatus == "closed" {
+					skipped++
+					continue
+				}
+				vuln, err := database.GetVulnerabilityByID(ctx, linked.ID)
+				if err != nil {
+					skipped++
+					continue
+				}
+				target := strings.TrimSpace(vuln.AssetValue)
+				if target == "" {
+					target = chooseAttackChainTarget(report.Target, chain.attackChainItem)
+				}
+				if target == "" {
+					target = report.Workspace
+				}
+				params := make(map[string]interface{})
+				for key, value := range req.Params {
+					params[key] = value
+				}
+				params["target"] = target
+				params["workspace"] = report.Workspace
+				params["space_name"] = report.Workspace
+				params["retest_vulnerability_id"] = strconv.FormatInt(vuln.ID, 10)
+				params["attack_chain_report_id"] = strconv.FormatInt(report.ID, 10)
+				params["attack_chain_chain_id"] = chain.ChainID
+
+				retestRunUUID := uuid.New().String()
+				run := &database.Run{
+					RunUUID:      retestRunUUID,
+					WorkflowName: workflowName,
+					WorkflowKind: workflowKind,
+					Target:       target,
+					Params:       params,
+					Status:       "queued",
+					TriggerType:  "attack-chain-retest",
+					RunGroupID:   runGroupID,
+					RunPriority:  normalizeRetestPriority(req.Priority),
+					RunMode:      "queue",
+					IsQueued:     true,
+					Workspace:    report.Workspace,
+				}
+
+				vuln.VulnStatus = "retest"
+				vuln.RetestStatus = "queued"
+				vuln.RetestRunUUID = retestRunUUID
+				applyVulnerabilityStatusTimestamps(vuln)
+				if err := database.QueueVulnerabilityRetest(ctx, vuln, run); err != nil {
+					skipped++
+					continue
+				}
+				queued++
+				runUUIDs = append(runUUIDs, retestRunUUID)
+				if linked.VulnStatus == "verified" {
+					verifiedHit++
+				}
+			}
+		}
+
+		if queued > 0 {
+			_ = database.RecordAttackChainQueueActivity(ctx, report.ID, queued, verifiedHit)
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"message":       "Attack chain retest queue generated",
+			"queued":        queued,
+			"skipped":       skipped,
+			"run_uuids":     runUUIDs,
+			"verified_hits": verifiedHit,
+		})
+	}
+}
+
+// QueueAttackChainDeepScan turns selected chains into queued deep-scan runs.
+func QueueAttackChainDeepScan(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		report, req, workflowName, workflowKind, err := parseAttackChainQueueRequest(c)
+		if err != nil {
+			return err
+		}
+
+		ctx := context.Background()
+		chains := selectAttackChainQueueItems(ctx, report, req)
+		if len(chains) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": "No eligible attack chains selected",
+			})
+		}
+
+		runGroupID := fmt.Sprintf("attack-chain-report-%d", report.ID)
+		targets := collectAttackChainTargets(report, chains)
+		var (
+			queued      int
+			skipped     int
+			runUUIDs    []string
+			verifiedHit int
+		)
+		for _, chain := range chains {
+			verifiedHit += chain.VerifiedLinkedCount
+		}
+
+		for _, target := range targets {
+			if attackChainDeepScanRunExists(ctx, runGroupID, workflowName, report.Workspace, target) {
+				skipped++
+				continue
+			}
+			params := make(map[string]interface{})
+			for key, value := range req.Params {
+				params[key] = value
+			}
+			params["target"] = target
+			params["workspace"] = report.Workspace
+			params["space_name"] = report.Workspace
+			params["attack_chain_report_id"] = strconv.FormatInt(report.ID, 10)
+			params["attack_chain_chain_ids"] = strings.Join(extractChainIDs(chains), ",")
+			params["attack_chain_mode"] = "deep_scan"
+
+			runUUID := uuid.New().String()
+			run := &database.Run{
+				RunUUID:      runUUID,
+				WorkflowName: workflowName,
+				WorkflowKind: workflowKind,
+				Target:       target,
+				Params:       params,
+				Status:       "queued",
+				TriggerType:  "attack-chain-deep-scan",
+				RunGroupID:   runGroupID,
+				RunPriority:  normalizeRetestPriority(req.Priority),
+				RunMode:      "queue",
+				IsQueued:     true,
+				Workspace:    report.Workspace,
+				CreatedAt:    time.Now(),
+				UpdatedAt:    time.Now(),
+			}
+			if err := database.CreateRun(ctx, run); err != nil {
+				skipped++
+				continue
+			}
+			queued++
+			runUUIDs = append(runUUIDs, runUUID)
+		}
+
+		if queued > 0 {
+			_ = database.RecordAttackChainQueueActivity(ctx, report.ID, queued, verifiedHit)
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"message":       "Attack chain deep-scan queue generated",
+			"queued":        queued,
+			"skipped":       skipped,
+			"run_uuids":     runUUIDs,
+			"verified_hits": verifiedHit,
+			"targets":       targets,
 		})
 	}
 }
@@ -272,10 +489,24 @@ func enrichAttackChains(ctx context.Context, workspace string, chains []attackCh
 
 	result := make([]attackChainWorkbenchItem, 0, len(chains))
 	for _, chain := range chains {
+		linkedVulns := findLinkedVulnerabilities(ctx, workspace, chain)
+		verifiedCount := 0
+		for _, vuln := range linkedVulns {
+			if vuln.VulnStatus == "verified" {
+				verifiedCount++
+			}
+		}
+		verificationRate := 0.0
+		if len(linkedVulns) > 0 {
+			verificationRate = float64(verifiedCount) / float64(len(linkedVulns))
+		}
 		result = append(result, attackChainWorkbenchItem{
-			attackChainItem:       chain,
-			LinkedVulnerabilities: findLinkedVulnerabilities(ctx, workspace, chain),
-			LinkedAssets:          findLinkedAssets(ctx, workspace, chain),
+			attackChainItem:          chain,
+			LinkedVulnerabilities:    linkedVulns,
+			LinkedAssets:             findLinkedAssets(ctx, workspace, chain),
+			LinkedVulnerabilityCount: len(linkedVulns),
+			VerifiedLinkedCount:      verifiedCount,
+			VerificationRate:         verificationRate,
 		})
 	}
 	return result
@@ -363,4 +594,147 @@ func findLinkedAssets(ctx context.Context, workspace string, chain attackChainIt
 		})
 	}
 	return result
+}
+
+func parseAttackChainQueueRequest(c *fiber.Ctx) (*database.AttackChainReport, QueueAttackChainRequest, string, string, error) {
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return nil, QueueAttackChainRequest{}, "", "", c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   true,
+			"message": "Invalid attack chain ID",
+		})
+	}
+
+	var req QueueAttackChainRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, QueueAttackChainRequest{}, "", "", c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   true,
+			"message": "Invalid request body",
+		})
+	}
+
+	workflowName, workflowKind := resolveRetestWorkflow(req.Flow, req.Module)
+	if workflowName == "" {
+		return nil, QueueAttackChainRequest{}, "", "", c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   true,
+			"message": "Either flow or module is required",
+		})
+	}
+
+	report, err := database.GetAttackChainReportByID(context.Background(), id)
+	if err != nil {
+		return nil, QueueAttackChainRequest{}, "", "", c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error":   true,
+			"message": "Attack chain report not found",
+		})
+	}
+
+	return report, req, workflowName, workflowKind, nil
+}
+
+func selectAttackChainQueueItems(ctx context.Context, report *database.AttackChainReport, req QueueAttackChainRequest) []attackChainWorkbenchItem {
+	chains := decodeAttackChains(report.AttackChainsJSON)
+	if len(req.ChainIDs) > 0 {
+		selected := make([]attackChainItem, 0, len(chains))
+		allow := make(map[string]struct{}, len(req.ChainIDs))
+		for _, chainID := range req.ChainIDs {
+			allow[strings.TrimSpace(chainID)] = struct{}{}
+		}
+		for _, chain := range chains {
+			if _, ok := allow[strings.TrimSpace(chain.ChainID)]; ok {
+				selected = append(selected, chain)
+			}
+		}
+		chains = selected
+	}
+	items := enrichAttackChains(ctx, report.Workspace, chains)
+	if !req.VerifiedOnly {
+		return items
+	}
+	filtered := make([]attackChainWorkbenchItem, 0, len(items))
+	for _, item := range items {
+		if item.VerifiedLinkedCount > 0 {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func extractAttackChainItems(items []attackChainWorkbenchItem) []attackChainItem {
+	result := make([]attackChainItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, item.attackChainItem)
+	}
+	return result
+}
+
+func extractChainIDs(items []attackChainWorkbenchItem) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item.ChainID); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func collectAttackChainTargets(report *database.AttackChainReport, items []attackChainWorkbenchItem) []string {
+	seen := make(map[string]struct{})
+	var targets []string
+	for _, item := range items {
+		for _, vuln := range item.LinkedVulnerabilities {
+			if value := strings.TrimSpace(vuln.AssetValue); value != "" {
+				if _, ok := seen[value]; !ok {
+					seen[value] = struct{}{}
+					targets = append(targets, value)
+				}
+			}
+		}
+		for _, asset := range item.LinkedAssets {
+			for _, value := range []string{asset.URL, asset.AssetValue} {
+				value = strings.TrimSpace(value)
+				if value == "" {
+					continue
+				}
+				if _, ok := seen[value]; ok {
+					continue
+				}
+				seen[value] = struct{}{}
+				targets = append(targets, value)
+			}
+		}
+		if value := chooseAttackChainTarget(report.Target, item.attackChainItem); value != "" {
+			if _, ok := seen[value]; !ok {
+				seen[value] = struct{}{}
+				targets = append(targets, value)
+			}
+		}
+	}
+	return targets
+}
+
+func chooseAttackChainTarget(fallback string, chain attackChainItem) string {
+	for _, candidate := range []string{chain.EntryPoint.URL, fallback} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func attackChainDeepScanRunExists(ctx context.Context, runGroupID, workflowName, workspace, target string) bool {
+	db := database.GetDB()
+	if db == nil {
+		return false
+	}
+	count, err := db.NewSelect().
+		Model((*database.Run)(nil)).
+		Where("run_group_id = ?", runGroupID).
+		Where("trigger_type = ?", "attack-chain-deep-scan").
+		Where("workflow_name = ?", workflowName).
+		Where("workspace = ?", workspace).
+		Where("target = ?", target).
+		Count(ctx)
+	return err == nil && count > 0
 }
