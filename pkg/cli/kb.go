@@ -25,6 +25,7 @@ var (
 	kbMaxVulns  int
 	kbMaxRuns   int
 	kbIncludeAI bool
+	kbOutput    string
 )
 
 var kbCmd = &cobra.Command{
@@ -56,6 +57,12 @@ var kbLearnCmd = &cobra.Command{
 	RunE:  runKBLearn,
 }
 
+var kbExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export knowledge chunks into a line-oriented corpus for vector indexing",
+	RunE:  runKBExport,
+}
+
 func init() {
 	kbIngestCmd.Flags().StringVar(&kbPath, "path", "", "file or directory path to ingest")
 	kbIngestCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "global", "knowledge workspace name")
@@ -79,10 +86,16 @@ func init() {
 	kbLearnCmd.Flags().BoolVar(&kbIncludeAI, "include-ai", true, "include ai-analysis artifacts when available")
 	_ = kbLearnCmd.MarkFlagRequired("workspace")
 
+	kbExportCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty exports all workspaces)")
+	kbExportCmd.Flags().StringVarP(&kbOutput, "output", "o", "", "output file path")
+	kbExportCmd.Flags().IntVar(&kbLimit, "limit", 400, "maximum chunks to export")
+	_ = kbExportCmd.MarkFlagRequired("output")
+
 	kbCmd.AddCommand(kbIngestCmd)
 	kbCmd.AddCommand(kbSearchCmd)
 	kbCmd.AddCommand(kbDocsCmd)
 	kbCmd.AddCommand(kbLearnCmd)
+	kbCmd.AddCommand(kbExportCmd)
 	rootCmd.AddCommand(kbCmd)
 }
 
@@ -257,5 +270,35 @@ func runKBLearn(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return nil
+}
+
+func runKBExport(cmd *cobra.Command, args []string) error {
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	ctx := context.Background()
+	summary, err := knowledge.ExportChunks(ctx, kbWorkspace, kbOutput, kbLimit)
+	if err != nil {
+		return err
+	}
+
+	if globalJSON {
+		data, err := json.Marshal(summary)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	printer := terminal.NewPrinter()
+	printer.Success("Knowledge export completed")
+	fmt.Printf("Workspace: %s\n", strings.TrimSpace(summary.Workspace))
+	fmt.Printf("Output:    %s\n", summary.Output)
+	fmt.Printf("Documents: %d\n", summary.Documents)
+	fmt.Printf("Chunks:    %d\n", summary.Chunks)
 	return nil
 }

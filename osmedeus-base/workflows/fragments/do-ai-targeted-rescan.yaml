@@ -20,8 +20,20 @@ params:
   # 输入：AI 分析结果
   - name: confirmedUrlsFile
     default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: attackChainEntryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: priorityTargetsFile
+    default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+  - name: operatorQueueTargetsFile
+    default: "{{Output}}/ai-analysis/operator-queue-targets-{{TargetSpace}}.txt"
+  - name: retestTargetsFile
+    default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: rescanTargetsFile
+    default: "{{Output}}/ai-analysis/rescan-targets-{{TargetSpace}}.txt"
 
   # 输出
   - name: rescanOutputJsonl
@@ -48,6 +60,9 @@ params:
     default: "8"
   - name: scanTimeout
     default: "90m"
+  - name: maxRescanTargets
+    type: integer
+    default: 100
 
   # 开关
   - name: enableTargetedRescan
@@ -68,12 +83,28 @@ steps:
     type: bash
     pre_condition: "{{enableTargetedRescan}}"
     command: |
-      if [ ! -f "{{confirmedUrlsFile}}" ] || [ ! -s "{{confirmedUrlsFile}}" ]; then
-        echo "[Rescan] No confirmed targets from AI validation, skipping rescan"
+      mkdir -p {{Output}}/ai-analysis
+      TARGET_TMP="{{Output}}/ai-analysis/.rescan-targets-raw-{{TargetSpace}}.txt"
+      : > "$TARGET_TMP"
+
+      for f in "{{confirmedUrlsFile}}" "{{attackChainEntryPointsFile}}" "{{priorityTargetsFile}}" "{{semanticPriorityTargetsFile}}" "{{operatorQueueTargetsFile}}" "{{retestTargetsFile}}"; do
+        if [ -f "$f" ]; then
+          cat "$f" >> "$TARGET_TMP" 2>/dev/null || true
+        fi
+      done
+
+      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        jq -r '.rescan_targets[]? // empty' "{{aiDecisionFile}}" 2>/dev/null >> "$TARGET_TMP" || true
+      fi
+
+      awk 'NF && !seen[$0]++' "$TARGET_TMP" | head -{{maxRescanTargets}} > "{{rescanTargetsFile}}" || true
+
+      if [ ! -s "{{rescanTargetsFile}}" ]; then
+        echo "[Rescan] No actionable targets collected, skipping rescan"
         touch "{{Output}}/ai-analysis/.rescan-skip"
       else
-        TARGET_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
-        echo "[Rescan] Found $TARGET_COUNT AI-confirmed targets for deep scan"
+        TARGET_COUNT=$(wc -l < "{{rescanTargetsFile}}" 2>/dev/null || echo 0)
+        echo "[Rescan] Collected $TARGET_COUNT actionable targets for deep scan"
         rm -f "{{Output}}/ai-analysis/.rescan-skip"
       fi
 
@@ -122,18 +153,18 @@ steps:
     timeout: "{{scanTimeout}}"
     command: |
       RESCAN_CFG="{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
-      source "$RESCAN_CFG" 2>/dev/null || true
+      [ -f "$RESCAN_CFG" ] && . "$RESCAN_CFG" 2>/dev/null || true
       SEVERITY=${RESCAN_SEVERITY:-"{{defaultSeverity}}"}
       THREADS=${RESCAN_THREADS:-{{defaultThreads}}}
       RATE_LIMIT=${RESCAN_RATE_LIMIT:-{{defaultRateLimit}}}
       TIMEOUT=${RESCAN_TIMEOUT:-"{{defaultTimeout}}"}
 
-      TARGET_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
+      TARGET_COUNT=$(wc -l < "{{rescanTargetsFile}}" 2>/dev/null || echo 0)
       echo "[Rescan] Running nuclei on $TARGET_COUNT confirmed targets"
       echo "[Rescan] Params: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
 
       nuclei \
-        -l "{{confirmedUrlsFile}}" \
+        -l "{{rescanTargetsFile}}" \
         -t "{{nucleiTemplateConfig}}" \
         -severity "$SEVERITY" \
         -c $THREADS \
@@ -191,7 +222,7 @@ steps:
           TOTAL=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
 
           echo "## 扫描统计"
-          echo "- 扫描目标数: $(wc -l < \"{{confirmedUrlsFile}}\" 2>/dev/null || echo 0)"
+          echo "- 扫描目标数: $(wc -l < \"{{rescanTargetsFile}}\" 2>/dev/null || echo 0)"
           echo "- Critical 新发现: $CRITICAL"
           echo "- High 新发现: $HIGH"
           echo "- 总计新发现: $TOTAL"

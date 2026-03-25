@@ -21,6 +21,10 @@ params:
     default: "{{Output}}/ai-analysis/chroma_db"
   - name: collectionName
     default: "{{TargetSpace}}"
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: knowledgeIndexFile
+    default: "{{semanticIndexDir}}/knowledge-index.txt"
   - name: nucleiFile
     default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
   - name: fingerprintFile
@@ -41,6 +45,12 @@ params:
   - name: enableHybridSearch
     type: bool
     default: true
+  - name: includeKnowledgeBase
+    type: bool
+    default: true
+  - name: maxKnowledgeChunks
+    type: integer
+    default: 200
 
   # Embeddings 配置
   - name: embeddingsProvider
@@ -107,6 +117,32 @@ steps:
         exit 1
       fi
 
+  - name: export-knowledge-corpus
+    type: bash
+    pre_condition: "{{enableHybridSearch}} && {{includeKnowledgeBase}}"
+    timeout: 120s
+    command: |
+      mkdir -p {{semanticIndexDir}}
+      : > "{{knowledgeIndexFile}}"
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        echo "[Hybrid] osmedeus binary not found, skipping knowledge export"
+        exit 0
+      fi
+
+      "$OSM_BIN" kb export \
+        -w "{{knowledgeWorkspace}}" \
+        --limit {{maxKnowledgeChunks}} \
+        --output "{{knowledgeIndexFile}}" >/tmp/osm-kb-export-hybrid.log 2>&1 || true
+
+      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      echo "[Hybrid] Exported knowledge corpus: $KB_LINES chunks"
+
   - name: index-knowledge-base
     type: bash
     pre_condition: "{{enableHybridSearch}}"
@@ -134,6 +170,12 @@ steps:
           fi
         fi
       done
+
+      if [ -f "{{knowledgeIndexFile}}" ]; then
+        echo "=== [WORKSPACE_KNOWLEDGE] ===" >> "$COMBINED_KB"
+        cat "{{knowledgeIndexFile}}" >> "$COMBINED_KB" 2>/dev/null || true
+        echo "" >> "$COMBINED_KB"
+      fi
       
       KB_LINES=$(wc -l < "$COMBINED_KB" 2>/dev/null || echo 0)
       echo "[Hybrid] Knowledge base combined: $KB_LINES lines"

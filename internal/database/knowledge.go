@@ -50,6 +50,19 @@ type knowledgeSearchCandidate struct {
 	Content    string `bun:"content"`
 }
 
+// KnowledgeChunkExportRow contains a normalized chunk plus its parent document metadata.
+type KnowledgeChunkExportRow struct {
+	DocumentID int64  `bun:"document_id"`
+	ChunkID    int64  `bun:"chunk_id"`
+	Workspace  string `bun:"workspace"`
+	ChunkIndex int    `bun:"chunk_index"`
+	Title      string `bun:"title"`
+	SourcePath string `bun:"source_path"`
+	DocType    string `bun:"doc_type"`
+	Section    string `bun:"section"`
+	Content    string `bun:"content"`
+}
+
 // UpsertKnowledgeDocument stores a document and replaces all associated chunks.
 func UpsertKnowledgeDocument(ctx context.Context, doc *KnowledgeDocument, chunks []KnowledgeChunk) error {
 	if db == nil {
@@ -226,6 +239,48 @@ func SearchKnowledge(ctx context.Context, workspace, query string, limit int) ([
 	}
 
 	return results, nil
+}
+
+// ListKnowledgeChunks returns joined chunk/document rows for export and offline indexing.
+func ListKnowledgeChunks(ctx context.Context, workspace string, limit int) ([]KnowledgeChunkExportRow, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+
+	var rows []KnowledgeChunkExportRow
+	q := db.NewSelect().
+		TableExpr("knowledge_chunks AS kc").
+		ColumnExpr("kc.document_id AS document_id").
+		ColumnExpr("kc.id AS chunk_id").
+		ColumnExpr("kc.workspace AS workspace").
+		ColumnExpr("kc.chunk_index AS chunk_index").
+		ColumnExpr("kd.title AS title").
+		ColumnExpr("kd.source_path AS source_path").
+		ColumnExpr("kd.doc_type AS doc_type").
+		ColumnExpr("kc.section AS section").
+		ColumnExpr("kc.content AS content").
+		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id")
+
+	if trimmed := strings.TrimSpace(workspace); trimmed != "" {
+		q = q.Where("kc.workspace = ?", trimmed)
+	}
+
+	if err := q.
+		OrderExpr("kd.updated_at DESC").
+		OrderExpr("kc.document_id DESC").
+		OrderExpr("kc.chunk_index ASC").
+		Limit(limit).
+		Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+
+	return rows, nil
 }
 
 func normalizeKnowledgeWorkspace(workspace string) string {

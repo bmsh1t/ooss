@@ -36,8 +36,12 @@ params:
     default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
   - name: semanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
+  - name: initialSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
   - name: semanticHighlightsFile
     default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
+  - name: initialSemanticHighlightsFile
+    default: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
 
   # 输入文件 - 扫描数据
   - name: subdomainFile
@@ -56,6 +60,14 @@ params:
     default: "{{Output}}/waf/waf-{{TargetSpace}}.txt"
   - name: priorityTargetsFile
     default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
 
   # 配置
   - name: enableIntelligentAnalysis
@@ -147,15 +159,16 @@ steps:
       CHAIN_FILE="{{attackChainFile}}"
       PLAN_FILE="{{pathPlanningFile}}"
       SEMANTIC_FILE="{{semanticSearchFile}}"
+      INITIAL_SEMANTIC_FILE="{{initialSemanticSearchFile}}"
 
       echo "[AI Coordinator] Checking submodule results..."
 
       # 检查并报告各模块状态
       check_file() {
-        local file="$1"
-        local name="$2"
+        file="$1"
+        name="$2"
         if [ -f "$file" ] && jq empty "$file" 2>/dev/null; then
-          local size=$(wc -c < "$file" 2>/dev/null || echo 0)
+          size=$(wc -c < "$file" 2>/dev/null || echo 0)
           if [ "$size" -gt 50 ]; then
             echo "[OK] [AI Coordinator] $name: available ($size bytes)"
             return 0
@@ -197,6 +210,13 @@ steps:
       fi
 
       # 聚合语义搜索结果
+      INITIAL_SEMANTIC_STATUS="not_available"
+      INITIAL_SEMANTIC_RESULTS=0
+      if check_file "$INITIAL_SEMANTIC_FILE" "Initial semantic search"; then
+        INITIAL_SEMANTIC_STATUS="available"
+        INITIAL_SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$INITIAL_SEMANTIC_FILE" 2>/dev/null || echo 0)
+      fi
+
       SEMANTIC_STATUS="not_available"
       SEMANTIC_RESULTS=0
       if check_file "$SEMANTIC_FILE" "Semantic search"; then
@@ -206,7 +226,7 @@ steps:
 
       # 检查是否有任何模块产生了有效结果
       ANY_DATA="false"
-      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ]; then
+      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ] || [ "$INITIAL_SEMANTIC_STATUS" = "available" ]; then
         ANY_DATA="true"
       fi
 
@@ -224,6 +244,8 @@ steps:
         --argjson critical_chains "$CRITICAL_CHAINS" \
         --arg plan_status "$PLAN_STATUS" \
         --argjson total_phases "$TOTAL_PHASES" \
+        --arg initial_semantic_status "$INITIAL_SEMANTIC_STATUS" \
+        --argjson initial_semantic_results "$INITIAL_SEMANTIC_RESULTS" \
         --arg semantic_status "$SEMANTIC_STATUS" \
         --argjson semantic_results "$SEMANTIC_RESULTS" \
         '{
@@ -243,6 +265,10 @@ steps:
             path_planning: {
               status: $plan_status,
               total_phases: $total_phases
+            },
+            semantic_search_initial: {
+              status: $initial_semantic_status,
+              results: $initial_semantic_results
             },
             semantic_search: {
               status: $semantic_status,
@@ -318,12 +344,60 @@ steps:
       fi
 
       # 从语义搜索结果获取高优先级发现
+      TOTAL_SEMANTIC_CRITICAL=0
+      if [ -f "{{initialSemanticSearchFile}}" ] && jq empty "{{initialSemanticSearchFile}}" 2>/dev/null; then
+        EARLY_SEMANTIC_CRITICAL=$(jq -r '.highlights.critical_findings | length // 0' "{{initialSemanticSearchFile}}" 2>/dev/null || echo 0)
+        TOTAL_SEMANTIC_CRITICAL=$((TOTAL_SEMANTIC_CRITICAL + EARLY_SEMANTIC_CRITICAL))
+      fi
+
       SEMANTIC_FILE="{{semanticSearchFile}}"
       if [ -f "$SEMANTIC_FILE" ] && jq empty "$SEMANTIC_FILE" 2>/dev/null; then
         SEMANTIC_CRITICAL=$(jq -r '.highlights.critical_findings | length // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
-        if [ "$SEMANTIC_CRITICAL" -gt 0 ]; then
-          REASONING="$REASONING + $SEMANTIC_CRITICAL semantic highlights"
-        fi
+        TOTAL_SEMANTIC_CRITICAL=$((TOTAL_SEMANTIC_CRITICAL + SEMANTIC_CRITICAL))
+      fi
+
+      if [ "$TOTAL_SEMANTIC_CRITICAL" -gt 0 ]; then
+        REASONING="$REASONING + $TOTAL_SEMANTIC_CRITICAL semantic highlights"
+      fi
+
+      FOCUS_TMP="{{Output}}/ai-analysis/.focus-areas-{{TargetSpace}}.txt"
+      RESCAN_TMP="{{Output}}/ai-analysis/.rescan-targets-{{TargetSpace}}.txt"
+      : > "$FOCUS_TMP"
+      : > "$RESCAN_TMP"
+
+      if [ -f "{{priorityTargetsFile}}" ]; then
+        head -15 "{{priorityTargetsFile}}" >> "$FOCUS_TMP" 2>/dev/null || true
+        head -20 "{{priorityTargetsFile}}" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
+      if [ -f "{{confirmedUrlsFile}}" ]; then
+        cat "{{confirmedUrlsFile}}" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
+      if [ -f "{{entryPointsFile}}" ]; then
+        head -15 "{{entryPointsFile}}" >> "$FOCUS_TMP" 2>/dev/null || true
+        cat "{{entryPointsFile}}" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
+      if [ -f "{{bestPathTargetsFile}}" ]; then
+        head -15 "{{bestPathTargetsFile}}" >> "$FOCUS_TMP" 2>/dev/null || true
+        head -20 "{{bestPathTargetsFile}}" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
+      if [ -f "{{semanticPriorityTargetsFile}}" ]; then
+        head -15 "{{semanticPriorityTargetsFile}}" >> "$FOCUS_TMP" 2>/dev/null || true
+        head -20 "{{semanticPriorityTargetsFile}}" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
+
+      awk 'NF && !seen[$0]++' "$FOCUS_TMP" > "$FOCUS_TMP.tmp" && mv "$FOCUS_TMP.tmp" "$FOCUS_TMP"
+      awk 'NF && !seen[$0]++' "$RESCAN_TMP" > "$RESCAN_TMP.tmp" && mv "$RESCAN_TMP.tmp" "$RESCAN_TMP"
+
+      FOCUS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FOCUS_TMP" 2>/dev/null || echo '[]')
+      RESCAN_TARGETS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$RESCAN_TMP" 2>/dev/null || echo '[]')
+      FOCUS_COUNT=$(wc -l < "$FOCUS_TMP" 2>/dev/null || echo 0)
+      RESCAN_COUNT=$(wc -l < "$RESCAN_TMP" 2>/dev/null || echo 0)
+
+      if [ "$FOCUS_COUNT" -gt 0 ]; then
+        REASONING="$REASONING + $FOCUS_COUNT focus areas"
+      fi
+      if [ "$RESCAN_COUNT" -gt 0 ]; then
+        REASONING="$REASONING + $RESCAN_COUNT retest targets"
       fi
 
       # 生成 AI 决策 JSON 文件 - 与 vuln-suite.yaml 读取路径一致
@@ -335,6 +409,8 @@ steps:
         --argjson waf_bypass_needed "$WAF_NEEDED" \
         --arg waf_bypass_techniques "$WAF_TECH" \
         --arg waf_recommended_delay "$WAF_DELAY" \
+        --argjson focus_areas "$FOCUS_JSON" \
+        --argjson rescan_targets "$RESCAN_TARGETS_JSON" \
         --arg reasoning "$REASONING" \
         '{
           nuclei_severity: $nuclei_severity,
@@ -349,6 +425,9 @@ steps:
           enable_sqli_scan: true,
           enable_lfi_scan: true,
           enable_takeover_scan: true,
+          focus_areas: $focus_areas,
+          priority_targets: $focus_areas,
+          rescan_targets: $rescan_targets,
           reasoning: $reasoning
         }' > {{aiDecisionFile}}
 
@@ -475,20 +554,20 @@ steps:
     pre_condition: "{{enableIntelligentAnalysis}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
-      
+
       REPORT_FILE="{{Output}}/ai-analysis/ai-execution-status.json"
       MARKDOWN_FILE="{{Output}}/ai-analysis/ai-execution-status.md"
-      
+
       echo "[AI Status] Generating execution status report..."
-      
+
       # 收集各模块状态
       check_module() {
-        local name="$1"
-        local file="$2"
-        local size=0
-        local status="not_run"
-        local error=""
-        
+        name="$1"
+        file="$2"
+        size=0
+        status="not_run"
+        error=""
+
         if [ -f "$file" ]; then
           size=$(wc -c < "$file" 2>/dev/null || echo 0)
           if [ "$size" -gt 50 ]; then
@@ -510,49 +589,103 @@ steps:
           status="file_not_found"
           error="Module output file not found"
         fi
-        
+
         echo "$name|$status|$size|$error"
       }
-      
+
+      parse_result() {
+        result="$1"
+        field="$2"
+        case "$field" in
+          name) printf '%s\n' "$result" | cut -d'|' -f1 ;;
+          status) printf '%s\n' "$result" | cut -d'|' -f2 ;;
+          size) printf '%s\n' "$result" | cut -d'|' -f3 ;;
+          error) printf '%s\n' "$result" | cut -d'|' -f4- ;;
+          *) return 1 ;;
+        esac
+      }
+
       # 检查各模块
       VULN_RESULT=$(check_module "vuln-validation" "{{vulnValidationFile}}")
       CHAIN_RESULT=$(check_module "attack-chain" "{{attackChainFile}}")
       PLAN_RESULT=$(check_module "path-planning" "{{pathPlanningFile}}")
       SEMANTIC_RESULT=$(check_module "semantic-search" "{{semanticSearchFile}}")
-      
-      # 生成 JSON 报告
-      generate_json_report() {
-        cat > "$REPORT_FILE" << 'HEADER'
-      {
-        "report_generated": "TIMESTAMP_PLACEHOLDER",
-        "target": "TARGET_PLACEHOLDER",
-        "overall_status": "PARTIAL",
-        "modules": {
-      HEADER
-        
-        # 添加各模块状态
-        local first=true
-        for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
-          IFS='|' read -r name status size error <<< "$result"
-          if [ "$first" = true ]; then
-            first=false
-          else
-            echo "," >> "$REPORT_FILE"
-          fi
-          echo "          \"$name\": {\"status\": \"$status\", \"size\": $size, \"error\": \"$error\"}" >> "$REPORT_FILE"
-        done
-        
-        cat >> "$REPORT_FILE" << 'FOOTER'
-        },
-        "recommendations": []
-      }
-      FOOTER
-        
-        # 替换占位符
-        sed -i "s|TIMESTAMP_PLACEHOLDER|$(date -Iseconds)|g" "$REPORT_FILE"
-        sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" "$REPORT_FILE"
-      }
-      
+
+      VULN_STATUS=$(parse_result "$VULN_RESULT" status)
+      VULN_SIZE=$(parse_result "$VULN_RESULT" size)
+      VULN_ERROR=$(parse_result "$VULN_RESULT" error)
+      CHAIN_STATUS=$(parse_result "$CHAIN_RESULT" status)
+      CHAIN_SIZE=$(parse_result "$CHAIN_RESULT" size)
+      CHAIN_ERROR=$(parse_result "$CHAIN_RESULT" error)
+      PLAN_STATUS=$(parse_result "$PLAN_RESULT" status)
+      PLAN_SIZE=$(parse_result "$PLAN_RESULT" size)
+      PLAN_ERROR=$(parse_result "$PLAN_RESULT" error)
+      SEMANTIC_STATUS=$(parse_result "$SEMANTIC_RESULT" status)
+      SEMANTIC_SIZE=$(parse_result "$SEMANTIC_RESULT" size)
+      SEMANTIC_ERROR=$(parse_result "$SEMANTIC_RESULT" error)
+
+      COMPLETED_COUNT=0
+      FAILED_COUNT=0
+      SKIPPED_COUNT=0
+      OVERALL_STATUS="completed"
+      RECOMMENDATIONS='[]'
+
+      for status in "$VULN_STATUS" "$CHAIN_STATUS" "$PLAN_STATUS" "$SEMANTIC_STATUS"; do
+        case "$status" in
+          completed) COMPLETED_COUNT=$((COMPLETED_COUNT + 1)) ;;
+          invalid_json)
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            OVERALL_STATUS="partial"
+            ;;
+          empty_output|file_not_found|not_run)
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            [ "$OVERALL_STATUS" = "completed" ] && OVERALL_STATUS="partial"
+            ;;
+          *)
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            OVERALL_STATUS="partial"
+            ;;
+        esac
+      done
+
+      if [ "$FAILED_COUNT" -gt 0 ] && [ "$SKIPPED_COUNT" -gt 0 ]; then
+        RECOMMENDATIONS='["Check module outputs and logs for failed steps","Review upstream scan coverage because some modules produced no usable artifacts"]'
+      elif [ "$FAILED_COUNT" -gt 0 ]; then
+        RECOMMENDATIONS='["Check module outputs and logs for failed steps"]'
+      elif [ "$SKIPPED_COUNT" -gt 2 ]; then
+        RECOMMENDATIONS='["Review upstream scan coverage because multiple modules produced no usable artifacts"]'
+      fi
+
+      jq -n \
+        --arg generated "$(date -Iseconds)" \
+        --arg target "{{Target}}" \
+        --arg overall_status "$OVERALL_STATUS" \
+        --arg vuln_status "$VULN_STATUS" \
+        --argjson vuln_size "$VULN_SIZE" \
+        --arg vuln_error "$VULN_ERROR" \
+        --arg chain_status "$CHAIN_STATUS" \
+        --argjson chain_size "$CHAIN_SIZE" \
+        --arg chain_error "$CHAIN_ERROR" \
+        --arg plan_status "$PLAN_STATUS" \
+        --argjson plan_size "$PLAN_SIZE" \
+        --arg plan_error "$PLAN_ERROR" \
+        --arg semantic_status "$SEMANTIC_STATUS" \
+        --argjson semantic_size "$SEMANTIC_SIZE" \
+        --arg semantic_error "$SEMANTIC_ERROR" \
+        --argjson recommendations "$RECOMMENDATIONS" \
+        '{
+          report_generated: $generated,
+          target: $target,
+          overall_status: $overall_status,
+          modules: {
+            "vuln-validation": {status: $vuln_status, size: $vuln_size, error: $vuln_error},
+            "attack-chain": {status: $chain_status, size: $chain_size, error: $chain_error},
+            "path-planning": {status: $plan_status, size: $plan_size, error: $plan_error},
+            "semantic-search": {status: $semantic_status, size: $semantic_size, error: $semantic_error}
+          },
+          recommendations: $recommendations
+        }' > "$REPORT_FILE"
+
       # 生成 Markdown 报告
       generate_markdown_report() {
         cat > "$MARKDOWN_FILE" << 'EOF'
@@ -580,14 +713,17 @@ steps:
       ## 建议
       
       EOF
-        
+
         sed -i "s|TARGET_PLACEHOLDER|{{Target}}|g" "$MARKDOWN_FILE"
         sed -i "s|TIMESTAMP_PLACEHOLDER|$(date '+%Y-%m-%d %H:%M:%S')|g" "$MARKDOWN_FILE"
-        
+
         # 添加模块状态表格
         for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
-          IFS='|' read -r name status size error <<< "$result"
-          local status_icon=""
+          name=$(parse_result "$result" name)
+          status=$(parse_result "$result" status)
+          size=$(parse_result "$result" size)
+          error=$(parse_result "$result" error)
+          status_icon=""
           case $status in
             completed) status_icon="[OK]" ;;
             failed) status_icon="[FAIL]" ;;
@@ -598,41 +734,26 @@ steps:
           esac
           echo "| $name | $status_icon $status | $size bytes | $error |" >> "$MARKDOWN_FILE"
         done
-        
+
         # 添加执行摘要
-        local completed_count=0
-        local failed_count=0
-        local skipped_count=0
-        
-        for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
-          IFS='|' read -r name status size error <<< "$result"
-          case $status in
-            completed) completed_count=$((completed_count + 1)) ;;
-            failed|invalid_json) failed_count=$((failed_count + 1)) ;;
-            empty_output|not_run) skipped_count=$((skipped_count + 1)) ;;
-          esac
-        done
-        
         echo "" >> "$MARKDOWN_FILE"
-        echo "**执行摘要**: $completed_count 成功, $failed_count 失败, $skipped_count 跳过/空" >> "$MARKDOWN_FILE"
+        echo "**执行摘要**: $COMPLETED_COUNT 成功, $FAILED_COUNT 失败, $SKIPPED_COUNT 跳过/空" >> "$MARKDOWN_FILE"
         echo "" >> "$MARKDOWN_FILE"
-        
+
         # 添加建议
-        if [ "$failed_count" -gt 0 ]; then
+        if [ "$FAILED_COUNT" -gt 0 ]; then
           echo "**建议**: 部分模块执行失败，建议检查日志文件获取详细信息。" >> "$MARKDOWN_FILE"
         fi
-        if [ "$skipped_count" -gt 2 ]; then
+        if [ "$SKIPPED_COUNT" -gt 2 ]; then
           echo "**注意**: 多个模块未产生有效输出，可能是前置扫描未完成或数据不足。" >> "$MARKDOWN_FILE"
         fi
       }
-      
-      # 生成报告
-      generate_json_report
+
       generate_markdown_report
-      
+
       echo "[AI Status] Report saved to $REPORT_FILE"
       echo "[AI Status] Markdown report saved to $MARKDOWN_FILE"
-      
+
       # 输出汇总信息
       echo ""
       echo "========== AI 执行状态汇总 =========="
@@ -641,7 +762,9 @@ steps:
       echo ""
       echo "模块状态:"
       for result in "$VULN_RESULT" "$CHAIN_RESULT" "$PLAN_RESULT" "$SEMANTIC_RESULT"; do
-        IFS='|' read -r name status size error <<< "$result"
+        name=$(parse_result "$result" name)
+        status=$(parse_result "$result" status)
+        size=$(parse_result "$result" size)
         printf "  %-20s %-15s (%s bytes)\n" "$name" "$status" "$size"
       done
       echo "=========================================="

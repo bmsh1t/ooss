@@ -1,0 +1,271 @@
+kind: module
+name: ai-operator-queue
+description: Turn AI findings into a practical operator queue for manual exploitation and verification
+
+params:
+  - name: operatorQueueOutput
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: operatorQueueMd
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.md"
+  - name: operatorQueueTargetsFile
+    default: "{{Output}}/ai-analysis/operator-queue-targets-{{TargetSpace}}.txt"
+
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: pathPlanningFile
+    default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+
+  - name: enableOperatorQueue
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-operator-queue
+    type: function
+    pre_condition: "{{enableOperatorQueue}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'create_folder("{{Output}}/ai-analysis/.input")'
+      - 'log_info("Preparing AI operator queue for {{Target}}")'
+
+  - name: build-operator-context
+    type: bash
+    pre_condition: "{{enableOperatorQueue}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/.input
+
+      VULN_COUNT=$(jq -r '.confirmed_real // .validation_summary.confirmed_real // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
+      CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' "{{attackChainFile}}" 2>/dev/null || echo 0)
+      PHASE_COUNT=$(jq -r '.plan_summary.total_phases // 0' "{{pathPlanningFile}}" 2>/dev/null || echo 0)
+      RETEST_COUNT=$(jq -r '.summary.total_targets // 0' "{{retestPlanOutput}}" 2>/dev/null || echo 0)
+
+      jq -n \
+        --arg target "{{Target}}" \
+        --arg vuln_file "{{vulnValidationFile}}" \
+        --arg attack_chain_file "{{attackChainFile}}" \
+        --arg path_planning_file "{{pathPlanningFile}}" \
+        --arg semantic_file "{{semanticSearchFile}}" \
+        --arg retest_file "{{retestPlanOutput}}" \
+        --arg decision_file "{{aiDecisionFile}}" \
+        --argjson vuln_count "$VULN_COUNT" \
+        --argjson chain_count "$CHAIN_COUNT" \
+        --argjson phase_count "$PHASE_COUNT" \
+        --argjson retest_count "$RETEST_COUNT" \
+        '{
+          target: $target,
+          files: {
+            vuln_validation: $vuln_file,
+            attack_chain: $attack_chain_file,
+            path_planning: $path_planning_file,
+            semantic_search: $semantic_file,
+            retest_plan: $retest_file,
+            ai_decision: $decision_file
+          },
+          counts: {
+            confirmed_vulns: $vuln_count,
+            attack_chains: $chain_count,
+            execution_phases: $phase_count,
+            retest_targets: $retest_count
+          }
+        }' > {{Output}}/ai-analysis/.input/operator-queue-context.json
+
+      if [ "$VULN_COUNT" -eq 0 ] && [ "$CHAIN_COUNT" -eq 0 ] && [ "$RETEST_COUNT" -eq 0 ]; then
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.operator-queue-skip
+      else
+        rm -f {{Output}}/ai-analysis/.operator-queue-skip 2>/dev/null || true
+      fi
+
+  - name: ai-generate-operator-queue
+    type: agent
+    pre_condition: '{{enableOperatorQueue}} && !file_exists("{{Output}}/ai-analysis/.operator-queue-skip")'
+    max_iterations: 4
+    timeout: 600
+    on_error:
+      - action: continue
+    system_prompt: |
+      你是一个红队现场负责人，把扫描与 AI 分析结果整理成操作员任务队列。
+
+      输出要求：
+      1. 先写简短分析，说明为什么这些任务值得手工跟进
+      2. 然后输出 JSON 代码块
+
+      JSON 格式：
+      ```json
+      {
+        "summary": {
+          "total_tasks": 2,
+          "p1_tasks": 1,
+          "p2_tasks": 1
+        },
+        "focus_targets": ["https://api.example.com/login"],
+        "tasks": [
+          {
+            "id": "op-1",
+            "priority": "P1",
+            "target": "https://api.example.com/login",
+            "title": "验证认证绕过",
+            "reason": "确认漏洞 + 攻击链入口",
+            "procedure": "按路径规划中的 phase 1 开始验证",
+            "expected_outcome": "确认是否可拿到管理会话",
+            "evidence": ["confirmed vuln", "attack chain"]
+          }
+        ]
+      }
+      ```
+
+      约束：
+      - target 必须是具体 URL、主机或服务
+      - 任务要偏人工验证、权限提升、横向移动、鉴权边界、业务逻辑验证
+      - 优先输出 P1/P2，不要堆无意义低优先级条目
+    query: |
+      为 {{Target}} 生成 operator queue。
+
+      先读取 {{Output}}/ai-analysis/.input/operator-queue-context.json。
+      然后按需读取里面列出的文件，结合 vuln validation、attack chain、path planning、semantic search、retest plan 和 ai decision 生成操作员任务队列。
+
+      最终输出：
+      1. 简短分析
+      2. JSON 代码块
+    agent_tools:
+      - preset: read_file
+      - preset: file_exists
+      - preset: save_content
+    exports:
+      operator_queue_raw: "{{agent_content}}"
+
+  - name: save-operator-queue
+    type: bash
+    pre_condition: "{{enableOperatorQueue}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ -f "{{Output}}/ai-analysis/.operator-queue-skip" ]; then
+        echo '{"summary":{"total_tasks":0,"p1_tasks":0,"p2_tasks":0},"focus_targets":[],"tasks":[]}' > {{operatorQueueOutput}}
+        exit 0
+      fi
+
+      RAW_FILE="{{Output}}/ai-analysis/.operator-queue-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/.operator-queue-json-{{TargetSpace}}.json"
+      FALLBACK_TARGETS="{{Output}}/ai-analysis/.operator-queue-fallback-targets-{{TargetSpace}}.txt"
+
+      cat > "$RAW_FILE" << 'AIEOF'
+      {{operator_queue_raw}}
+      AIEOF
+
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
+
+      if [ ! -s "$JSON_FILE" ]; then
+        sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
+      fi
+
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
+        jq '
+          .summary = ((.summary // {}) + {
+            total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
+            p1_tasks: (.summary.p1_tasks // 0),
+            p2_tasks: (.summary.p2_tasks // 0)
+          })
+          | .focus_targets = (.focus_targets // [])
+          | .tasks = (.tasks // [])
+        ' "$JSON_FILE" > {{operatorQueueOutput}}
+      else
+        if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
+          jq -r '[.targets[]?.target, .automation_queue[]?.target] | map(select(. != null and . != "")) | unique | .[]' "{{retestPlanOutput}}" 2>/dev/null > "$FALLBACK_TARGETS" || true
+        else
+          : > "$FALLBACK_TARGETS"
+        fi
+
+        FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
+        jq -n \
+          --argjson fallback_targets "$FALLBACK_JSON" \
+          '{
+            summary: {
+              total_tasks: ($fallback_targets | length),
+              p1_tasks: ([$fallback_targets[0:3][]] | length),
+              p2_tasks: (if ($fallback_targets | length) > 3 then (($fallback_targets | length) - 3) else 0 end)
+            },
+            focus_targets: $fallback_targets,
+            tasks: [
+              range(0; ($fallback_targets | length)) as $i | {
+                id: ("op-" + (($i + 1) | tostring)),
+                priority: (if $i < 3 then "P1" else "P2" end),
+                target: $fallback_targets[$i],
+                title: "Manual validation follow-up",
+                reason: "fallback task derived from retest plan targets",
+                procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
+                expected_outcome: "Confirm whether the target can be exploited or chained further",
+                evidence: ["retest_plan", "fallback_generation"]
+              }
+            ]
+          }' > {{operatorQueueOutput}}
+      fi
+
+      jq '
+        .summary = ((.summary // {}) + {
+          total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
+          p1_tasks: (.summary.p1_tasks // 0),
+          p2_tasks: (.summary.p2_tasks // 0)
+        })
+        | .focus_targets = (.focus_targets // [])
+        | .tasks = (.tasks // [])
+      ' {{operatorQueueOutput}} > {{operatorQueueOutput}}.tmp 2>/dev/null && mv {{operatorQueueOutput}}.tmp {{operatorQueueOutput}} || true
+
+      rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_TARGETS" 2>/dev/null || true
+
+  - name: extract-operator-targets
+    type: bash
+    pre_condition: "{{enableOperatorQueue}}"
+    command: |
+      jq -r '
+        [
+          .focus_targets[]?,
+          .tasks[]?.target
+        ] | map(select(. != null and . != "")) | .[]
+      ' {{operatorQueueOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{operatorQueueTargetsFile}} || true
+
+      P1_COUNT=$(jq -r '[.tasks[]? | select(.priority == "P1")] | length' {{operatorQueueOutput}} 2>/dev/null || echo 0)
+      P2_COUNT=$(jq -r '[.tasks[]? | select(.priority == "P2")] | length' {{operatorQueueOutput}} 2>/dev/null || echo 0)
+      TOTAL_COUNT=$(jq -r '[.tasks[]?] | length' {{operatorQueueOutput}} 2>/dev/null || echo 0)
+
+      jq \
+        --argjson total "$TOTAL_COUNT" \
+        --argjson p1 "$P1_COUNT" \
+        --argjson p2 "$P2_COUNT" \
+        '.summary.total_tasks = $total | .summary.p1_tasks = $p1 | .summary.p2_tasks = $p2' \
+        {{operatorQueueOutput}} > {{operatorQueueOutput}}.tmp 2>/dev/null && mv {{operatorQueueOutput}}.tmp {{operatorQueueOutput}} || true
+
+  - name: render-operator-queue-markdown
+    type: bash
+    pre_condition: "{{enableOperatorQueue}}"
+    command: |
+      {
+        echo "# AI Operator Queue"
+        echo "## 目标: {{Target}}"
+        echo ""
+        jq -r '.summary | "- Total tasks: \(.total_tasks // 0)\n- P1: \(.p1_tasks // 0)\n- P2: \(.p2_tasks // 0)"' {{operatorQueueOutput}} 2>/dev/null || true
+        echo ""
+        echo "## Focus Targets"
+        jq -r '.focus_targets[]? | "- \(.)"' {{operatorQueueOutput}} 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Tasks"
+        jq -r '.tasks[]? | "- [\(.priority // "P2")] \(.title // "task") :: \(.target // "unknown") :: \(.reason // "n/a")"' {{operatorQueueOutput}} 2>/dev/null || echo "- none"
+      } > {{operatorQueueMd}}
+
+  - name: log-operator-queue-complete
+    type: function
+    pre_condition: "{{enableOperatorQueue}}"
+    functions:
+      - 'log_info("AI operator queue completed for {{Target}}")'

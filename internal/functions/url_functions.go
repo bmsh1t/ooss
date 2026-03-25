@@ -306,6 +306,13 @@ func resolveToIP(hostname string) string {
 		return ""
 	}
 
+	// RFC 2606 reserves .invalid for names that must never resolve.
+	// Some DNS environments still synthesize sinkhole answers, which makes
+	// tests and workflow behavior non-deterministic unless we short-circuit it.
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(hostname)), ".invalid") {
+		return ""
+	}
+
 	// Avoid DNS resolution for IP literals so the function is stable
 	// across environments with different resolver behavior.
 	if ip := net.ParseIP(hostname); ip != nil {

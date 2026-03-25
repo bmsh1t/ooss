@@ -7,7 +7,7 @@
 # - 建议扫描策略
 #
 # 特点：
-# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 使用 agent-acp (claude-code)，不依赖 LLM API
 # - 快速预判，不需要深度推理
 # =============================================================================
 
@@ -49,7 +49,7 @@ steps:
 
   - name: ai-pre-scan
     type: agent-acp
-    agent: flowcli
+    agent: claude-code
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enablePreScanDecision}}"
     on_error:

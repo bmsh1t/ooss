@@ -1,0 +1,186 @@
+---
+title: "Knowledge Base"
+description: "Ingest local documents, search knowledge chunks, and auto-learn workspace findings"
+---
+
+# Knowledge Base
+
+The local knowledge base lets you ingest local files into `knowledge_documents` and `knowledge_chunks`, search them from CLI or API, and synthesize workspace findings back into reusable knowledge.
+
+It is also consumed by the `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` workflow family during semantic search.
+
+## Supported Document Types
+
+- `txt`, `md`, `markdown`, `log`
+- `yaml`, `yml`, `csv`
+- `json`, `jsonl`
+- `html`, `htm`
+- `epub`
+- `doc`, `docx`
+- `pdf`
+- `pptx`, `xlsx`
+
+## Local Dependencies
+
+- `docling`
+  - Required for `pdf`, `docx`, `pptx`, and `xlsx`
+- `antiword`
+  - Required for legacy `.doc`
+- `python3`
+  - Required by the semantic-search helper scripts used in AI workflows
+
+## Optional Dependencies
+
+- `JINA_API_KEY` or `OPENAI_API_KEY`
+  - Enables embeddings-backed semantic retrieval in the AI workflows
+- `chromadb`
+  - Needed only when running the `ai-semantic-search-hybrid` fragment directly
+
+---
+
+## Ingest Knowledge
+
+Ingest a local file or directory tree into the knowledge base.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/data/kb",
+    "workspace": "example.com",
+    "recursive": true
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | Yes | Local file or directory path to ingest |
+| `workspace` | string | No | Workspace-scoped knowledge namespace |
+| `recursive` | bool | No | Recurse into subdirectories when `path` is a directory |
+
+**Response**
+
+```json
+{
+  "message": "Knowledge ingestion completed",
+  "data": {
+    "workspace": "example.com",
+    "root_path": "/data/kb",
+    "documents": 12,
+    "chunks": 87,
+    "skipped": 1,
+    "failed": 0
+  }
+}
+```
+
+---
+
+## List Knowledge Documents
+
+```bash
+curl "http://localhost:8002/osm/api/knowledge/documents?workspace=example.com&offset=0&limit=20" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Query Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `workspace` | string | - | Filter by workspace name |
+| `offset` | int | 0 | Number of documents to skip |
+| `limit` | int | 20 | Maximum records to return |
+
+---
+
+## Search Knowledge
+
+Search across stored chunks using the built-in keyword scorer.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace": "example.com",
+    "query": "authentication bypass",
+    "limit": 10
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `workspace` | string | No | Restrict search to a workspace |
+| `query` | string | Yes | Search phrase |
+| `limit` | int | No | Maximum hits to return |
+
+**Response**
+
+```json
+{
+  "query": "authentication bypass",
+  "workspace": "example.com",
+  "total": 2,
+  "data": [
+    {
+      "document_id": 11,
+      "chunk_id": 47,
+      "workspace": "example.com",
+      "title": "JWT Playbook",
+      "source_path": "/data/kb/jwt-playbook.md",
+      "doc_type": "md",
+      "section": "Bypass Notes",
+      "snippet": "Try alg confusion and key confusion around JWT verification...",
+      "score": 32.0
+    }
+  ]
+}
+```
+
+---
+
+## Learn Knowledge from a Workspace
+
+Generate a learned summary document from existing workspace assets, vulnerabilities, runs, and optional `ai-analysis` artifacts.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/knowledge/learn \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace": "example.com",
+    "scope": "workspace",
+    "max_assets": 20,
+    "max_vulnerabilities": 20,
+    "max_runs": 10,
+    "include_ai_analysis": true
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `workspace` | string | Yes | Source workspace name |
+| `scope` | string | No | Summary scope: `workspace`, `project`, or `public` |
+| `max_assets` | int | No | Maximum assets to include |
+| `max_vulnerabilities` | int | No | Maximum vulnerabilities to include |
+| `max_runs` | int | No | Maximum runs to include |
+| `include_ai_analysis` | bool | No | Include files from `<workspace>/ai-analysis` |
+
+---
+
+## Workflow Integration
+
+For the AI workflow family, the default knowledge workspace is `{{TargetSpace}}`.
+
+Recommended flow:
+
+1. Ingest your PDFs, markdown notes, ebooks, or vendor docs into the same workspace name you scan with.
+2. Run `superdomain-extensive-ai-hybrid` or `superdomain-extensive-ai-stable`.
+3. The workflow will export knowledge chunks, perform direct knowledge search, include those chunks in vector retrieval when embeddings are configured, and run post-report `kb learn` for reuse in future runs.

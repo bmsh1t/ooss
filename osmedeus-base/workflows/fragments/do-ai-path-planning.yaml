@@ -174,39 +174,122 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      cat > /tmp/ai_plan_raw_$$.txt << 'AIEOF'
+      RAW_FILE="{{Output}}/ai-analysis/.path-plan-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/.path-plan-json-{{TargetSpace}}.json"
+      FALLBACK_TARGETS="{{Output}}/ai-analysis/.path-plan-fallback-targets-{{TargetSpace}}.txt"
+
+      cat > "$RAW_FILE" << 'AIEOF'
       {{path_planning_json}}
       AIEOF
 
-      # 提取 markdown 代码块中的 JSON
-      JSON_CONTENT=$(sed -n '/```json/,/```/p' /tmp/ai_plan_raw_$$.txt | sed '1d;$d' | sed 's/^[[:space:]]*//')
-      
-      if [ -z "$JSON_CONTENT" ]; then
-        JSON_CONTENT=$(grep -o '{.*}' /tmp/ai_plan_raw_$$.txt | head -1)
-      fi
-      rm -f /tmp/ai_plan_raw_$$.txt
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
 
-      if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
-        echo "$JSON_CONTENT" > {{pathPlanningOutput}}
+      if [ ! -s "$JSON_FILE" ]; then
+        sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
+      fi
+
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
+        jq '
+          .plan_summary = ((.plan_summary // {}) + {
+            total_phases: (.plan_summary.total_phases // ([.execution_phases[]?] | length)),
+            estimated_total_time: (.plan_summary.estimated_total_time // "unknown"),
+            success_probability: (.plan_summary.success_probability // 0),
+            risk_level: (.plan_summary.risk_level // "中"),
+            resources_needed: (.plan_summary.resources_needed // [])
+          })
+          | .execution_phases = (.execution_phases // [])
+          | .verification_checklist = (.verification_checklist // [])
+          | .rollback_plan = (.rollback_plan // "Fallback to manual verification and narrow the scope")
+          | .contingency = (.contingency // "Use operator queue for manual confirmation")
+        ' "$JSON_FILE" > {{pathPlanningOutput}}
         echo "[OK] Valid JSON extracted"
       else
-        echo '{"error": "parse_failed", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
-        echo "[WARN] Using fallback"
+        {
+          jq -r '.attack_chain_summary.most_likely_entry_points[]? // empty' "{{attackChainFile}}" 2>/dev/null || true
+          cat "{{entryPointsFile}}" 2>/dev/null || true
+        } | awk 'NF && !seen[$0]++' | head -5 > "$FALLBACK_TARGETS" || true
+
+        FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
+        jq -n \
+          --argjson targets "$FALLBACK_JSON" \
+          '{
+            error: "parse_failed_fallback_generated",
+            plan_summary: {
+              total_phases: (if ($targets | length) > 0 then 2 else 0 end),
+              estimated_total_time: (if ($targets | length) > 0 then "45分钟" else "0分钟" end),
+              success_probability: (if ($targets | length) > 0 then 0.65 else 0 end),
+              risk_level: (if ($targets | length) > 0 then "中" else "低" end),
+              resources_needed: ["curl", "httpx", "operator-review"]
+            },
+            execution_phases: [
+              {
+                phase: 1,
+                phase_name: "Prioritized target validation",
+                actions: [
+                  $targets[] | {
+                    action_id: ("validate-" + ((. | @base64) | gsub("[/=+]"; "") | .[0:8])),
+                    description: ("Validate prioritized target " + .),
+                    command: ("curl -sk \"" + . + "\""),
+                    expected_result: "Confirm exposure, auth boundary, and exploit preconditions",
+                    timeout: "5m"
+                  }
+                ],
+                estimated_time: "20分钟",
+                success_criteria: "At least one prioritized target is confirmed exploitable or worth manual follow-up"
+              },
+              {
+                phase: 2,
+                phase_name: "Manual chain expansion",
+                actions: [
+                  {
+                    action_id: "manual-chain-review",
+                    description: "Review validated targets for privilege escalation, business-logic abuse, and pivot potential",
+                    command: "operator-follow-up",
+                    expected_result: "Produce operator queue or campaign-ready evidence",
+                    timeout: "25m"
+                  }
+                ],
+                estimated_time: "25分钟",
+                success_criteria: "High-value target pack is ready for retest, campaign, or operator queue"
+              }
+            ],
+            verification_checklist: [
+              $targets[] | {
+                step: 1,
+                verification_point: ("Reachability and auth boundary check for " + .),
+                command: ("curl -sk \"" + . + "\""),
+                expected: "200/30x/40x response that confirms the target exists and is worth further testing",
+                critical: true
+              }
+            ],
+            rollback_plan: "If direct path planning is unavailable, fall back to manual validation of prioritized targets",
+            contingency: "Use operator queue and retest plan as the primary execution source"
+          }' > {{pathPlanningOutput}}
+        echo "[WARN] Using fallback path planning generation"
       fi
-      
-      # 验证必需字段
-      for field in plan_summary execution_phases verification_checklist; do
-        if ! jq -e "has(\"$field\")" {{pathPlanningOutput}} > /dev/null 2>&1; then
-          case $field in
-            plan_summary) jq '.plan_summary = {"total_phases": 0}' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
-            execution_phases) jq '.execution_phases = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
-            verification_checklist) jq '.verification_checklist = []' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} ;;
-          esac
-        fi
-      done
-      
+
+      jq '
+        .plan_summary = ((.plan_summary // {}) + {
+          total_phases: (.plan_summary.total_phases // ([.execution_phases[]?] | length)),
+          estimated_total_time: (.plan_summary.estimated_total_time // "unknown"),
+          success_probability: (.plan_summary.success_probability // 0),
+          risk_level: (.plan_summary.risk_level // "中"),
+          resources_needed: (.plan_summary.resources_needed // [])
+        })
+        | .execution_phases = (.execution_phases // [])
+        | .verification_checklist = (.verification_checklist // [])
+        | .rollback_plan = (.rollback_plan // "Fallback to manual verification and narrow the scope")
+        | .contingency = (.contingency // "Use operator queue for manual confirmation")
+      ' {{pathPlanningOutput}} > {{pathPlanningOutput}}.tmp 2>/dev/null && mv {{pathPlanningOutput}}.tmp {{pathPlanningOutput}} || true
+
       PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningOutput}} 2>/dev/null)
       echo "[RESULT] Total phases: $PHASES"
+      rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_TARGETS" 2>/dev/null || true
 
   - name: generate-attack-plan-markdown
     type: bash

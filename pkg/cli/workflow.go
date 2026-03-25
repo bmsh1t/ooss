@@ -1522,6 +1522,14 @@ func lintFile(path string, _ *config.Config, printer *terminal.Printer) error {
 
 // lintWorkflowFile lints a parsed workflow file
 func lintWorkflowFile(path string, workflow *core.Workflow, printer *terminal.Printer) error {
+	// Run parser validation first so structural/runtime-invalid workflows fail
+	// before the linter reports content-level issues.
+	p := parser.NewParser()
+	if err := p.Validate(workflow); err != nil {
+		printer.Error("Validation error: %s", err)
+		return err
+	}
+
 	// Read source for context display
 	source, err := os.ReadFile(path)
 	if err != nil {

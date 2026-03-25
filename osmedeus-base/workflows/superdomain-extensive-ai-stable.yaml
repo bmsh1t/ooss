@@ -2,8 +2,8 @@
 # SUPERDOMAIN EXTENSIVE - Ultimate Reconnaissance Workflow (Stable)
 # =============================================================================
 # 
-# 稳定版本 - 使用 agent-acp (flowcli) 进行 AI 分析
-# 特点：优先使用 agent-acp(flowcli) 以提升稳定性
+# 稳定版本 - 使用 agent-acp (claude-code) 进行 AI 分析
+# 特点：优先使用 agent-acp(claude-code) 以提升稳定性
 #
 # Usage:
 #   osmedeus run -f superdomain-extensive-stable -t example.com
@@ -79,9 +79,62 @@ params:
     type: bool
     default: true
     description: "Write scan findings back into the local knowledge base"
+  - name: includeKnowledgeBase
+    type: bool
+    default: true
+    description: "Include local/shared vector knowledge during semantic search"
+  - name: enablePostVulnSemanticSearch
+    type: bool
+    default: true
+    description: "Run a second semantic search after vuln-suite to refine exploitation context"
+  - name: enableRetestPlanning
+    type: bool
+    default: true
+    description: "Generate an actionable retest plan from AI findings"
+  - name: enableOperatorQueue
+    type: bool
+    default: true
+    description: "Generate a practical operator task queue for manual follow-up"
+  - name: enableCampaignHandoff
+    type: bool
+    default: true
+    description: "Generate a structured handoff package for campaign/deep-scan execution"
+  - name: enableCampaignCreate
+    type: bool
+    default: false
+    description: "Create a queued campaign directly from the AI handoff"
+  - name: enableRetestQueue
+    type: bool
+    default: false
+    description: "Queue AI-selected retest targets into worker queue"
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: sharedKnowledgeWorkspace
+    default: "global"
+  - name: retestFlow
+    default: "web-classic"
+  - name: retestWorkflowKind
+    default: "flow"
+  - name: retestPriority
+    default: "high"
+  - name: campaignWorkflow
+    default: "{{retestFlow}}"
+  - name: campaignWorkflowKind
+    default: "{{retestWorkflowKind}}"
+  - name: campaignPriority
+    default: "{{retestPriority}}"
+  - name: campaignDeepScanWorkflow
+    default: ""
+  - name: campaignDeepScanWorkflowKind
+    default: "flow"
+  - name: campaignAutoDeepScan
+    type: bool
+    default: false
+  - name: campaignHighRiskSeverities
+    default: "critical,high"
 
   # ===========================================================
-  # Agent-ACP 配置 (flowcli 调用配置)
+  # Agent-ACP 配置 (claude-code 调用配置)
   # ===========================================================
   - name: agentTimeout
     type: string
@@ -134,6 +187,14 @@ params:
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: vulnDir
     default: "{{Output}}/vulnscan"
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueOutput
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: campaignHandoffOutput
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignCreateOutput
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
 
 # -----------------------------------------------------------------------------
 # MODULES SECTION
@@ -227,7 +288,17 @@ modules:
     depends_on: [fingerprint]
     pre_condition: "{{enableSemanticSearch}}"
     params:
-      searchQuery: "SQL injection, XSS, RCE vulnerabilities and misconfigurations"
+      semanticIndexDir: "{{Output}}/ai-analysis/semantic-index-early"
+      searchResultsOutput: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+      agentResultsOutput: "{{Output}}/ai-analysis/semantic-agent-results-early-{{TargetSpace}}.json"
+      embeddingsOutput: "{{Output}}/ai-analysis/semantic-embeddings-early-{{TargetSpace}}.json"
+      semanticHighlightsOutput: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+      vectorSearchResultsOutput: "{{Output}}/ai-analysis/vector-search-results-early-{{TargetSpace}}.json"
+      knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"
+      sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      includeKnowledgeBase: "{{includeKnowledgeBase}}"
+      searchQuery: "Admin panels, authentication flows, high-value endpoints, exposed services, and tech-specific exploitation ideas"
 
   # AI 实时 WAF 规避 - agent-acp 版本
   - name: ai-waf-bypass
@@ -263,11 +334,33 @@ modules:
     depends_on: [ai-attack-chain]
     pre_condition: "{{enablePathPlanning}}"
 
+  - name: ai-post-vuln-semantic-search
+    path: fragments/do-ai-semantic-search.yaml
+    depends_on: [vuln-suite, ai-skills-loader]
+    pre_condition: "{{enablePostVulnSemanticSearch}}"
+    params:
+      semanticIndexDir: "{{Output}}/ai-analysis/semantic-index-post-vuln"
+      searchResultsOutput: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+      agentResultsOutput: "{{Output}}/ai-analysis/semantic-agent-results-post-vuln-{{TargetSpace}}.json"
+      embeddingsOutput: "{{Output}}/ai-analysis/semantic-embeddings-post-vuln-{{TargetSpace}}.json"
+      semanticHighlightsOutput: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
+      vectorSearchResultsOutput: "{{Output}}/ai-analysis/vector-search-results-post-vuln-{{TargetSpace}}.json"
+      knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"
+      sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      includeKnowledgeBase: "{{includeKnowledgeBase}}"
+      searchQuery: "Confirmed findings, exploit chains, auth bypass, pivot paths, retest payloads, and post-validation exploitation guidance"
+
   # AI 协调器 - 汇总所有 AI 分析结果，生成决策配置
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
-    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-skills-loader]
+    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-post-vuln-semantic-search, ai-skills-loader]
     pre_condition: "{{enableLlmAnalysis}}"
+    params:
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+      semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
+      initialSemanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+      initialSemanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
 
   # AI 决策应用 - 将 intelligent-analysis 产出的决策配置写入环境
   - name: ai-apply-decision
@@ -286,17 +379,64 @@ modules:
   # ===========================================================================
   # Phase 11: AI 定向二次扫描 (基于 AI 决策结果)
   # ===========================================================================
+  - name: ai-retest-planning
+    path: fragments/do-ai-retest-planning.yaml
+    depends_on: [ai-apply-decision, ai-path-planning, ai-attack-chain]
+    pre_condition: "{{enableRetestPlanning}}"
+    params:
+      retestPlanOutput: "{{retestPlanOutput}}"
+      retestFlow: "{{retestFlow}}"
+      retestPriority: "{{retestPriority}}"
+
+  - name: ai-operator-queue
+    path: fragments/do-ai-operator-queue.yaml
+    depends_on: [ai-retest-planning, ai-apply-decision]
+    pre_condition: "{{enableOperatorQueue}}"
+    params:
+      operatorQueueOutput: "{{operatorQueueOutput}}"
+
+  - name: ai-campaign-handoff
+    path: fragments/do-ai-campaign-handoff.yaml
+    depends_on: [ai-retest-planning, ai-operator-queue, ai-apply-decision]
+    pre_condition: "{{enableCampaignHandoff}}"
+    params:
+      campaignHandoffOutput: "{{campaignHandoffOutput}}"
+      campaignCreateOutput: "{{campaignCreateOutput}}"
+      retestPlanOutput: "{{retestPlanOutput}}"
+      operatorQueueOutput: "{{operatorQueueOutput}}"
+      retestFlow: "{{retestFlow}}"
+      retestPriority: "{{retestPriority}}"
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"
+      enableCampaignCreate: "{{enableCampaignCreate}}"
+      campaignWorkflow: "{{campaignWorkflow}}"
+      campaignWorkflowKind: "{{campaignWorkflowKind}}"
+      campaignPriority: "{{campaignPriority}}"
+      campaignDeepScanWorkflow: "{{campaignDeepScanWorkflow}}"
+      campaignDeepScanWorkflowKind: "{{campaignDeepScanWorkflowKind}}"
+      campaignAutoDeepScan: "{{campaignAutoDeepScan}}"
+      campaignHighRiskSeverities: "{{campaignHighRiskSeverities}}"
+
   - name: ai-targeted-rescan
     path: fragments/do-ai-targeted-rescan.yaml
-    depends_on: [ai-apply-decision]
+    depends_on: [ai-apply-decision, ai-retest-planning, ai-operator-queue]
     pre_condition: "{{enableLlmAnalysis}}"
+
+  - name: ai-retest-queue
+    path: fragments/do-ai-retest-queue.yaml
+    depends_on: [ai-retest-planning, ai-campaign-handoff]
+    pre_condition: "{{enableRetestQueue}}"
+    params:
+      retestFlow: "{{retestFlow}}"
+      retestWorkflowKind: "{{retestWorkflowKind}}"
+      retestPriority: "{{retestPriority}}"
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"
 
   # ===========================================================================
   # Phase 12: Final Report
   # ===========================================================================
   - name: report
     path: common/10-report.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
     on_error:
       - action: continue
 
@@ -307,3 +447,5 @@ modules:
     path: fragments/do-ai-knowledge-autolearn.yaml
     depends_on: [report]
     pre_condition: "{{enableKnowledgeLearning}}"
+    params:
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"

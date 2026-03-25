@@ -200,6 +200,19 @@ func TestACPExecutor_Validation(t *testing.T) {
 			errMsg:  "agent",
 		},
 		{
+			name: "unknown built-in agent",
+			step: core.Step{
+				Name:  "test-acp-unknown-agent",
+				Type:  core.StepTypeAgentACP,
+				Agent: "flowcli",
+				Messages: []core.LLMMessage{
+					{Content: "Do something"},
+				},
+			},
+			wantErr: true,
+			errMsg:  "unknown built-in agent",
+		},
+		{
 			name: "missing messages",
 			step: core.Step{
 				Name:  "test-acp-no-msgs",
@@ -377,5 +390,5 @@ func TestListAgentNames(t *testing.T) {
 	assert.Contains(t, names, "codex")
 	assert.Contains(t, names, "opencode")
 	assert.Contains(t, names, "gemini")
-	assert.Equal(t, len(builtinACPAgents), len(names))
+	assert.Equal(t, len(core.BuiltinACPAgentNames()), len(names))
 }

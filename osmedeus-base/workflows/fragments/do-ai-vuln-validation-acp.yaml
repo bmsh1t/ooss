@@ -8,7 +8,7 @@
 # - 风险评估和优先级排序
 #
 # 特点：
-# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 使用 agent-acp (claude-code)，不依赖 LLM API
 # - 增加容错机制，API 不稳时也能运行
 # =============================================================================
 
@@ -105,7 +105,7 @@ steps:
 
   - name: ai-validate-vulns
     type: agent-acp
-    agent: flowcli
+    agent: claude-code
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableVulnValidation}}"
     on_error:
@@ -201,38 +201,158 @@ steps:
     type: bash
     pre_condition: "{{enableVulnValidation}}"
     command: |
-      echo "[INFO] [Vuln Validation] Saving validation results..."
       mkdir -p {{Output}}/ai-analysis/validation
 
-      # 容错：处理可能的空输出
-      if [ -n "{{validation_json}}" ] && [ "{{validation_json}}" != "null" ] && [ "{{validation_json}}" != "{}" ]; then
-        # 使用 heredoc 避免引号破坏 JSON 内容
-        cat > /tmp/ai_vuln_validation_raw_$$.txt << 'AIEOF'
-        {{validation_json}}
-        AIEOF
-        sed 's/```json//g; s/```//g' /tmp/ai_vuln_validation_raw_$$.txt | jq '.' > {{vulnValidationOutput}} 2>/dev/null || cp /tmp/ai_vuln_validation_raw_$$.txt {{vulnValidationOutput}}
-        rm -f /tmp/ai_vuln_validation_raw_$$.txt
-        
-        # 验证 JSON 格式和必要字段
-        if jq empty {{vulnValidationOutput}} 2>/dev/null; then
-          # 验证必要字段是否存在
-          if jq -e '.validation_summary' {{vulnValidationOutput}} > /dev/null 2>&1; then
-            CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-            FP=$(jq -r '.validation_summary.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-            MANUAL=$(jq -r '.validation_summary.needs_manual_verification // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
-            echo "[INFO] [Vuln Validation] Confirmed: $CONFIRMED, False Positives: $FP, Manual: $MANUAL"
-          else
-            echo "[INFO] [Vuln Validation] Warning: Required fields missing in JSON, using default"
-            echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
-          fi
-        else
-          echo "[INFO] [Vuln Validation] Warning: Invalid JSON output, creating empty structure"
-          echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
-        fi
-      else
-        echo "[INFO] [Vuln Validation] No validation data, creating empty structure"
-        echo '{"validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"中"},"validated_findings":[]}' > {{vulnValidationOutput}}
+      RAW_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-acp-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-acp-json-{{TargetSpace}}.json"
+      FALLBACK_LINES="{{Output}}/ai-analysis/validation/.vuln-validation-acp-fallback-lines-{{TargetSpace}}.txt"
+
+      cat > "$RAW_FILE" << 'AIEOF'
+      {{validation_json}}
+      AIEOF
+      : > "$JSON_FILE"
+
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
+
+      if [ ! -s "$JSON_FILE" ] && jq empty "$RAW_FILE" >/dev/null 2>&1; then
+        cp "$RAW_FILE" "$JSON_FILE"
       fi
+
+      if [ ! -s "$JSON_FILE" ]; then
+        awk '
+          BEGIN { capture = 0 }
+          /^[[:space:]]*{/ { capture = 1 }
+          capture { print }
+        ' "$RAW_FILE" > "$JSON_FILE"
+      fi
+
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" >/dev/null 2>&1; then
+        jq '
+          def normalize_status:
+            if . == "confirmed" then "confirmed"
+            elif . == "false_positive" then "false_positive"
+            elif . == "needs_verification" then "needs_manual_verification"
+            elif . == "manual" then "needs_manual_verification"
+            elif . == "needs_manual_verification" then "needs_manual_verification"
+            else (. // "needs_manual_verification")
+            end;
+          def normalize_finding:
+            . as $f
+            | {
+                severity: ($f.severity // $f.info.severity // "unknown"),
+                type: ($f.type // $f.finding // $f.template // $f.template_id // "unknown"),
+                url: ($f.url // $f.target // $f.host // $f."matched-at" // $f.matched_at // ""),
+                status: (($f.status // $f.verification_status) | normalize_status),
+                confidence: (($f.confidence // $f.score // 0.6) | tonumber? // 0.6),
+                reason: ($f.reason // $f.false_positive_reason // $f.analysis // ""),
+                evidence: ($f.evidence // $f.proof // $f.details // $f.manual_verification.expected_response // ""),
+                verification_command: ($f.verification_command // $f.manual_verification.command // ""),
+                remediation: ($f.remediation // "")
+              };
+          (.findings // .validated_findings // []) as $raw_findings
+          | .findings = ($raw_findings | map(normalize_finding))
+          | .total_validated = (.total_validated // .validation_summary.total_validated // (.findings | length))
+          | .confirmed_real = (.confirmed_real // .validation_summary.confirmed_real // ([.findings[]? | select(.status == "confirmed")] | length))
+          | .false_positives = (.false_positives // .validation_summary.false_positives // ([.findings[]? | select(.status == "false_positive")] | length))
+          | .needs_manual_verification = (.needs_manual_verification // .validation_summary.needs_manual_verification // ([.findings[]? | select(.status == "needs_manual_verification")] | length))
+          | .risk_level = (.risk_level // .validation_summary.risk_level // (if .confirmed_real > 0 then "高" elif .needs_manual_verification > 0 then "中" else "低" end))
+          | .high_priority_items = (.high_priority_items // ([.findings[]? | select(((.severity // "unknown") | ascii_downcase) == "critical" or ((.severity // "unknown") | ascii_downcase) == "high") | ((if (.url // "") != "" then (.url + " - ") else "" end) + (.type // "unknown"))] | unique | .[0:10]))
+          | del(.validated_findings, .validation_summary, .verification_commands)
+        ' "$JSON_FILE" > {{vulnValidationOutput}}
+        echo "[OK] Normalized ACP validation JSON extracted successfully"
+      else
+        echo "[WARN] ACP validation JSON extraction failed, generating practical fallback data..."
+
+        : > "$FALLBACK_LINES"
+        collect_lines() {
+          source_name="$1"
+          severity="$2"
+          source_file="$3"
+          limit="$4"
+          [ -f "$source_file" ] || return 0
+          head -"$limit" "$source_file" 2>/dev/null | awk -v src="$source_name" -v sev="$severity" 'NF { gsub(/\r/, ""); print src "|" sev "|" $0 }' >> "$FALLBACK_LINES"
+        }
+
+        collect_lines "nuclei-critical" "critical" "{{nucleiCriticalFile}}" 12
+        collect_lines "nuclei-high" "high" "{{nucleiHighFile}}" 12
+        collect_lines "sqli" "high" "{{sqliFile}}" 6
+        collect_lines "ssrf" "high" "{{ssrfFile}}" 6
+        collect_lines "ssti" "high" "{{sstiFile}}" 6
+        collect_lines "takeover" "high" "{{takeoverFile}}" 6
+        collect_lines "secrets" "medium" "{{secretsFile}}" 6
+
+        if [ -s "$FALLBACK_LINES" ]; then
+          jq -R -s '
+            def detect_type($src; $line):
+              ($line | ascii_downcase) as $l
+              | if $src == "sqli" or ($l | test("sql")) then "sql-injection"
+                elif $src == "ssrf" or ($l | test("ssrf")) then "ssrf"
+                elif $src == "ssti" or ($l | test("ssti|template")) then "ssti"
+                elif $src == "takeover" or ($l | test("takeover|dangling")) then "subdomain-takeover"
+                elif $src == "secrets" or ($l | test("secret|token|key|credential")) then "secret-exposure"
+                elif ($l | test("xss")) then "xss"
+                elif ($l | test("rce|command")) then "rce"
+                else "high-risk-finding"
+                end;
+            split("\n")
+            | map(select(length > 0))
+            | map(capture("^(?<src>[^|]+)\\|(?<sev>[^|]+)\\|(?<line>.*)$"))
+            | map(
+                (.line | capture("(?<u>https?://[^[:space:]\"]+)")?.u // "") as $url
+                | {
+                    severity: (.sev | ascii_downcase),
+                    type: detect_type(.src; .line),
+                    url: $url,
+                    status: "needs_manual_verification",
+                    confidence: (if (.sev | ascii_downcase) == "critical" then 0.7 else 0.6 end),
+                    reason: ("ACP validation output parse failed; derived from raw " + .src + " evidence"),
+                    evidence: (.line[0:400]),
+                    verification_command: (if $url != "" then ("curl -skI \"" + $url + "\"") else "printf \"manual review required\\n\"" end)
+                  }
+              ) as $findings
+            | {
+                error: "parse_failed_fallback",
+                risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end),
+                total_validated: ($findings | length),
+                confirmed_real: 0,
+                false_positives: 0,
+                needs_manual_verification: ($findings | length),
+                findings: $findings,
+                high_priority_items: ($findings | map((if (.url // "") != "" then (.url + " - ") else "" end) + (.type // "unknown")) | unique | .[0:10])
+              }
+          ' "$FALLBACK_LINES" > {{vulnValidationOutput}}
+        else
+          echo '{"error":"parse_failed","risk_level":"中","total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"findings":[],"high_priority_items":[]}' > {{vulnValidationOutput}}
+        fi
+      fi
+
+      if ! jq empty {{vulnValidationOutput}} >/dev/null 2>&1; then
+        echo '{"error":"validation_output_invalid","risk_level":"中","total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"findings":[],"high_priority_items":[]}' > {{vulnValidationOutput}}
+      fi
+
+      for field in risk_level findings confirmed_real false_positives needs_manual_verification total_validated high_priority_items; do
+        if ! jq -e "has(\"$field\")" {{vulnValidationOutput}} > /dev/null 2>&1; then
+          case $field in
+            risk_level) jq '.risk_level = "中"' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            findings) jq '.findings = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            confirmed_real) jq '.confirmed_real = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            false_positives) jq '.false_positives = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            needs_manual_verification) jq '.needs_manual_verification = 0' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            total_validated) jq '.total_validated = (.findings | length)' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+            high_priority_items) jq '.high_priority_items = []' {{vulnValidationOutput}} > {{vulnValidationOutput}}.tmp && mv {{vulnValidationOutput}}.tmp {{vulnValidationOutput}} ;;
+          esac
+        fi
+      done
+
+      CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+      FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+      TOTAL=$(jq -r '.findings | length' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+      echo "[RESULT] Confirmed: $CONFIRMED, False Positives: $FP, Total: $TOTAL"
 
   - name: extract-validation-data
     type: bash
@@ -240,25 +360,38 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/validation
 
-      # 容错：检查文件是否存在
-      if [ -f "{{vulnValidationOutput}}" ] && jq empty {{vulnValidationOutput}} 2>/dev/null; then
-        # 提取假阳性列表
-        jq -r '.validated_findings[] | select(.verification_status == "false_positive") | "\(.url) - \(.finding) - \(.false_positive_reason)"' {{vulnValidationOutput}} 2>/dev/null > {{falsePositivesFile}} || true
+      jq '[.findings[]? | {
+        severity: (.severity // "unknown"),
+        type: (.type // "unknown"),
+        url: (.url // ""),
+        status: (.status // "needs_manual_verification"),
+        confidence: (.confidence // 0),
+        reason: (.reason // ""),
+        evidence: (.evidence // ""),
+        verification_command: (.verification_command // "")
+      }]' {{vulnValidationOutput}} 2>/dev/null > {{validatedVulnsFile}} || echo '[]' > {{validatedVulnsFile}}
 
-        # 提取手动验证命令
-        jq -r '.validated_findings[] | select(.verification_status == "needs_verification") | "# \(.severity): \(.finding)\n# URL: \(.url)\n\(.manual_verification.command)\n# Expected: \(.manual_verification.expected_response)\n"' {{vulnValidationOutput}} 2>/dev/null > {{manualVerifyCommandsFile}} || true
+      jq -r '.findings[] | select(.status == "false_positive") | "\(.url // .type // "unknown") - \(.reason // "no reason provided")"' {{vulnValidationOutput}} 2>/dev/null > {{falsePositivesFile}} || true
 
-        chmod +x {{manualVerifyCommandsFile}} 2>/dev/null || true
+      jq -r '
+        .findings[]?
+        | select(.status == "needs_manual_verification")
+        | "# [" + (.severity // "unknown") + "] " + (.type // "unknown") + "\n"
+          + "# Target: " + (.url // "unknown") + "\n"
+          + (.verification_command // (if (.url // "") != "" then ("curl -skI \"" + .url + "\"") else "printf \"manual review required\\n\"" end))
+          + "\n# Reason: " + (.reason // "manual verification required") + "\n"
+      ' {{vulnValidationOutput}} 2>/dev/null > {{manualVerifyCommandsFile}} || true
 
-        # 提取已验证漏洞列表（用于后续攻击链分析）
-        jq -r '.validated_findings[] | select(.verification_status == "confirmed") | .url' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
-      else
-        echo "[]" > {{falsePositivesFile}}
-        echo "# No validation data" > {{manualVerifyCommandsFile}}
-        touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
+      if [ ! -s "{{manualVerifyCommandsFile}}" ]; then
+        echo "# No manual verification commands generated" > {{manualVerifyCommandsFile}}
       fi
+      chmod +x {{manualVerifyCommandsFile}} 2>/dev/null || true
 
-      echo "[INFO] [Vuln Validation] Extraction complete"
+      jq -r '.findings[] | select(.status == "confirmed") | .url // empty' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
+      touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
+
+      CONFIRMED_COUNT=$(wc -l < {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
+      echo "[Vuln Validation] Extracted $CONFIRMED_COUNT confirmed URLs"
 
   - name: log-validation-complete
     type: function

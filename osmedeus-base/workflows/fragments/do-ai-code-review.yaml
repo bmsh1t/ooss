@@ -3,7 +3,7 @@
 # =============================================================================
 # 功能：
 # - 使用外部 Agent 配置文件 (security-code-reviewer.md)
-# - 支持多种 Agent (iflow/claude-code/codex)
+# - 支持多种 Agent (claude-code/codex/opencode/gemini)
 # - 串行仓库扫描 (逐个处理，不支持并发)
 # =============================================================================
 
@@ -24,7 +24,7 @@ params:
     type: bool
     default: true
   - name: codeReviewAgent
-    default: "iflow"
+    default: "claude-code"
   - name: maxIterations
     type: integer
     default: 15

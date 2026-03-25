@@ -7,7 +7,7 @@
 # - 提供修复建议
 #
 # 特点：
-# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 使用 agent-acp (claude-code)，不依赖 LLM API
 # - 增加容错机制
 # =============================================================================
 
@@ -68,7 +68,7 @@ steps:
 
   - name: ai-review-code
     type: agent-acp
-    agent: flowcli
+    agent: claude-code
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableLlmCodeReview}}"
     allowed_paths:

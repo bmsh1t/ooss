@@ -15,9 +15,17 @@ params:
   - name: attackChainOutput
     default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
   - name: attackChainsFile
-    default: "{{Output}}/ai-analysis/attack-chains.txt"
+    default: "{{Output}}/ai-analysis/attack-chains-{{TargetSpace}}.txt"
   - name: criticalPathsFile
-    default: "{{Output}}/ai-analysis/critical-paths.txt"
+    default: "{{Output}}/ai-analysis/critical-paths-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: mustVerifyVulnsFile
+    default: "{{Output}}/ai-analysis/must-verify-vulns-{{TargetSpace}}.txt"
+  - name: pivotAssetsFile
+    default: "{{Output}}/ai-analysis/pivot-assets-{{TargetSpace}}.txt"
 
   # 输入文件
   - name: vulnValidationFile
@@ -201,47 +209,192 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      printf '%s' '{{attack_chain_json}}' > /tmp/ai_chain_raw_$$.txt
+      RAW_FILE="{{Output}}/ai-analysis/.attack-chain-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/.attack-chain-json-{{TargetSpace}}.json"
+      FALLBACK_LINES="{{Output}}/ai-analysis/.attack-chain-fallback-lines-{{TargetSpace}}.txt"
+      FALLBACK_URLS="{{Output}}/ai-analysis/.attack-chain-fallback-urls-{{TargetSpace}}.txt"
 
-      # 提取 markdown 代码块中的 JSON
-      JSON_CONTENT=$(sed -n '/```json/,/```/p' /tmp/ai_chain_raw_$$.txt | sed '1d;$d' | sed 's/^[[:space:]]*//')
-      
-      if [ -z "$JSON_CONTENT" ]; then
-        JSON_CONTENT=$(grep -o '{.*}' /tmp/ai_chain_raw_$$.txt | head -1)
+      printf '%s' '{{attack_chain_json}}' > "$RAW_FILE"
+
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
+
+      if [ ! -s "$JSON_FILE" ]; then
+        sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
       fi
-      rm -f /tmp/ai_chain_raw_$$.txt
 
-      if [ -n "$JSON_CONTENT" ] && echo "$JSON_CONTENT" | jq empty 2>/dev/null; then
-        echo "$JSON_CONTENT" > {{attackChainOutput}}
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
+        jq '
+          .attack_chain_summary = ((.attack_chain_summary // {}) + {
+            total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+            critical_chains: (.attack_chain_summary.critical_chains // 0),
+            high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+            most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
+          })
+          | .attack_chains = (.attack_chains // [])
+          | .critical_paths = (.critical_paths // [])
+          | .defense_recommendations = (.defense_recommendations // [])
+        ' "$JSON_FILE" > {{attackChainOutput}}
         echo "[OK] Valid JSON extracted"
       else
-        # Fallback
-        echo '{"error": "parse_failed", "attack_chain_summary": {"total_chains": 0}, "attack_chains": [], "critical_paths": []}' > {{attackChainOutput}}
-        echo "[WARN] Using fallback"
+        {
+          cat "{{Output}}/ai-analysis/.input/confirmed-vulns.txt" 2>/dev/null || true
+          awk 'NF { print "confirmed-url | " $0 " | severity=high" }' "{{confirmedUrlsFile}}" 2>/dev/null || true
+        } | awk 'NF && !seen[$0]++' | head -10 > "$FALLBACK_LINES" || true
+
+        awk -F'|' '
+          NF >= 2 {
+            url=$2
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", url)
+            if (url ~ /^https?:\/\// && !seen[url]++) print url
+          }
+        ' "$FALLBACK_LINES" > "$FALLBACK_URLS" || true
+
+        FALLBACK_URLS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_URLS" 2>/dev/null || echo '[]')
+        jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(
+              capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
+              | select(. != null and (.url | test("^https?://")))
+              | {
+                  chain_name: ((.finding // "validated finding") + " -> manual exploitation"),
+                  url: .url,
+                  vulnerability: (.finding // "validated finding"),
+                  severity: (.severity // "high")
+                }
+            )
+        ' "$FALLBACK_LINES" > "$JSON_FILE"
+
+        jq -n \
+          --slurpfile chains "$JSON_FILE" \
+          --argjson fallback_urls "$FALLBACK_URLS_JSON" \
+          '{
+            error: "parse_failed_fallback_generated",
+            attack_chain_summary: {
+              total_chains: ($chains[0] | length),
+              critical_chains: ([$chains[0][] | select(.severity == "critical")] | length),
+              high_impact_chains: ([$chains[0][] | select(.severity == "critical" or .severity == "high")] | length),
+              most_likely_entry_points: $fallback_urls
+            },
+            attack_chains: [
+              $chains[0][] | {
+                chain_id: ("fallback-chain-" + ((.url | @base64) | gsub("[/=+]"; "") | .[0:10])),
+                chain_name: .chain_name,
+                entry_point: {
+                  vulnerability: .vulnerability,
+                  url: .url,
+                  severity: .severity,
+                  prerequisites: ["manual verification required"]
+                },
+                chain_steps: [
+                  {
+                    step: 1,
+                    action: "Validate exploitability on prioritized entry point",
+                    vulnerability: .vulnerability,
+                    result: "Confirm whether the finding is exploitable and reproducible",
+                    command: ("curl -sk \"" + .url + "\"")
+                  },
+                  {
+                    step: 2,
+                    action: "Check privilege boundary and chaining potential",
+                    vulnerability: .vulnerability,
+                    result: "Determine whether the target can lead to auth bypass, data exposure, or pivoting"
+                  }
+                ],
+                final_objective: "Confirm exploit chain feasibility for operator follow-up",
+                difficulty: "中",
+                impact: "Potential exploitation path requiring operator confirmation",
+                estimated_time: "20分钟",
+                success_probability: (if .severity == "critical" then 0.8 else 0.65 end),
+                mitigation: "Patch vulnerable surface and verify authorization boundaries"
+              }
+            ],
+            critical_paths: [
+              $chains[0][] | {
+                path: [(.vulnerability // "finding"), (.url // "target"), "manual-validation"],
+                total_risk: (if .severity == "critical" then "高" else "中" end),
+                weakness: "validated or prioritized entry point still needs operator confirmation"
+              }
+            ],
+            defense_recommendations: [
+              "Prioritize confirmed and critical entry points for retest and evidence capture",
+              "Review authorization boundaries and high-value endpoints around each entry point"
+            ]
+          }' > {{attackChainOutput}}
+        echo "[WARN] Using fallback attack chain generation"
       fi
-      
-      # 验证必需字段
-      for field in attack_chain_summary attack_chains; do
-        if ! jq -e "has(\"$field\")" {{attackChainOutput}} > /dev/null 2>&1; then
-          case $field in
-            attack_chain_summary) jq '.attack_chain_summary = {"total_chains": 0}' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
-            attack_chains) jq '.attack_chains = []' {{attackChainOutput}} > {{attackChainOutput}}.tmp && mv {{attackChainOutput}}.tmp {{attackChainOutput}} ;;
-          esac
-        fi
-      done
-      
+
+      jq '
+        .attack_chain_summary = ((.attack_chain_summary // {}) + {
+          total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+          critical_chains: (.attack_chain_summary.critical_chains // 0),
+          high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+          most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
+        })
+        | .attack_chains = (.attack_chains // [])
+        | .critical_paths = (.critical_paths // [])
+        | .defense_recommendations = (.defense_recommendations // [])
+      ' {{attackChainOutput}} > {{attackChainOutput}}.tmp 2>/dev/null && mv {{attackChainOutput}}.tmp {{attackChainOutput}} || true
+
       CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null)
       echo "[RESULT] Total chains: $CHAIN_COUNT"
+      rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_LINES" "$FALLBACK_URLS" 2>/dev/null || true
 
   - name: extract-attack-chain-data
     type: bash
     pre_condition: "{{enableAttackChain}}"
     command: |
-      # 提取入口点
-      jq -r '.attack_chains[].entry_point.url // empty' {{attackChainOutput}} 2>/dev/null > {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt || true
-      
-      ENTRY_COUNT=$(wc -l < {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt 2>/dev/null || echo 0)
-      echo "[Attack Chain] Extracted $ENTRY_COUNT entry points"
+      mkdir -p {{Output}}/ai-analysis
+
+      jq -r '.attack_chains[]?.entry_point.url // empty' {{attackChainOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{entryPointsFile}} || true
+
+      jq -r '
+        .attack_chains[]? |
+        [
+          (.chain_name // .final_objective // "attack-chain"),
+          (.entry_point.url // "unknown"),
+          (.entry_point.vulnerability // "unknown"),
+          (.impact // "unknown"),
+          ("success=" + ((.success_probability // "unknown") | tostring))
+        ] | @tsv
+      ' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
+
+      jq -r '
+        .critical_paths[]? |
+        if type == "object" then
+          ((.path // []) | join(" -> ")) +
+          (if (.total_risk // "") != "" then " | risk=" + (.total_risk | tostring) else "" end)
+        else
+          tostring
+        end
+      ' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
+
+      {
+        jq -r '.attack_chain_summary.most_likely_entry_points[]? // empty' {{attackChainOutput}} 2>/dev/null
+        cat {{entryPointsFile}} 2>/dev/null
+      } | awk 'NF && !seen[$0]++' > {{bestPathTargetsFile}} || true
+
+      jq -r '
+        .attack_chains[]? |
+        [
+          (.entry_point.vulnerability // "unknown"),
+          (.entry_point.url // "unknown"),
+          ("severity=" + (.entry_point.severity // "unknown")),
+          ("objective=" + (.final_objective // "unknown"))
+        ] | join(" | ")
+      ' {{attackChainOutput}} 2>/dev/null > {{mustVerifyVulnsFile}} || true
+
+      awk -F/ 'NF >= 3 { print $3 }' {{bestPathTargetsFile}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{pivotAssetsFile}} || true
+
+      ENTRY_COUNT=$(wc -l < {{entryPointsFile}} 2>/dev/null || echo 0)
+      BEST_COUNT=$(wc -l < {{bestPathTargetsFile}} 2>/dev/null || echo 0)
+      MUST_VERIFY_COUNT=$(wc -l < {{mustVerifyVulnsFile}} 2>/dev/null || echo 0)
+      echo "[Attack Chain] Extracted entry_points=$ENTRY_COUNT best_targets=$BEST_COUNT must_verify=$MUST_VERIFY_COUNT"
 
   - name: import-attack-chain-report
     type: function

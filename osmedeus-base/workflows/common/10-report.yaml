@@ -73,6 +73,44 @@ params:
   - name: osintCloudFile
     default: "{{Output}}/osint/cloud-{{TargetSpace}}.txt"
 
+  # 输入文件 - AI 分析闭环
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: pathPlanningFile
+    default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: retestPlanFile
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueFile
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: campaignHandoffFile
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignCreateFile
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: retestQueueSummaryFile
+    default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
+  - name: rescanSummaryFile
+    default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: retestTargetsFile
+    default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+  - name: operatorQueueTargetsFile
+    default: "{{Output}}/ai-analysis/operator-queue-targets-{{TargetSpace}}.txt"
+  - name: campaignTargetsFile
+    default: "{{Output}}/ai-analysis/campaign-targets-{{TargetSpace}}.txt"
+
   # LLM 报告生成配置
   - name: enableLlmReport
     type: bool
@@ -174,6 +212,23 @@ steps:
       TOTAL_VULNS=$(wc -l < {{nucleiFile}} 2>/dev/null || echo 0)
       SECRETS=$(wc -l < {{secretFile}} 2>/dev/null || echo 0)
       TAKEOVERS=$(wc -l < {{takeoverFile}} 2>/dev/null || echo 0)
+
+      # AI 闭环统计
+      AI_CONFIRMED=$(jq -r '(.confirmed_real // .validation_summary.confirmed_real // 0)' {{vulnValidationFile}} 2>/dev/null || echo 0)
+      ATTACK_CHAINS=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainFile}} 2>/dev/null || echo 0)
+      PATH_PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningFile}} 2>/dev/null || echo 0)
+      RETEST_TARGETS=$(wc -l < {{retestTargetsFile}} 2>/dev/null || echo 0)
+      OPERATOR_TARGETS=$(wc -l < {{operatorQueueTargetsFile}} 2>/dev/null || echo 0)
+      CAMPAIGN_TARGETS=$(wc -l < {{campaignTargetsFile}} 2>/dev/null || echo 0)
+      CONFIRMED_URLS=$(wc -l < {{confirmedUrlsFile}} 2>/dev/null || echo 0)
+      ENTRY_POINTS=$(wc -l < {{entryPointsFile}} 2>/dev/null || echo 0)
+      BEST_PATH_TARGETS=$(wc -l < {{bestPathTargetsFile}} 2>/dev/null || echo 0)
+      SEMANTIC_PRIORITY_TARGETS=$(wc -l < {{semanticPriorityTargetsFile}} 2>/dev/null || echo 0)
+      OPERATOR_TASKS=$(jq -r '.summary.total_tasks // 0' {{operatorQueueFile}} 2>/dev/null || echo 0)
+      RETEST_QUEUED=$(jq -r '.queued_targets // 0' {{retestQueueSummaryFile}} 2>/dev/null || echo 0)
+      CAMPAIGN_READY=$(jq -r '.handoff_ready // false' {{campaignHandoffFile}} 2>/dev/null || echo false)
+      CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
+      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' {{semanticSearchFile}} 2>/dev/null || echo 0)
       
       # 生成 JSON
       cat > {{jsonStatsFile}} << EOF
@@ -186,13 +241,92 @@ steps:
           "osint": {"emails": $EMAILS, "cloud_assets": $CLOUD_ASSETS},
           "vulnerabilities": {"total": $TOTAL_VULNS, "critical": $CRITICAL, "high": $HIGH},
           "secrets": $SECRETS,
-          "takeovers": $TAKEOVERS
+          "takeovers": $TAKEOVERS,
+          "ai": {
+            "confirmed_findings": $AI_CONFIRMED,
+            "confirmed_urls": $CONFIRMED_URLS,
+            "entry_points": $ENTRY_POINTS,
+            "best_path_targets": $BEST_PATH_TARGETS,
+            "semantic_priority_targets": $SEMANTIC_PRIORITY_TARGETS,
+            "semantic_results": $SEMANTIC_RESULTS,
+            "attack_chains": $ATTACK_CHAINS,
+            "path_phases": $PATH_PHASES,
+            "retest_targets": $RETEST_TARGETS,
+            "operator_targets": $OPERATOR_TARGETS,
+            "operator_tasks": $OPERATOR_TASKS,
+            "campaign_targets": $CAMPAIGN_TARGETS,
+            "retest_queued_targets": $RETEST_QUEUED,
+            "campaign_ready": $CAMPAIGN_READY,
+            "campaign_create_status": "$CAMPAIGN_CREATE_STATUS"
+          }
         }
       }
       EOF
       
       echo "[STATS] Subdomains: $SUBDOMAINS, URLs: $URLS"
       echo "[STATS] Critical: $CRITICAL, High: $HIGH, Total: $TOTAL_VULNS"
+      echo "[STATS] AI: confirmed=$AI_CONFIRMED chains=$ATTACK_CHAINS retest=$RETEST_TARGETS operator_tasks=$OPERATOR_TASKS campaign=$CAMPAIGN_TARGETS"
+
+  - name: generate-assets-summary
+    type: bash
+    log: "Generating prioritized target pack summary"
+    command: |
+      mkdir -p {{reportDir}}
+
+      {
+        echo "# Prioritized Target Pack - {{Target}}"
+        echo ""
+        echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        echo "## Confirmed URLs"
+        if [ -f "{{confirmedUrlsFile}}" ] && [ -s "{{confirmedUrlsFile}}" ]; then
+          head -50 "{{confirmedUrlsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Attack-Chain Entry Points"
+        if [ -f "{{entryPointsFile}}" ] && [ -s "{{entryPointsFile}}" ]; then
+          head -50 "{{entryPointsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Best Path Targets"
+        if [ -f "{{bestPathTargetsFile}}" ] && [ -s "{{bestPathTargetsFile}}" ]; then
+          head -50 "{{bestPathTargetsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Semantic Priority Targets"
+        if [ -f "{{semanticPriorityTargetsFile}}" ] && [ -s "{{semanticPriorityTargetsFile}}" ]; then
+          head -50 "{{semanticPriorityTargetsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Retest Targets"
+        if [ -f "{{retestTargetsFile}}" ] && [ -s "{{retestTargetsFile}}" ]; then
+          head -50 "{{retestTargetsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Operator Queue Targets"
+        if [ -f "{{operatorQueueTargetsFile}}" ] && [ -s "{{operatorQueueTargetsFile}}" ]; then
+          head -50 "{{operatorQueueTargetsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Campaign Targets"
+        if [ -f "{{campaignTargetsFile}}" ] && [ -s "{{campaignTargetsFile}}" ]; then
+          head -50 "{{campaignTargetsFile}}" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+      } > {{assetsSummaryFile}}
 
   # ---------------------------------------------------------------------------
   # 生成执行摘要
@@ -208,53 +342,81 @@ steps:
       TOTAL_VULNS=$(jq -r '.statistics.vulnerabilities.total' {{jsonStatsFile}} 2>/dev/null || echo 0)
       SECRETS=$(jq -r '.statistics.secrets' {{jsonStatsFile}} 2>/dev/null || echo 0)
       TAKEOVERS=$(jq -r '.statistics.takeovers' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      AI_CONFIRMED=$(jq -r '.statistics.ai.confirmed_findings // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      ATTACK_CHAINS=$(jq -r '.statistics.ai.attack_chains // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      SEMANTIC_PRIORITY_TARGETS=$(jq -r '.statistics.ai.semantic_priority_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      RETEST_TARGETS=$(jq -r '.statistics.ai.retest_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      OPERATOR_TASKS=$(jq -r '.statistics.ai.operator_tasks // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      CAMPAIGN_TARGETS=$(jq -r '.statistics.ai.campaign_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      CAMPAIGN_READY=$(jq -r '.statistics.ai.campaign_ready // false' {{jsonStatsFile}} 2>/dev/null || echo false)
       
       # 风险等级
       [ "$CRITICAL" -gt 0 ] && RISK_LEVEL="🔴 CRITICAL" && RISK_ACTION="立即修复关键漏洞"
       [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -gt 0 ] && RISK_LEVEL="🟠 HIGH" && RISK_ACTION="尽快修复高危漏洞"
       [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -eq 0 ] && [ "$TOTAL_VULNS" -gt 0 ] && RISK_LEVEL="🟡 MEDIUM" && RISK_ACTION="计划修复中等漏洞"
       [ "$TOTAL_VULNS" -eq 0 ] && RISK_LEVEL="🟢 LOW" && RISK_ACTION="继续保持监控"
-      
-      cat > {{summaryFile}} << EOF
-      # 执行摘要 - {{Target}}
-      
-      **扫描日期**: $(date '+%Y-%m-%d %H:%M:%S')
-      **风险等级**: $RISK_LEVEL
-      
-      ---
-      
-      ## 资产概览
-      
-      | 类别 | 数量 |
-      |------|------|
-      | 🎯 子域名 | $SUBDOMAINS |
-      | 🌐 HTTP 端点 | $URLS |
-      
-      ## 漏洞发现
-      
-      | 严重程度 | 数量 |
-      |----------|------|
-      | 🔴 关键 (Critical) | $CRITICAL |
-      | 🟠 高危 (High) | $HIGH |
-      | 📊 总计 | $TOTAL_VULNS |
-      
-      ## 其他发现
-      
-      | 类别 | 数量 |
-      |------|------|
-      | 🔑 敏感信息泄露 | $SECRETS |
-      | ⚠️ 子域名接管风险 | $TAKEOVERS |
-      
-      ---
-      
-      ## 建议行动
-      
-      $RISK_ACTION
-      
-      ---
-      
-      *本报告由 Osmedeus 自动生成*
-      EOF
+
+      {
+        echo "# 执行摘要 - {{Target}}"
+        echo ""
+        echo "**扫描日期**: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "**风险等级**: $RISK_LEVEL"
+        echo ""
+        echo "---"
+        echo ""
+        echo "## 资产概览"
+        echo ""
+        echo "| 类别 | 数量 |"
+        echo "|------|------|"
+        echo "| 🎯 子域名 | $SUBDOMAINS |"
+        echo "| 🌐 HTTP 端点 | $URLS |"
+        echo ""
+        echo "## 漏洞发现"
+        echo ""
+        echo "| 严重程度 | 数量 |"
+        echo "|----------|------|"
+        echo "| 🔴 关键 (Critical) | $CRITICAL |"
+        echo "| 🟠 高危 (High) | $HIGH |"
+        echo "| 📊 总计 | $TOTAL_VULNS |"
+        echo ""
+        echo "## 其他发现"
+        echo ""
+        echo "| 类别 | 数量 |"
+        echo "|------|------|"
+        echo "| 🔑 敏感信息泄露 | $SECRETS |"
+        echo "| ⚠️ 子域名接管风险 | $TAKEOVERS |"
+        echo ""
+        echo "## AI 实战闭环"
+        echo ""
+        echo "| 类别 | 数量/状态 |"
+        echo "|------|-----------|"
+        echo "| ✅ AI确认漏洞 | $AI_CONFIRMED |"
+        echo "| ⛓️ 攻击链 | $ATTACK_CHAINS |"
+        echo "| 🧠 语义优先目标 | $SEMANTIC_PRIORITY_TARGETS |"
+        echo "| 🔁 复测目标 | $RETEST_TARGETS |"
+        echo "| 👨‍💻 操作员任务 | $OPERATOR_TASKS |"
+        echo "| 🎯 Campaign 目标 | $CAMPAIGN_TARGETS |"
+        echo "| 🚦 Campaign Ready | $CAMPAIGN_READY |"
+        echo ""
+        echo "---"
+        echo ""
+        echo "## 建议行动"
+        echo ""
+        echo "$RISK_ACTION"
+
+        if [ "$AI_CONFIRMED" -gt 0 ] || [ "$OPERATOR_TASKS" -gt 0 ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
+          echo ""
+          echo "### 实战优先动作"
+          [ "$RETEST_TARGETS" -gt 0 ] && echo "- 优先对 AI 选出的复测目标补证据和补 payload。"
+          [ "$OPERATOR_TASKS" -gt 0 ] && echo "- 先执行 operator queue 里的 P1/P2 任务，验证鉴权、业务逻辑、提权和横向可能性。"
+          [ "$CAMPAIGN_TARGETS" -gt 0 ] && echo "- 将 campaign targets 作为后续深扫或人工接管目标包。"
+        fi
+
+        echo ""
+        echo "---"
+        echo ""
+        echo "*本报告由 Osmedeus 自动生成*"
+      } > {{summaryFile}}
 
   # ---------------------------------------------------------------------------
   # 生成完整技术报告
@@ -306,6 +468,87 @@ steps:
         cat {{graphqlEndpointsFile}} >> {{fullReportFile}} 2>/dev/null || true
         echo -e "\`\`\`" >> {{fullReportFile}}
       fi
+
+      echo -e "\n### 🎯 Prioritized Target Pack\n" >> {{fullReportFile}}
+      cat {{assetsSummaryFile}} >> {{fullReportFile}} 2>/dev/null || true
+
+      if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
+        echo -e "\n### ✅ AI 验证摘要\n" >> {{fullReportFile}}
+        jq -r '
+          [
+            "- Confirmed findings: " + ((.confirmed_real // .validation_summary.confirmed_real // 0) | tostring),
+            "- False positives: " + ((.false_positives // .validation_summary.false_positives // 0) | tostring),
+            "- Risk level: " + (.risk_level // .validation_summary.risk_level // "unknown")
+          ] | .[]
+        ' {{vulnValidationFile}} 2>/dev/null >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
+        echo -e "\n### ⛓️ Attack Chain 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          .attack_chains[]? |
+          "- " + (.chain_name // .final_objective // "attack-chain") +
+          " :: " + (.entry_point.url // "unknown") +
+          " :: impact=" + (.impact // "unknown") +
+          " :: success=" + ((.success_probability // "unknown") | tostring)
+        ' {{attackChainFile}} 2>/dev/null | head -20 >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{pathPlanningFile}}" ] && jq empty "{{pathPlanningFile}}" 2>/dev/null; then
+        echo -e "\n### 🗺️ Path Planning 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          .execution_phases[]? |
+          "- Phase " + ((.phase // 0) | tostring) +
+          ": " + (.phase_name // "phase") +
+          " :: " + (.success_criteria // "n/a")
+        ' {{pathPlanningFile}} 2>/dev/null >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{retestPlanFile}}" ] && jq empty "{{retestPlanFile}}" 2>/dev/null; then
+        echo -e "\n### 🔁 Retest Plan 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          .targets[]? |
+          "- [" + (.priority // "P2") + "] " + (.target // "unknown") + " :: " + (.reason // "n/a")
+        ' {{retestPlanFile}} 2>/dev/null | head -20 >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{operatorQueueFile}}" ] && jq empty "{{operatorQueueFile}}" 2>/dev/null; then
+        echo -e "\n### 👨‍💻 Operator Queue 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          .tasks[]? |
+          "- [" + (.priority // "P2") + "] " + (.title // "task") + " :: " + (.target // "unknown") + " :: " + (.reason // "n/a")
+        ' {{operatorQueueFile}} 2>/dev/null | head -20 >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{campaignHandoffFile}}" ] && jq empty "{{campaignHandoffFile}}" 2>/dev/null; then
+        echo -e "\n### 🚀 Campaign Handoff 摘要\n" >> {{fullReportFile}}
+        jq -r '
+          [
+            "- Handoff ready: " + ((.handoff_ready // false) | tostring),
+            "- Recommended flow: " + (.campaign_profile.recommended_flow // "web-classic"),
+            "- Campaign targets: " + ((.counts.campaign_targets // 0) | tostring)
+          ] | .[]
+        ' {{campaignHandoffFile}} 2>/dev/null >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{rescanSummaryFile}}" ] && [ -s "{{rescanSummaryFile}}" ]; then
+        echo -e "\n### 🔍 Targeted Rescan 摘要\n" >> {{fullReportFile}}
+        head -40 {{rescanSummaryFile}} >> {{fullReportFile}} 2>/dev/null || true
+      fi
+
+      echo -e "\n### 📁 AI Artifacts\n" >> {{fullReportFile}}
+      {
+        echo "- AI decision: {{aiDecisionFile}}"
+        echo "- Validation: {{vulnValidationFile}}"
+        echo "- Attack chain: {{attackChainFile}}"
+        echo "- Path planning: {{pathPlanningFile}}"
+        echo "- Retest plan: {{retestPlanFile}}"
+        echo "- Operator queue: {{operatorQueueFile}}"
+        echo "- Campaign handoff: {{campaignHandoffFile}}"
+        echo "- Retest queue summary: {{retestQueueSummaryFile}}"
+        echo "- Prioritized target pack: {{assetsSummaryFile}}"
+        echo "- Semantic priority targets: {{semanticPriorityTargetsFile}}"
+      } >> {{fullReportFile}}
       
       echo -e "\n---\n\n*报告生成时间: $(date '+%Y-%m-%d %H:%M:%S')*" >> {{fullReportFile}}
 
@@ -343,6 +586,11 @@ steps:
           
           ## High Vulnerabilities
           {{readFile("{{nucleiHighFile}}")}}
+
+          ## AI Confirmed Findings and Retest/Campaign Context
+          {{readFile("{{vulnValidationFile}}")}}
+          {{readFile("{{retestPlanFile}}")}}
+          {{readFile("{{campaignHandoffFile}}")}}
     exports:
       executive_summary: "{{llm_executive_summary_content}}"
 
@@ -385,6 +633,10 @@ steps:
           
           ## Fingerprint data
           {{readFile("{{fingerprintFile}}")}}
+
+          ## Attack chain and path planning
+          {{readFile("{{attackChainFile}}")}}
+          {{readFile("{{pathPlanningFile}}")}}
     exports:
       risk_assessment: "{{llm_risk_assessment_content}}"
 
@@ -430,6 +682,10 @@ steps:
           
           ## Misconfigurations
           {{readFile("{{websocketMisconfigFile}}")}}
+
+          ## Operator queue and campaign handoff
+          {{readFile("{{operatorQueueFile}}")}}
+          {{readFile("{{campaignHandoffFile}}")}}
     exports:
       recommendations: "{{llm_recommendations_content}}"
 
@@ -511,6 +767,10 @@ steps:
           
           ## Secrets/credentials
           {{readFile("{{secretFile}}")}}
+
+          ## AI target packs
+          {{readFile("{{assetsSummaryFile}}")}}
+          {{readFile("{{attackChainFile}}")}}
           
           Provide a comprehensive security surface analysis with risk areas.
     exports:

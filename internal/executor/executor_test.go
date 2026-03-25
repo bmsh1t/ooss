@@ -709,8 +709,6 @@ func TestExecutor_StepTimeout_ParallelCommands(t *testing.T) {
 // These tests verify the basic decision structure is processed without errors.
 
 func TestExecutor_Decision_SkipToEnd(t *testing.T) {
-	t.Skip("Decision routing not working as expected - needs investigation")
-
 	ctx := context.Background()
 	cfg := testConfig(t)
 
@@ -753,8 +751,6 @@ func TestExecutor_Decision_SkipToEnd(t *testing.T) {
 }
 
 func TestExecutor_Decision_JumpToStep(t *testing.T) {
-	t.Skip("Decision routing not working as expected - needs investigation")
-
 	ctx := context.Background()
 	cfg := testConfig(t)
 

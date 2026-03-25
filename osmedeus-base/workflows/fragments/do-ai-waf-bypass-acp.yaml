@@ -7,7 +7,7 @@
 # - 提供绕过方法
 #
 # 特点：
-# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 使用 agent-acp (claude-code)，不依赖 LLM API
 # - 模式识别，稳定优先
 # =============================================================================
 
@@ -47,7 +47,7 @@ steps:
 
   - name: ai-analyze-waf
     type: agent-acp
-    agent: flowcli
+    agent: claude-code
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableWafBypass}}"
     on_error:

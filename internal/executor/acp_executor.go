@@ -22,21 +22,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// acpAgentDef describes a built-in agent command.
-type acpAgentDef struct {
-	Command string
-	Args    []string
-}
-
-// builtinACPAgents maps agent names to their command definitions.
-var builtinACPAgents = map[string]acpAgentDef{
-	"claude-code": {Command: "npx", Args: []string{"-y", "@zed-industries/claude-code-acp@latest"}},
-	"codex":       {Command: "npx", Args: []string{"-y", "@zed-industries/codex-acp"}},
-	"opencode":    {Command: "opencode", Args: []string{"acp"}},
-	"gemini":      {Command: "gemini", Args: []string{"--experimental-acp"}},
-	"iflow":       {Command: "iflow", Args: []string{"--experimental-acp", "--stream"}},
-}
-
 // ACPExecutor implements StepExecutorPlugin for agent-acp steps.
 // It spawns an AI coding agent as a subprocess, communicates over stdin/stdout
 // using the Agent Communication Protocol (ACP), and collects the output.
@@ -67,7 +52,7 @@ func (e *ACPExecutor) StepTypes() []core.StepType {
 func ResolveAgent(step *core.Step) (command string, args []string, err error) {
 	// Check built-in registry first
 	if step.Agent != "" {
-		def, ok := builtinACPAgents[step.Agent]
+		def, ok := core.ResolveBuiltinACPAgent(step.Agent)
 		if !ok {
 			return "", nil, fmt.Errorf("unknown built-in agent: %q (available: %s)", step.Agent, availableAgentNames())
 		}
@@ -218,7 +203,7 @@ func RunAgentACP(ctx context.Context, prompt, agentName string, cfg *RunAgentACP
 	}
 
 	// Resolve agent command from built-in registry
-	def, ok := builtinACPAgents[agentName]
+	def, ok := core.ResolveBuiltinACPAgent(agentName)
 	if !ok {
 		return "", "", fmt.Errorf("unknown agent: %q (available: %s)", agentName, availableAgentNames())
 	}
@@ -393,11 +378,7 @@ func RunAgentACP(ctx context.Context, prompt, agentName string, cfg *RunAgentACP
 
 // ListAgentNames returns the names of all built-in ACP agents.
 func ListAgentNames() []string {
-	names := make([]string, 0, len(builtinACPAgents))
-	for name := range builtinACPAgents {
-		names = append(names, name)
-	}
-	return names
+	return core.BuiltinACPAgentNames()
 }
 
 // resolveAgentName returns the agent name for exports.
@@ -413,11 +394,10 @@ func resolveAgentName(step *core.Step) string {
 
 // IsBuiltinAgent returns true if the given name is a built-in ACP agent.
 func IsBuiltinAgent(name string) bool {
-	_, ok := builtinACPAgents[name]
-	return ok
+	return core.IsBuiltinACPAgent(name)
 }
 
 // availableAgentNames returns a comma-separated list of built-in agent names.
 func availableAgentNames() string {
-	return strings.Join(ListAgentNames(), ", ")
+	return core.BuiltinACPAgentNamesString()
 }

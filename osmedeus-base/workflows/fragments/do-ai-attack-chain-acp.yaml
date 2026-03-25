@@ -7,7 +7,7 @@
 # - 评估攻击链的可行性和影响
 #
 # 特点：
-# - 使用 agent-acp (flowcli)，不依赖 LLM API
+# - 使用 agent-acp (claude-code)，不依赖 LLM API
 # - 增加容错机制
 # =============================================================================
 
@@ -19,9 +19,17 @@ params:
   - name: attackChainOutput
     default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
   - name: attackChainsFile
-    default: "{{Output}}/ai-analysis/attack-chains.txt"
+    default: "{{Output}}/ai-analysis/attack-chains-{{TargetSpace}}.txt"
   - name: criticalPathsFile
-    default: "{{Output}}/ai-analysis/critical-paths.txt"
+    default: "{{Output}}/ai-analysis/critical-paths-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: mustVerifyVulnsFile
+    default: "{{Output}}/ai-analysis/must-verify-vulns-{{TargetSpace}}.txt"
+  - name: pivotAssetsFile
+    default: "{{Output}}/ai-analysis/pivot-assets-{{TargetSpace}}.txt"
 
   # 输入文件
   - name: vulnValidationFile
@@ -126,7 +134,7 @@ steps:
 
   - name: ai-analyze-attack-chains
     type: agent-acp
-    agent: flowcli
+    agent: claude-code
     timeout: "{{agentTimeout}}"
     pre_condition: "{{enableAttackChain}}"
     on_error:
@@ -271,18 +279,55 @@ steps:
 
       # 容错：检查文件是否存在
       if [ -f "{{attackChainOutput}}" ] && jq empty {{attackChainOutput}} 2>/dev/null; then
-        # 提取攻击链摘要
-        jq -r '.attack_chains[] | "## \(.chain_name)\nEntry: \(.entry_point.vulnerability)\nDifficulty: \(.difficulty)\nImpact: \(.impact)\n" + (.chain_steps | .[] | "- Step \(.step): \(.action) -> \(.result)\n") + "\n---"' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
+        jq -r '
+          .attack_chains[]? |
+          [
+            (.chain_name // .final_objective // "attack-chain"),
+            (.entry_point.url // "unknown"),
+            (.entry_point.vulnerability // "unknown"),
+            (.impact // "unknown"),
+            ("success=" + ((.success_probability // "unknown") | tostring))
+          ] | @tsv
+        ' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
 
-        # 提取关键路径
-        jq -r '.critical_paths[] | "Path: \(.path | join(" -> "))\nRisk: \(.total_risk)\nWeakness: \(.weakness)\n"' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
+        jq -r '
+          .critical_paths[]? |
+          if type == "object" then
+            ((.path // []) | join(" -> ")) +
+            (if (.total_risk // "") != "" then " | risk=" + (.total_risk | tostring) else "" end) +
+            (if (.weakness // "") != "" then " | weakness=" + (.weakness | tostring) else "" end)
+          else
+            tostring
+          end
+        ' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
 
-        # 提取入口点列表（用于后续路径规划）
-        jq -r '.attack_chain_summary.most_likely_entry_points[]' {{attackChainOutput}} 2>/dev/null > {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt || true
+        jq -r '
+          [
+            .attack_chain_summary.most_likely_entry_points[]?,
+            .attack_chains[]?.entry_point.url
+          ] | map(select(. != null and . != "")) | .[]
+        ' {{attackChainOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{entryPointsFile}} || true
+
+        cp {{entryPointsFile}} {{bestPathTargetsFile}} 2>/dev/null || touch {{bestPathTargetsFile}}
+
+        jq -r '
+          .attack_chains[]? |
+          [
+            (.entry_point.vulnerability // "unknown"),
+            (.entry_point.url // "unknown"),
+            ("severity=" + (.entry_point.severity // "unknown")),
+            ("objective=" + (.final_objective // "unknown"))
+          ] | join(" | ")
+        ' {{attackChainOutput}} 2>/dev/null > {{mustVerifyVulnsFile}} || true
+
+        awk -F/ 'NF >= 3 { print $3 }' {{bestPathTargetsFile}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{pivotAssetsFile}} || true
       else
         echo "# No attack chain data" > {{attackChainsFile}}
         echo "# No critical paths" > {{criticalPathsFile}}
-        touch {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt
+        touch {{entryPointsFile}}
+        touch {{bestPathTargetsFile}}
+        touch {{mustVerifyVulnsFile}}
+        touch {{pivotAssetsFile}}
       fi
 
       echo "[INFO] [Attack Chain] Extraction complete"

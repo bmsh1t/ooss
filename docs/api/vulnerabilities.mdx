@@ -154,6 +154,17 @@ curl "http://localhost:8002/osm/api/vulnerabilities/summary?workspace=example.co
 
 ---
 
+## Get Vulnerability Board
+
+Get workspace-level lifecycle statistics and board-style aggregations.
+
+```bash
+curl "http://localhost:8002/osm/api/vulnerabilities/board?workspace=example.com" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
 ## Get Vulnerability by ID
 
 Retrieve a single vulnerability by its ID.
@@ -261,6 +272,71 @@ curl -X POST http://localhost:8002/osm/api/vulnerabilities \
     "updated_at": "2025-01-15T14:25:00Z"
   },
   "message": "Vulnerability created successfully"
+}
+```
+
+---
+
+## Update Vulnerability
+
+Update lifecycle status, AI verdicts, analyst notes, and other editable fields.
+
+```bash
+curl -X PATCH http://localhost:8002/osm/api/vulnerabilities/15 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vuln_status": "verified",
+    "ai_verdict": "confirmed",
+    "analyst_notes": "Validated manually against staging"
+  }'
+```
+
+Common lifecycle values:
+
+- `new`
+- `triaged`
+- `verified`
+- `false_positive`
+- `retest`
+- `closed`
+
+---
+
+## Queue a Retest Run
+
+Queue a workflow or module to re-check a vulnerability.
+
+```bash
+curl -X POST http://localhost:8002/osm/api/vulnerabilities/15/retest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "flow": "superdomain-extensive-ai-hybrid",
+    "priority": "high",
+    "params": {
+      "recheck_mode": "focused"
+    }
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `flow` | string | No* | Flow to run for retest |
+| `module` | string | No* | Module to run for retest |
+| `priority` | string | No | Queue priority |
+| `params` | object | No | Extra workflow params |
+
+*One of `flow` or `module` is required.
+
+**Response**
+
+```json
+{
+  "message": "Retest task queued",
+  "run_uuid": "retest-run-uuid"
 }
 ```
 

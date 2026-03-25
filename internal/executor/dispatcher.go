@@ -191,8 +191,20 @@ func (d *StepDispatcher) Dispatch(ctx context.Context, step *core.Step, execCtx 
 			zap.Int("export_count", len(step.Exports)),
 		)
 
+		// Work on a local copy so export evaluation does not mutate the shared
+		// execution-context snapshot returned by GetVariables().
+		baseVars := execCtx.GetVariables()
+		vars := make(map[string]interface{}, len(baseVars)+len(result.Exports)+2)
+		for k, v := range baseVars {
+			vars[k] = v
+		}
+
+		// Expose the current step output during export evaluation. Workflows
+		// historically referenced both "output" and "StepOutput".
+		vars["output"] = result.Output
+		vars["StepOutput"] = result.Output
+
 		// Merge auto-exports (e.g., from HTTP steps) into vars before evaluating user exports
-		vars := execCtx.GetVariables()
 		if result.Exports != nil {
 			for k, v := range result.Exports {
 				vars[k] = v

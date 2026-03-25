@@ -1,0 +1,131 @@
+kind: module
+name: ai-retest-queue
+description: Queue AI-selected retest targets into the built-in worker queue for later execution
+
+params:
+  - name: enableRetestQueue
+    type: bool
+    default: false
+  - name: retestFlow
+    default: "web-classic"
+  - name: retestWorkflowKind
+    default: "flow"
+  - name: retestPriority
+    default: "high"
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: retestTargetsFile
+    default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+  - name: retestQueueSummary
+    default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
+  - name: retestQueueLog
+    default: "{{Output}}/ai-analysis/retest-queue-{{TargetSpace}}.log"
+
+steps:
+  - name: prepare-retest-queue
+    type: function
+    pre_condition: "{{enableRetestQueue}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Preparing AI retest queue for {{Target}}")'
+
+  - name: enqueue-retest-targets
+    type: bash
+    pre_condition: "{{enableRetestQueue}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ ! -f "{{retestTargetsFile}}" ] || [ ! -s "{{retestTargetsFile}}" ]; then
+        jq -n \
+          --arg workflow "{{retestFlow}}" \
+          --arg kind "{{retestWorkflowKind}}" \
+          --arg priority "{{retestPriority}}" \
+          '{
+            status: "skipped",
+            reason: "no_retest_targets",
+            workflow: $workflow,
+            workflow_kind: $kind,
+            priority: $priority,
+            queued_targets: 0
+          }' > "{{retestQueueSummary}}"
+        exit 0
+      fi
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        jq -n \
+          --arg workflow "{{retestFlow}}" \
+          --arg kind "{{retestWorkflowKind}}" \
+          '{
+            status: "skipped",
+            reason: "osmedeus_binary_not_found",
+            workflow: $workflow,
+            workflow_kind: $kind,
+            queued_targets: 0
+          }' > "{{retestQueueSummary}}"
+        exit 0
+      fi
+
+      WORKFLOW_FLAG="-f"
+      if [ "{{retestWorkflowKind}}" = "module" ]; then
+        WORKFLOW_FLAG="-m"
+      fi
+
+      TARGET_COUNT=$(wc -l < "{{retestTargetsFile}}" 2>/dev/null || echo 0)
+      {
+        echo "[Retest Queue] Started: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "[Retest Queue] Binary: $OSM_BIN"
+        echo "[Retest Queue] Workflow: {{retestFlow}} (kind={{retestWorkflowKind}})"
+        echo "[Retest Queue] Priority: {{retestPriority}}"
+        echo "[Retest Queue] Targets: $TARGET_COUNT"
+        echo ""
+        "$OSM_BIN" worker queue new "$WORKFLOW_FLAG" "{{retestFlow}}" \
+          -T "{{retestTargetsFile}}" \
+          -p "knowledgeWorkspace={{knowledgeWorkspace}}" \
+          -p "campaign_stage=retest" \
+          -p "campaign_source_target={{Target}}" \
+          -p "retest_priority={{retestPriority}}"
+      } > "{{retestQueueLog}}" 2>&1
+      STATUS=$?
+
+      if [ "$STATUS" -eq 0 ]; then
+        jq -n \
+          --arg workflow "{{retestFlow}}" \
+          --arg kind "{{retestWorkflowKind}}" \
+          --arg priority "{{retestPriority}}" \
+          --arg target_file "{{retestTargetsFile}}" \
+          --arg log_file "{{retestQueueLog}}" \
+          --argjson queued_targets "$TARGET_COUNT" \
+          '{
+            status: "queued",
+            workflow: $workflow,
+            workflow_kind: $kind,
+            priority: $priority,
+            target_file: $target_file,
+            log_file: $log_file,
+            queued_targets: $queued_targets
+          }' > "{{retestQueueSummary}}"
+      else
+        jq -n \
+          --arg workflow "{{retestFlow}}" \
+          --arg kind "{{retestWorkflowKind}}" \
+          --arg log_file "{{retestQueueLog}}" \
+          --argjson queued_targets 0 \
+          '{
+            status: "failed",
+            workflow: $workflow,
+            workflow_kind: $kind,
+            log_file: $log_file,
+            queued_targets: $queued_targets
+          }' > "{{retestQueueSummary}}"
+      fi
+
+  - name: log-retest-queue-complete
+    type: function
+    pre_condition: "{{enableRetestQueue}}"
+    functions:
+      - 'log_info("AI retest queue step completed for {{Target}}")'

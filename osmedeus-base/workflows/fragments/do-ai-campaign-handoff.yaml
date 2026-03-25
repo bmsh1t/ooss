@@ -1,0 +1,290 @@
+kind: module
+name: ai-campaign-handoff
+description: Package AI outputs into a structured handoff bundle for campaign or deep-scan follow-up
+
+params:
+  - name: campaignHandoffOutput
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignHandoffMd
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.md"
+  - name: campaignTargetsFile
+    default: "{{Output}}/ai-analysis/campaign-targets-{{TargetSpace}}.txt"
+  - name: campaignCreateOutput
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: campaignCreateLog
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.log"
+
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueOutput
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: rescanSummaryFile
+    default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+
+  - name: retestFlow
+    default: "web-classic"
+  - name: retestPriority
+    default: "high"
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: enableCampaignCreate
+    type: bool
+    default: false
+  - name: campaignWorkflow
+    default: "{{retestFlow}}"
+  - name: campaignWorkflowKind
+    default: "flow"
+  - name: campaignPriority
+    default: "{{retestPriority}}"
+  - name: campaignDeepScanWorkflow
+    default: ""
+  - name: campaignDeepScanWorkflowKind
+    default: "flow"
+  - name: campaignAutoDeepScan
+    type: bool
+    default: false
+  - name: campaignHighRiskSeverities
+    default: "critical,high"
+  - name: enableCampaignHandoff
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-campaign-handoff
+    type: function
+    pre_condition: "{{enableCampaignHandoff}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'log_info("Preparing AI campaign handoff for {{Target}}")'
+
+  - name: build-campaign-handoff
+    type: bash
+    pre_condition: "{{enableCampaignHandoff}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      FOCUS_JSON='[]'
+      DECISION_RESCAN_JSON='[]'
+      if [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        FOCUS_JSON=$(jq -c '.focus_areas // []' "{{aiDecisionFile}}" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.rescan_targets // .priority_targets // []' "{{aiDecisionFile}}" 2>/dev/null || echo '[]')
+      fi
+
+      RETEST_TARGETS_JSON='[]'
+      if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
+        RETEST_TARGETS_JSON=$(jq -c '[.targets[]?.target, .automation_queue[]?.target] | map(select(. != null and . != "")) | unique' "{{retestPlanOutput}}" 2>/dev/null || echo '[]')
+      fi
+
+      OPERATOR_TARGETS_JSON='[]'
+      OPERATOR_TASKS=0
+      if [ -f "{{operatorQueueOutput}}" ] && jq empty "{{operatorQueueOutput}}" 2>/dev/null; then
+        OPERATOR_TARGETS_JSON=$(jq -c '[.focus_targets[]?, .tasks[]?.target] | map(select(. != null and . != "")) | unique' "{{operatorQueueOutput}}" 2>/dev/null || echo '[]')
+        OPERATOR_TASKS=$(jq -r '[.tasks[]?] | length' "{{operatorQueueOutput}}" 2>/dev/null || echo 0)
+      fi
+
+      SEMANTIC_PRIORITY_JSON='[]'
+      if [ -f "{{semanticPriorityTargetsFile}}" ]; then
+        SEMANTIC_PRIORITY_JSON=$(jq -R -s 'split("\n") | map(select(length > 0)) | unique' "{{semanticPriorityTargetsFile}}" 2>/dev/null || echo '[]')
+      fi
+
+      {
+        printf '%s\n' "$DECISION_RESCAN_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$RETEST_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$OPERATOR_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
+        head -50 "{{confirmedUrlsFile}}" 2>/dev/null || true
+        head -30 "{{entryPointsFile}}" 2>/dev/null || true
+        head -30 "{{bestPathTargetsFile}}" 2>/dev/null || true
+        head -40 "{{semanticPriorityTargetsFile}}" 2>/dev/null || true
+      } | awk 'NF && !seen[$0]++' > "{{campaignTargetsFile}}" || true
+
+      CONFIRMED_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
+      ENTRY_COUNT=$(wc -l < "{{entryPointsFile}}" 2>/dev/null || echo 0)
+      BEST_PATH_COUNT=$(wc -l < "{{bestPathTargetsFile}}" 2>/dev/null || echo 0)
+      SEMANTIC_PRIORITY_COUNT=$(wc -l < "{{semanticPriorityTargetsFile}}" 2>/dev/null || echo 0)
+      CAMPAIGN_TARGETS=$(wc -l < "{{campaignTargetsFile}}" 2>/dev/null || echo 0)
+
+      jq -n \
+        --arg generated_at "$(date -Iseconds)" \
+        --arg target "{{Target}}" \
+        --arg target_space "{{TargetSpace}}" \
+        --arg recommended_flow "{{retestFlow}}" \
+        --arg retest_priority "{{retestPriority}}" \
+        --arg ai_decision "{{aiDecisionFile}}" \
+        --arg retest_plan "{{retestPlanOutput}}" \
+        --arg operator_queue "{{operatorQueueOutput}}" \
+        --arg rescan_summary "{{rescanSummaryFile}}" \
+        --arg semantic_priority_file "{{semanticPriorityTargetsFile}}" \
+        --argjson focus_areas "$FOCUS_JSON" \
+        --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
+        --argjson retest_targets "$RETEST_TARGETS_JSON" \
+        --argjson operator_targets "$OPERATOR_TARGETS_JSON" \
+        --argjson semantic_priority_targets "$SEMANTIC_PRIORITY_JSON" \
+        --argjson operator_tasks "$OPERATOR_TASKS" \
+        --argjson confirmed_count "$CONFIRMED_COUNT" \
+        --argjson entry_count "$ENTRY_COUNT" \
+        --argjson best_path_count "$BEST_PATH_COUNT" \
+        --argjson semantic_priority_count "$SEMANTIC_PRIORITY_COUNT" \
+        --argjson campaign_targets "$CAMPAIGN_TARGETS" \
+        '{
+          generated_at: $generated_at,
+          target: $target,
+          workspace: $target_space,
+          handoff_ready: (($confirmed_count > 0) or ($entry_count > 0) or ($operator_tasks > 0) or ($campaign_targets > 0)),
+          campaign_profile: {
+            recommended_flow: $recommended_flow,
+            retest_priority: $retest_priority,
+            focus_areas: $focus_areas
+          },
+          counts: {
+            confirmed_urls: $confirmed_count,
+            attack_chain_entry_points: $entry_count,
+            best_path_targets: $best_path_count,
+            semantic_priority_targets: $semantic_priority_count,
+            decision_rescan_targets: ($decision_rescan_targets | length),
+            retest_targets: ($retest_targets | length),
+            operator_targets: ($operator_targets | length),
+            operator_tasks: $operator_tasks,
+            campaign_targets: $campaign_targets
+          },
+          targets: {
+            decision_rescan: $decision_rescan_targets,
+            retest: $retest_targets,
+            operator_focus: $operator_targets,
+            semantic_priority: $semantic_priority_targets
+          },
+          artifacts: {
+            ai_decision: $ai_decision,
+            retest_plan: $retest_plan,
+            operator_queue: $operator_queue,
+            rescan_summary: $rescan_summary,
+            semantic_priority_targets: $semantic_priority_file,
+            campaign_targets: "{{campaignTargetsFile}}"
+          },
+          next_actions: [
+            "Review operator queue and execute all P1 tasks first",
+            "Run recommended flow against retest targets with evidence capture",
+            "Persist confirmed post-retest results back into knowledge base"
+          ]
+        }' > {{campaignHandoffOutput}}
+
+  - name: create-campaign-from-handoff
+    type: bash
+    pre_condition: "{{enableCampaignHandoff}} && {{enableCampaignCreate}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ ! -f "{{campaignTargetsFile}}" ] || [ ! -s "{{campaignTargetsFile}}" ]; then
+        jq -n '{status:"skipped", reason:"no_campaign_targets"}' > "{{campaignCreateOutput}}"
+        exit 0
+      fi
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        jq -n '{status:"skipped", reason:"osmedeus_binary_not_found"}' > "{{campaignCreateOutput}}"
+        exit 0
+      fi
+
+      WORKFLOW_FLAG="-f"
+      if [ "{{campaignWorkflowKind}}" = "module" ]; then
+        WORKFLOW_FLAG="-m"
+      fi
+
+      set -- \
+        "$OSM_BIN" --json campaign create \
+        --name "{{TargetSpace}}-ai-handoff" \
+        "$WORKFLOW_FLAG" "{{campaignWorkflow}}" \
+        -T "{{campaignTargetsFile}}" \
+        --priority "{{campaignPriority}}" \
+        -p "knowledgeWorkspace={{knowledgeWorkspace}}" \
+        -p "campaign_source_target={{Target}}" \
+        -p "campaign_handoff={{campaignHandoffOutput}}"
+
+      if [ -n "{{campaignDeepScanWorkflow}}" ]; then
+        set -- "$@" --deep-scan-workflow "{{campaignDeepScanWorkflow}}" --deep-scan-workflow-kind "{{campaignDeepScanWorkflowKind}}"
+      fi
+      if [ "{{campaignAutoDeepScan}}" = "true" ]; then
+        set -- "$@" --auto-deep-scan
+      fi
+      SEVERITY_LIST=$(printf '%s' "{{campaignHighRiskSeverities}}" | tr ',' ' ')
+      for sev in $SEVERITY_LIST; do
+        sev=$(printf '%s' "$sev" | xargs)
+        [ -n "$sev" ] && set -- "$@" --high-risk-severity "$sev"
+      done
+
+      {
+        echo "[Campaign Create] Started: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "[Campaign Create] Workflow: {{campaignWorkflow}} ({{campaignWorkflowKind}})"
+        echo "[Campaign Create] Targets: $(wc -l < "{{campaignTargetsFile}}" 2>/dev/null || echo 0)"
+        echo ""
+        "$@"
+      } > "{{campaignCreateLog}}" 2>&1
+
+      if tail -n 1 "{{campaignCreateLog}}" | jq empty 2>/dev/null; then
+        tail -n 1 "{{campaignCreateLog}}" > "{{campaignCreateOutput}}"
+      else
+        jq -n --arg log "{{campaignCreateLog}}" '{status:"failed", log_file:$log}' > "{{campaignCreateOutput}}"
+      fi
+
+  - name: merge-campaign-create-result
+    type: bash
+    pre_condition: "{{enableCampaignHandoff}} && {{enableCampaignCreate}}"
+    command: |
+      if [ -f "{{campaignCreateOutput}}" ] && [ -f "{{campaignHandoffOutput}}" ] && jq empty "{{campaignHandoffOutput}}" 2>/dev/null; then
+        jq --slurpfile create "{{campaignCreateOutput}}" '
+          .campaign_creation = ($create[0] // {})
+        ' "{{campaignHandoffOutput}}" > "{{campaignHandoffOutput}}.tmp" 2>/dev/null && mv "{{campaignHandoffOutput}}.tmp" "{{campaignHandoffOutput}}" || true
+      fi
+
+  - name: render-campaign-handoff-markdown
+    type: bash
+    pre_condition: "{{enableCampaignHandoff}}"
+    command: |
+      {
+        echo "# AI Campaign Handoff"
+        echo "## 目标: {{Target}}"
+        echo ""
+        jq -r '.campaign_profile | "- Recommended flow: \(.recommended_flow // "web-classic")\n- Retest priority: \(.retest_priority // "high")"' {{campaignHandoffOutput}} 2>/dev/null || true
+        echo ""
+        echo "## Counts"
+        jq -r '.counts | "- Confirmed URLs: \(.confirmed_urls // 0)\n- Attack-chain entry points: \(.attack_chain_entry_points // 0)\n- Best path targets: \(.best_path_targets // 0)\n- Semantic priority targets: \(.semantic_priority_targets // 0)\n- Decision rescan targets: \(.decision_rescan_targets // 0)\n- Retest targets: \(.retest_targets // 0)\n- Operator targets: \(.operator_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)"' {{campaignHandoffOutput}} 2>/dev/null || true
+        echo ""
+        echo "## Focus Areas"
+        jq -r '.campaign_profile.focus_areas[]? | "- \(.)"' {{campaignHandoffOutput}} 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Semantic Priority Targets"
+        jq -r '.targets.semantic_priority[]? | "- \(.)"' {{campaignHandoffOutput}} 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Campaign Targets"
+        sed 's/^/- /' "{{campaignTargetsFile}}" 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Artifacts"
+        jq -r '.artifacts | to_entries[] | "- \(.key): \(.value)"' {{campaignHandoffOutput}} 2>/dev/null || true
+        if jq -e '.campaign_creation' {{campaignHandoffOutput}} > /dev/null 2>&1; then
+          echo ""
+          echo "## Campaign Creation"
+          jq -r '.campaign_creation | to_entries[] | "- \(.key): \(.value | tostring)"' {{campaignHandoffOutput}} 2>/dev/null || true
+        fi
+        echo ""
+        echo "## Next Actions"
+        jq -r '.next_actions[]? | "- \(.)"' {{campaignHandoffOutput}} 2>/dev/null || true
+      } > {{campaignHandoffMd}}
+
+  - name: log-campaign-handoff-complete
+    type: function
+    pre_condition: "{{enableCampaignHandoff}}"
+    functions:
+      - 'log_info("AI campaign handoff completed for {{Target}}")'

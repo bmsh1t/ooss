@@ -24,12 +24,30 @@ params:
     default: "{{Output}}/ai-analysis/semantic-embeddings-{{TargetSpace}}.json"
   - name: semanticHighlightsOutput
     default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
+  - name: semanticPriorityTargetsOutput
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityVulnsOutput
+    default: "{{Output}}/ai-analysis/semantic-priority-vulns-{{TargetSpace}}.json"
+  - name: vectorSearchResultsOutput
+    default: "{{Output}}/ai-analysis/vector-search-results-{{TargetSpace}}.json"
+  - name: knowledgeSearchOutput
+    default: "{{Output}}/ai-analysis/knowledge-search-results-{{TargetSpace}}.json"
   - name: skillsDir
     default: "{{OsmedeusBase}}/skills"
   - name: nucleiFile
     default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
   - name: httpFile
     default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: knowledgeWorkspace
+    default: "{{TargetSpace}}"
+  - name: sharedKnowledgeWorkspace
+    default: ""
+  - name: knowledgeIndexFile
+    default: "{{semanticIndexDir}}/knowledge-index.txt"
+  - name: vectorCorpusFile
+    default: "{{semanticIndexDir}}/vector-corpus.txt"
+  - name: vectorEmbeddingsInput
+    default: "{{semanticIndexDir}}/vector-embed-input.txt"
 
   # Embeddings API 配置
   - name: enableSemanticSearch
@@ -72,6 +90,14 @@ params:
     type: bool
     default: true
     description: "Index existing scan data for semantic search"
+  - name: includeKnowledgeBase
+    type: bool
+    default: true
+    description: "Include imported and learned knowledge-base chunks in semantic search"
+  - name: maxKnowledgeChunks
+    type: integer
+    default: 200
+    description: "Maximum knowledge chunks exported into the vector corpus"
   - name: maxSearchResults
     type: integer
     default: 10
@@ -130,6 +156,99 @@ steps:
       if [ "$HTTP_COUNT" -lt 10 ]; then
         echo "[WARN] [Semantic Search] Low HTTP count ($HTTP_COUNT), semantic search may have limited results"
       fi
+
+  - name: export-knowledge-corpus
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{includeKnowledgeBase}}"
+    command: |
+      mkdir -p {{semanticIndexDir}}
+      : > "{{knowledgeIndexFile}}"
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        echo "[Semantic] osmedeus binary not found, skipping knowledge corpus export"
+        exit 0
+      fi
+
+      PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
+      SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      PRIMARY_TMP="{{semanticIndexDir}}/.knowledge-primary.txt"
+      SHARED_TMP="{{semanticIndexDir}}/.knowledge-shared.txt"
+      : > "$PRIMARY_TMP"
+      : > "$SHARED_TMP"
+
+      "$OSM_BIN" kb export \
+        -w "$PRIMARY_WORKSPACE" \
+        --limit {{maxKnowledgeChunks}} \
+        --output "$PRIMARY_TMP" >/tmp/osm-kb-export.log 2>&1 || true
+
+      if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+        "$OSM_BIN" kb export \
+          -w "$SHARED_WORKSPACE" \
+          --limit {{maxKnowledgeChunks}} \
+          --output "$SHARED_TMP" >/tmp/osm-kb-export-shared.log 2>&1 || true
+      fi
+
+      cat "$PRIMARY_TMP" "$SHARED_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
+
+      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      echo "[Semantic] Knowledge corpus exported: $KB_LINES chunks"
+
+  - name: search-knowledge-db
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{includeKnowledgeBase}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+      echo '[]' > "{{knowledgeSearchOutput}}"
+
+      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
+      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
+        OSM_BIN="/root/.local/bin/osmedeus"
+      fi
+
+      if [ -z "$OSM_BIN" ]; then
+        echo "[Semantic] osmedeus binary not found, skipping knowledge DB search"
+        exit 0
+      fi
+
+      PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
+      SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
+      PRIMARY_JSON="{{semanticIndexDir}}/.knowledge-search-primary.json"
+      SHARED_JSON="{{semanticIndexDir}}/.knowledge-search-shared.json"
+
+      "$OSM_BIN" --json kb search \
+        -w "$PRIMARY_WORKSPACE" \
+        --query "{{searchQuery}}" \
+        --limit {{maxSearchResults}} > "$PRIMARY_JSON" 2>/tmp/osm-kb-search.log || echo '[]' > "$PRIMARY_JSON"
+
+      echo '[]' > "$SHARED_JSON"
+      if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
+        "$OSM_BIN" --json kb search \
+          -w "$SHARED_WORKSPACE" \
+          --query "{{searchQuery}}" \
+          --limit {{maxSearchResults}} > "$SHARED_JSON" 2>/tmp/osm-kb-search-shared.log || echo '[]' > "$SHARED_JSON"
+      fi
+
+      jq -s --argjson max_results {{maxSearchResults}} '
+        add
+        | map(
+            if type == "object" then .
+            else {"content": tostring}
+            end
+          )
+        | map(
+            .workspace = (.workspace // .metadata.workspace // "unknown")
+          )
+        | unique_by((.chunk_id // .id // .content // tostring))
+        | .[:$max_results]
+      ' "$PRIMARY_JSON" "$SHARED_JSON" > "{{knowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{knowledgeSearchOutput}}"
+
+      KB_HITS=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
+      echo "[Semantic] Knowledge DB search hits: $KB_HITS"
 
   - name: index-scan-data
     type: bash
@@ -214,9 +333,41 @@ steps:
       
       exit 0
 
+  - name: build-vector-corpus
+    type: bash
+    pre_condition: "{{enableSemanticSearch}}"
+    command: |
+      mkdir -p {{semanticIndexDir}}
+      : > "{{vectorCorpusFile}}"
+
+      append_prefixed() {
+        source_file="$1"
+        prefix="$2"
+        [ -f "$source_file" ] || return 0
+        awk -v p="$prefix" 'NF { gsub(/\r/, ""); print p $0 }' "$source_file" >> "{{vectorCorpusFile}}"
+      }
+
+      append_raw() {
+        source_file="$1"
+        [ -f "$source_file" ] || return 0
+        awk 'NF { gsub(/\r/, ""); print }' "$source_file" >> "{{vectorCorpusFile}}"
+      }
+
+      append_prefixed "{{semanticIndexDir}}/vulns-index.txt" "[scan:vulns] "
+      append_prefixed "{{semanticIndexDir}}/tech-index.txt" "[scan:tech] "
+      append_prefixed "{{semanticIndexDir}}/subdomains-index.txt" "[scan:subdomains] "
+      append_prefixed "{{semanticIndexDir}}/http-index.txt" "[scan:http] "
+      append_prefixed "{{semanticIndexDir}}/endpoints-index.txt" "[scan:endpoints] "
+      append_raw "{{knowledgeIndexFile}}"
+
+      awk 'NF && !seen[$0]++' "{{vectorCorpusFile}}" > "{{vectorCorpusFile}}.tmp" && mv "{{vectorCorpusFile}}.tmp" "{{vectorCorpusFile}}"
+
+      CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
+      echo "[Semantic] Vector corpus prepared: $CORPUS_LINES lines"
+
   - name: generate-data-embeddings
     type: bash
-    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{semanticIndexDir}}/vulns-index.txt')"
+    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{vectorCorpusFile}}')"
     timeout: 300s
     command: |
       mkdir -p {{Output}}/ai-analysis
@@ -260,7 +411,8 @@ steps:
       echo "[Semantic] Using provider: $PROVIDER, URL: $API_URL, Model: $MODEL"
       
       # 准备数据 - 每行作为一个 embedding 单位
-      DATA=$(cat {{semanticIndexDir}}/vulns-index.txt 2>/dev/null | head -100 | jq -R -s -c 'split("\n") | map(select(length > 0))')
+      awk 'NF { print }' "{{vectorCorpusFile}}" | head -300 > "{{vectorEmbeddingsInput}}"
+      DATA=$(cat "{{vectorEmbeddingsInput}}" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0))')
       
       if [ -z "$DATA" ] || [ "$DATA" = "[]" ]; then
         echo "[Semantic] No data to embed"
@@ -344,6 +496,72 @@ steps:
         echo "[Semantic] Failed to generate query embedding"
       fi
 
+  - name: run-vector-search
+    type: bash
+    pre_condition: "{{enableSemanticSearch}} && {{useVectorSearch}} && file_exists('{{vectorEmbeddingsInput}}') && file_exists('{{embeddingsOutput}}') && file_exists('{{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json')"
+    timeout: 120s
+    command: |
+      python3 << 'PY'
+      import json
+      import math
+      from pathlib import Path
+
+      embeddings_path = Path("{{embeddingsOutput}}")
+      query_path = Path("{{Output}}/ai-analysis/query-embedding-{{TargetSpace}}.json")
+      corpus_path = Path("{{vectorEmbeddingsInput}}")
+      output_path = Path("{{vectorSearchResultsOutput}}")
+      max_results = int("{{maxSearchResults}}")
+      query_text = "{{searchQuery}}"
+
+      def cosine_similarity(left, right):
+          if not left or not right or len(left) != len(right):
+              return 0.0
+          dot = sum(a * b for a, b in zip(left, right))
+          left_norm = math.sqrt(sum(a * a for a in left))
+          right_norm = math.sqrt(sum(b * b for b in right))
+          if left_norm == 0 or right_norm == 0:
+              return 0.0
+          return dot / (left_norm * right_norm)
+
+      try:
+          corpus = [line.strip() for line in corpus_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+          embeddings = json.loads(embeddings_path.read_text(encoding="utf-8")).get("data", [])
+          query_embedding = json.loads(query_path.read_text(encoding="utf-8")).get("data", [{}])[0].get("embedding", [])
+      except Exception as exc:
+          output_path.write_text(json.dumps({
+              "status": "error",
+              "query": query_text,
+              "message": str(exc),
+              "results": [],
+              "total_results": 0
+          }, ensure_ascii=False, indent=2), encoding="utf-8")
+          raise SystemExit(0)
+
+      results = []
+      for idx, item in enumerate(embeddings[:len(corpus)]):
+          vector = item.get("embedding")
+          if not vector:
+              continue
+          content = corpus[idx]
+          score = cosine_similarity(query_embedding, vector)
+          source = "knowledge_base" if "[kb]" in content or "[workspace=" in content else "scan_index"
+          results.append({
+              "type": "vector_match",
+              "content": content[:800],
+              "relevance_score": round(score, 4),
+              "source": source
+          })
+
+      results.sort(key=lambda item: item["relevance_score"], reverse=True)
+      payload = {
+          "status": "success",
+          "query": query_text,
+          "total_results": min(len(results), max_results),
+          "results": results[:max_results],
+      }
+      output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+      PY
+
   - name: semantic-search-agent
     type: agent
     pre_condition: "{{enableSemanticSearch}}"
@@ -375,10 +593,15 @@ steps:
       2. {{semanticIndexDir}}/tech-index.txt - 技术栈
       3. {{semanticIndexDir}}/subdomains-index.txt - 子域名
       4. {{semanticIndexDir}}/http-index.txt - HTTP 端点
+      5. {{knowledgeIndexFile}} - 已导入/自动学习的知识库 chunks
+      6. {{vectorSearchResultsOutput}} - 基于 embeddings 计算出的向量召回结果
+      7. {{knowledgeSearchOutput}} - 知识库数据库直接检索结果
 
       搜索查询：{{searchQuery}}
 
       要求：
+      - 如果第 6 个文件存在且有内容，优先使用其中的向量召回结果作为候选
+      - 如果第 7 个文件存在且有命中，把它作为高价值上下文
       - 如果索引文件存在且有内容，进行语义分析
       - 如果没有数据，返回 {"error": "no_data", "results": [], "total_results": 0}
       - 按 relevance_score 降序排序
@@ -395,16 +618,25 @@ steps:
     pre_condition: "{{enableSemanticSearch}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
-      cd {{Output}}/ai-analysis
+      INDEX_DIR="{{semanticIndexDir}}"
       AGENT_RESULTS_FILE="{{agentResultsOutput}}"
+      VECTOR_RESULTS_FILE="{{vectorSearchResultsOutput}}"
+      AGENT_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-agent-clean-{{TargetSpace}}.json"
+      VECTOR_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-vector-clean-{{TargetSpace}}.json"
+      KB_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json"
+      SCAN_LINES_FILE="{{Output}}/ai-analysis/.semantic-scan-lines-{{TargetSpace}}.txt"
+      SCAN_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json"
       
       # 收集统计数据
-      VULNS_LINES=$(wc -l < semantic-index/vulns-index.txt 2>/dev/null || echo 0)
-      TECH_LINES=$(wc -l < semantic-index/tech-index.txt 2>/dev/null || echo 0)
-      SUBDOMAIN_LINES=$(wc -l < semantic-index/subdomains-index.txt 2>/dev/null || echo 0)
-      HTTP_LINES=$(wc -l < semantic-index/http-index.txt 2>/dev/null || echo 0)
+      VULNS_LINES=$(wc -l < "$INDEX_DIR/vulns-index.txt" 2>/dev/null || echo 0)
+      TECH_LINES=$(wc -l < "$INDEX_DIR/tech-index.txt" 2>/dev/null || echo 0)
+      SUBDOMAIN_LINES=$(wc -l < "$INDEX_DIR/subdomains-index.txt" 2>/dev/null || echo 0)
+      HTTP_LINES=$(wc -l < "$INDEX_DIR/http-index.txt" 2>/dev/null || echo 0)
+      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      VECTOR_COUNT=$(jq -r '.total_results // 0' "$VECTOR_RESULTS_FILE" 2>/dev/null || echo 0)
+      KB_SEARCH_COUNT=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
       
-      echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES"
+      echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES, knowledge=$KB_LINES, vector=$VECTOR_COUNT, kb_search=$KB_SEARCH_COUNT"
       
       # 构建基础结果（保证单一合法 JSON）
       jq -n \
@@ -415,17 +647,23 @@ steps:
         --argjson tech "$TECH_LINES" \
         --argjson subdomains "$SUBDOMAIN_LINES" \
         --argjson http "$HTTP_LINES" \
+        --argjson knowledge "$KB_LINES" \
+        --argjson vector_count "$VECTOR_COUNT" \
+        --argjson kb_search_count "$KB_SEARCH_COUNT" \
         '{
           query: $query,
           timestamp: $ts,
           source: "llm_agent",
-          vector_search_used: false,
+          vector_search_used: ($vector_count > 0),
           provider: $provider,
           index_stats: {
             vulns: $vulns,
             tech: $tech,
             subdomains: $subdomains,
-            http: $http
+            http: $http,
+            knowledge: $knowledge,
+            vector_candidates: $vector_count,
+            knowledge_search_hits: $kb_search_count
           },
           results: [],
           highlights: {
@@ -439,7 +677,7 @@ steps:
         }' > {{searchResultsOutput}}
       
       # 检查索引数据是否为空
-      if [ "$VULNS_LINES" -eq 0 ] && [ "$TECH_LINES" -eq 0 ] && [ "$SUBDOMAIN_LINES" -eq 0 ]; then
+      if [ "$VULNS_LINES" -eq 0 ] && [ "$TECH_LINES" -eq 0 ] && [ "$SUBDOMAIN_LINES" -eq 0 ] && [ "$KB_LINES" -eq 0 ]; then
         echo "[Semantic] WARNING: All index files are empty! Search results will be limited."
         echo "[Semantic] This is expected if vuln-suite hasn't completed yet."
         jq -n \
@@ -454,7 +692,10 @@ steps:
               vulns: 0,
               tech: 0,
               subdomains: 0,
-              http: 0
+              http: 0,
+              knowledge: 0,
+              vector_candidates: 0,
+              knowledge_search_hits: 0
             },
             results: [],
             highlights: {
@@ -467,40 +708,281 @@ steps:
           }' > {{searchResultsOutput}}
         exit 0
       fi
-      
-      # 尝试合并 LLM agent 返回的结果
-      if [ -s "$AGENT_RESULTS_FILE" ]; then
-        echo "[Semantic] Processing LLM agent results..."
-        
-        # 清理 markdown 代码块
-        CLEANED=$(cat "$AGENT_RESULTS_FILE" | sed 's/```json//g; s/```//g; s/^[[:space:]]*//; s/[[:space:]]*$//')
-        
-        # 验证是否为有效 JSON
-        if echo "$CLEANED" | jq empty 2>/dev/null; then
-          echo "[Semantic] Valid JSON from agent, merging..."
-          
-          # 提取关键字段
-          TOTAL=$(echo "$CLEANED" | jq -r '.total_results // 0' 2>/dev/null)
-          INSIGHTS=$(echo "$CLEANED" | jq -r '.insights // [] | join(", ")' 2>/dev/null)
-          RECS=$(echo "$CLEANED" | jq -r '.recommendations // [] | join(", ")' 2>/dev/null)
-          
-          # 更新结果
-          if [ "$TOTAL" -gt 0 ]; then
-            echo "$CLEANED" | jq --arg insights "$INSIGHTS" --arg recs "$RECS" \
-              '.insights = [$insights] | .recommendations = [$recs] | .status = "completed"' > {{searchResultsOutput}}
-            echo "[Semantic] Search completed with $TOTAL results"
-          else
-            echo "[Semantic] Agent returned no results"
-            jq '.status = "no_results" | .message = "LLM 未找到相关结果"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
-          fi
-        else
-          echo "[Semantic] WARNING: Agent returned invalid JSON, using default results"
-          jq '.status = "invalid_json" | .message = "LLM 输出格式错误"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
+
+      extract_json_file() {
+        src="$1"
+        dst="$2"
+        : > "$dst"
+        [ -f "$src" ] || return 0
+        awk '
+          BEGIN { capture = 0 }
+          /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+          capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+          capture { print }
+        ' "$src" > "$dst"
+        if [ ! -s "$dst" ] && jq empty "$src" >/dev/null 2>&1; then
+          cp "$src" "$dst"
         fi
+      }
+
+      AGENT_STATUS="missing"
+      extract_json_file "$AGENT_RESULTS_FILE" "$AGENT_CLEAN_FILE"
+      if [ -s "$AGENT_CLEAN_FILE" ] && jq empty "$AGENT_CLEAN_FILE" >/dev/null 2>&1; then
+        AGENT_STATUS="valid"
       else
-        echo "[Semantic] No results from LLM agent"
-        jq '.status = "no_agent_output" | .message = "Agent 未返回有效结果"' {{searchResultsOutput}} > {{searchResultsOutput}}.tmp && mv {{searchResultsOutput}}.tmp {{searchResultsOutput}}
+        echo '{"results":[],"highlights":{"critical_findings":[],"immediate_actions":[],"affected_systems":[]},"insights":[],"recommendations":[]}' > "$AGENT_CLEAN_FILE"
+        if [ -s "$AGENT_RESULTS_FILE" ]; then
+          AGENT_STATUS="invalid_json"
+        fi
       fi
+
+      if [ -f "$VECTOR_RESULTS_FILE" ] && jq empty "$VECTOR_RESULTS_FILE" >/dev/null 2>&1; then
+        cp "$VECTOR_RESULTS_FILE" "$VECTOR_CLEAN_FILE"
+      else
+        echo '{"results":[],"total_results":0}' > "$VECTOR_CLEAN_FILE"
+      fi
+
+      if [ -f "{{knowledgeSearchOutput}}" ] && jq empty "{{knowledgeSearchOutput}}" >/dev/null 2>&1; then
+        cp "{{knowledgeSearchOutput}}" "$KB_CLEAN_FILE"
+      else
+        echo '[]' > "$KB_CLEAN_FILE"
+      fi
+
+      : > "$SCAN_LINES_FILE"
+      for f in "$INDEX_DIR/vulns-index.txt" "$INDEX_DIR/http-index.txt" "$INDEX_DIR/endpoints-index.txt" "$INDEX_DIR/subdomains-index.txt"; do
+        if [ -f "$f" ]; then
+          head -40 "$f" 2>/dev/null >> "$SCAN_LINES_FILE" || true
+        fi
+      done
+      awk 'NF && !seen[$0]++' "$SCAN_LINES_FILE" > "$SCAN_LINES_FILE.tmp" && mv "$SCAN_LINES_FILE.tmp" "$SCAN_LINES_FILE"
+      jq -R -s 'split("\n") | map(select(length > 0) | {content: ., source: "scan_index"})' "$SCAN_LINES_FILE" > "$SCAN_CLEAN_FILE" 2>/dev/null || echo '[]' > "$SCAN_CLEAN_FILE"
+
+      export OSM_SEMANTIC_TS="$(date -Iseconds)"
+      export OSM_SEMANTIC_AGENT_STATUS="$AGENT_STATUS"
+      export OSM_SEMANTIC_VULNS="$VULNS_LINES"
+      export OSM_SEMANTIC_TECH="$TECH_LINES"
+      export OSM_SEMANTIC_SUBDOMAINS="$SUBDOMAIN_LINES"
+      export OSM_SEMANTIC_HTTP="$HTTP_LINES"
+      export OSM_SEMANTIC_KNOWLEDGE="$KB_LINES"
+      export OSM_SEMANTIC_VECTOR_COUNT="$VECTOR_COUNT"
+      export OSM_SEMANTIC_KB_SEARCH_COUNT="$KB_SEARCH_COUNT"
+
+      python3 << 'PY'
+      import json
+      import os
+      import re
+      from pathlib import Path
+
+      search_output = Path("{{searchResultsOutput}}")
+      query = "{{searchQuery}}"
+      ts = os.environ.get("OSM_SEMANTIC_TS", "")
+      provider = "{{embeddingsProvider}}"
+      agent_status = os.environ.get("OSM_SEMANTIC_AGENT_STATUS", "missing")
+      max_results = int("{{maxSearchResults}}")
+
+      def load_json(path_str, default):
+          path = Path(path_str)
+          if not path.exists():
+              return default
+          try:
+              return json.loads(path.read_text(encoding="utf-8"))
+          except Exception:
+              return default
+
+      agent = load_json("{{Output}}/ai-analysis/.semantic-agent-clean-{{TargetSpace}}.json", {"results": [], "highlights": {}, "insights": [], "recommendations": []})
+      vector = load_json("{{Output}}/ai-analysis/.semantic-vector-clean-{{TargetSpace}}.json", {"results": [], "total_results": 0})
+      kb = load_json("{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json", [])
+      scan = load_json("{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json", [])
+
+      def textify(value):
+          text = str(value if value is not None else "")
+          return re.sub(r"\s+", " ", text).strip()
+
+      def default_score(source_type):
+          return {
+              "llm_agent": 0.78,
+              "knowledge_base": 0.72,
+              "vector_search": 0.68,
+              "scan_index": 0.42,
+          }.get(source_type, 0.42)
+
+      def pick_target(item, text):
+          for key in ("target", "url", "host", "endpoint", "matched-at", "matched_at"):
+              value = item.get(key)
+              if value:
+                  return str(value)
+          match = re.search(r"https?://[^\s\"]+", text)
+          return match.group(0) if match else ""
+
+      def pick_category(text):
+          lowered = text.lower()
+          if re.search(r"admin|dashboard|backoffice|manage", lowered):
+              return "admin_surface"
+          if re.search(r"login|auth|signin|session|oauth|sso|jwt", lowered):
+              return "auth_surface"
+          if re.search(r"graphql|swagger|openapi|api|endpoint", lowered):
+              return "api_surface"
+          if re.search(r"idor|authorization|authz|permission|privilege|role|tenant", lowered):
+              return "business_logic"
+          if re.search(r"upload|import|export|download|backup|file", lowered):
+              return "file_data_surface"
+          if re.search(r"sql|ssti|rce|ssrf|xss|takeover|secret|cve|critical", lowered):
+              return "vulnerability_context"
+          return "general"
+
+      def pick_severity(item, text):
+          direct = textify(item.get("severity") or item.get("severity_hint")).lower()
+          if direct:
+              return direct
+          lowered = text.lower()
+          if re.search(r"critical|rce|takeover|admin access|secret", lowered):
+              return "critical"
+          if re.search(r"high|login|auth|admin|graphql|swagger|sql|ssrf|ssti|upload|idor", lowered):
+              return "high"
+          if re.search(r"medium|token|session|api|endpoint", lowered):
+              return "medium"
+          return "info"
+
+      def pick_action(category, text):
+          lowered = text.lower()
+          if category == "auth_surface":
+              return "auth_review"
+          if category == "admin_surface":
+              return "admin_review"
+          if category == "api_surface":
+              return "api_probe"
+          if category == "business_logic":
+              return "logic_verify"
+          if re.search(r"sql|ssti|rce|ssrf|xss|takeover|secret", lowered):
+              return "exploit_verify"
+          return "investigate"
+
+      def normalize(item, source_type):
+          if not isinstance(item, dict):
+              item = {"content": str(item)}
+          text = textify(item.get("content") or item.get("snippet") or item.get("text") or item.get("finding") or item.get("title") or item)
+          target = pick_target(item, text)
+          category = pick_category(text)
+          severity = pick_severity(item, text)
+          score_raw = item.get("relevance_score", item.get("score", item.get("similarity", default_score(source_type))))
+          try:
+              score = float(score_raw)
+          except Exception:
+              score = default_score(source_type)
+          return {
+              "type": item.get("type") or category,
+              "content": text[:800],
+              "source": item.get("source") or source_type,
+              "source_type": source_type,
+              "relevance_score": score,
+              "target": target,
+              "category": category,
+              "severity_hint": severity,
+              "action_type": pick_action(category, text),
+              "title": item.get("title"),
+              "workspace": item.get("workspace") or ((item.get("metadata") or {}).get("workspace") if isinstance(item.get("metadata"), dict) else None),
+          }
+
+      def unique_keep_order(values):
+          seen = set()
+          result = []
+          for value in values:
+              if value in seen:
+                  continue
+              seen.add(value)
+              result.append(value)
+          return result
+
+      agent_results = [normalize(item, "llm_agent") for item in agent.get("results", [])]
+      vector_results = [normalize(item, "vector_search") for item in vector.get("results", [])]
+      kb_results = [normalize(item, "knowledge_base") for item in kb]
+      scan_results = [normalize(item, "scan_index") for item in scan]
+
+      combined = []
+      seen = set()
+      for item in sorted(agent_results + vector_results + kb_results + scan_results, key=lambda it: it.get("relevance_score", 0), reverse=True):
+          if not item.get("content") and not item.get("target"):
+              continue
+          key = f'{item.get("target", "")}|{item.get("content", "")}'
+          if key in seen:
+              continue
+          seen.add(key)
+          combined.append(item)
+          if len(combined) >= max_results:
+              break
+
+      priority_targets = unique_keep_order([
+          item["target"]
+          for item in combined
+          if item.get("target")
+          and (
+              item.get("severity_hint") in {"critical", "high"}
+              or item.get("category") in {"auth_surface", "admin_surface", "api_surface", "business_logic"}
+          )
+      ])[:25]
+
+      critical_findings = unique_keep_order(
+          [item.get("target") or item.get("content") for item in combined if item.get("severity_hint") in {"critical", "high"}]
+          + [str(v) for v in ((agent.get("highlights") or {}).get("critical_findings") or [])]
+      )[:8]
+
+      immediate_actions = unique_keep_order(
+          [f'[{item.get("action_type", "investigate")}] {(item.get("target") or item.get("content", ""))[:140]}' for item in combined]
+          + [str(v) for v in ((agent.get("highlights") or {}).get("immediate_actions") or [])]
+      )[:8]
+
+      affected_systems = unique_keep_order(
+          [item.get("target") for item in combined if item.get("target")]
+          + [str(v) for v in ((agent.get("highlights") or {}).get("affected_systems") or [])]
+      )[:12]
+
+      insights = unique_keep_order(
+          [str(v) for v in (agent.get("insights") or [])]
+          + (["向量召回结果已纳入语义搜索结果"] if (vector.get("total_results") or 0) > 0 else [])
+          + (["工作区知识库命中已纳入实战上下文"] if kb else [])
+      )[:8]
+
+      recommendations = unique_keep_order(
+          [str(v) for v in (agent.get("recommendations") or [])]
+          + (["优先复测 priority_targets 中的认证、后台、API 与业务逻辑入口"] if priority_targets else ["当前未识别出明确高价值目标，建议人工复核原始索引结果"])
+      )[:8]
+
+      payload = {
+          "query": query,
+          "timestamp": ts,
+          "source": (
+              "merged_llm_vector_knowledge"
+              if agent_status == "valid" and agent.get("results")
+              else ("vector_knowledge_fallback" if ((vector.get("total_results") or 0) > 0 or len(kb) > 0) else "scan_index_fallback")
+          ),
+          "vector_search_used": (vector.get("total_results") or 0) > 0,
+          "knowledge_search_used": len(kb) > 0,
+          "provider": provider,
+          "status": ("completed" if agent_status == "valid" else "fallback_completed") if combined else ("no_results" if agent_status == "valid" else "fallback_no_results"),
+          "total_results": len(combined),
+          "index_stats": {
+              "vulns": int(os.environ.get("OSM_SEMANTIC_VULNS", "0") or "0"),
+              "tech": int(os.environ.get("OSM_SEMANTIC_TECH", "0") or "0"),
+              "subdomains": int(os.environ.get("OSM_SEMANTIC_SUBDOMAINS", "0") or "0"),
+              "http": int(os.environ.get("OSM_SEMANTIC_HTTP", "0") or "0"),
+              "knowledge": int(os.environ.get("OSM_SEMANTIC_KNOWLEDGE", "0") or "0"),
+              "vector_candidates": int(os.environ.get("OSM_SEMANTIC_VECTOR_COUNT", "0") or "0"),
+              "knowledge_search_hits": int(os.environ.get("OSM_SEMANTIC_KB_SEARCH_COUNT", "0") or "0"),
+          },
+          "results": combined,
+          "highlights": {
+              "critical_findings": critical_findings,
+              "immediate_actions": immediate_actions,
+              "affected_systems": affected_systems,
+              "priority_targets": priority_targets,
+          },
+          "priority_targets": priority_targets,
+          "insights": insights,
+          "recommendations": recommendations,
+      }
+
+      search_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+      PY
       
       # 最终验证
       if jq empty {{searchResultsOutput}} 2>/dev/null; then
@@ -521,6 +1003,8 @@ steps:
       SKILLS_DIR="{{skillsDir}}"
       KB_OUTPUT="{{Output}}/ai-analysis/knowledge-base-results.md"
       SKILLS_COMBINED="{{Output}}/ai-analysis/skills-combined.md"
+      KNOWLEDGE_JSON="{{knowledgeSearchOutput}}"
+      VECTOR_JSON="{{vectorSearchResultsOutput}}"
       echo "[Knowledge Base] Searching security knowledge..."
 
       strip_frontmatter() {
@@ -532,9 +1016,9 @@ steps:
       }
 
       append_skill() {
-        local skill_id="$1"
-        local title="$2"
-        local skill_file="$SKILLS_DIR/$skill_id/SKILL.md"
+        skill_id="$1"
+        title="$2"
+        skill_file="$SKILLS_DIR/$skill_id/SKILL.md"
 
         [ -f "$skill_file" ] || return 0
 
@@ -603,6 +1087,43 @@ steps:
       echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$KB_OUTPUT"
       echo "" >> "$KB_OUTPUT"
       echo "---" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+
+      echo "## Workspace Knowledge Hits" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      if jq empty "$KNOWLEDGE_JSON" 2>/dev/null; then
+        HIT_COUNT=$(jq 'length' "$KNOWLEDGE_JSON" 2>/dev/null || echo 0)
+        if [ "$HIT_COUNT" -gt 0 ]; then
+          jq -r '.[] | "- [" + ((.score // 0) | tostring) + "] " + (.title // "untitled") + " :: " + (.snippet // "")' "$KNOWLEDGE_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
+        else
+          echo "No direct knowledge-base hits." >> "$KB_OUTPUT"
+        fi
+      else
+        echo "Knowledge search output unavailable." >> "$KB_OUTPUT"
+      fi
+      echo "" >> "$KB_OUTPUT"
+
+      echo "## Vector Recall Candidates" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      if jq empty "$VECTOR_JSON" 2>/dev/null; then
+        VECTOR_HITS=$(jq '.total_results // 0' "$VECTOR_JSON" 2>/dev/null || echo 0)
+        if [ "$VECTOR_HITS" -gt 0 ]; then
+          jq -r '.results[] | "- [" + ((.relevance_score // 0) | tostring) + "] " + (.source // "unknown") + " :: " + (.content // "")' "$VECTOR_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
+        else
+          echo "No vector recall candidates." >> "$KB_OUTPUT"
+        fi
+      else
+        echo "Vector search output unavailable." >> "$KB_OUTPUT"
+      fi
+      echo "" >> "$KB_OUTPUT"
+
+      echo "## Exported Knowledge Corpus Preview" >> "$KB_OUTPUT"
+      echo "" >> "$KB_OUTPUT"
+      if [ -f "{{knowledgeIndexFile}}" ]; then
+        head -20 "{{knowledgeIndexFile}}" | sed 's/^/- /' >> "$KB_OUTPUT" 2>/dev/null || true
+      else
+        echo "Knowledge corpus not exported." >> "$KB_OUTPUT"
+      fi
       echo "" >> "$KB_OUTPUT"
       
       # 生成技能组合文件
@@ -673,11 +1194,32 @@ steps:
         # 提取受影响的系统
         jq -r '.highlights.affected_systems[] // empty' {{searchResultsOutput}} 2>/dev/null > {{Output}}/ai-analysis/semantic-affected-systems.txt || true
         
-        # 生成结构化的漏洞关注列表（用于 vuln-validation）
-        jq -r '[.results[] | select(.severity == "critical" or .severity == "high") | {content, source, severity}]' {{searchResultsOutput}} 2>/dev/null > {{Output}}/ai-analysis/semantic-priority-vulns.json || true
+        jq -r '.priority_targets[]? // empty' {{searchResultsOutput}} 2>/dev/null > {{semanticPriorityTargetsOutput}} || true
+
+        jq '[
+          .results[]?
+          | select(
+              (.severity_hint == "critical") or (.severity_hint == "high")
+              or (.category == "auth_surface")
+              or (.category == "admin_surface")
+              or (.category == "api_surface")
+              or (.category == "business_logic")
+            )
+          | {
+              target: (.target // ""),
+              content,
+              source,
+              source_type,
+              severity_hint,
+              category,
+              action_type,
+              relevance_score
+            }
+        ]' {{searchResultsOutput}} 2>/dev/null > {{semanticPriorityVulnsOutput}} || echo '[]' > {{semanticPriorityVulnsOutput}}
         
         CRITICAL_COUNT=$(wc -l < {{Output}}/ai-analysis/semantic-critical-findings.txt 2>/dev/null || echo 0)
-        echo "[Semantic] Extracted $CRITICAL_COUNT critical findings for downstream modules"
+        PRIORITY_COUNT=$(wc -l < {{semanticPriorityTargetsOutput}} 2>/dev/null || echo 0)
+        echo "[Semantic] Extracted $CRITICAL_COUNT critical findings and $PRIORITY_COUNT priority targets for downstream modules"
       fi
 
   - name: log-semantic-complete

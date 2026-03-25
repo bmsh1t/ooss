@@ -448,6 +448,13 @@ func (p *Parser) validateStep(step *core.Step, index int) error {
 				Message: "agent-acp step must have 'agent' field or 'acp_config.command'",
 			}
 		}
+		// Validate built-in agent name if provided
+		if step.Agent != "" && !core.IsBuiltinACPAgent(step.Agent) {
+			return &ValidationError{
+				Field:   fmt.Sprintf("steps[%d].agent", index),
+				Message: fmt.Sprintf("unknown built-in agent: %s (available: %s)", step.Agent, core.BuiltinACPAgentNamesString()),
+			}
+		}
 		// Validate has at least one message
 		if len(step.Messages) == 0 {
 			return &ValidationError{

@@ -65,6 +65,7 @@ steps:
 
         # 创建优先级URL列表
         jq -r '.focus_areas[]' "{{decisionOutput}}" 2>/dev/null > {{Output}}/ai-analysis/focus-areas.txt || true
+        jq -r '.rescan_targets[]' "{{decisionOutput}}" 2>/dev/null > {{Output}}/ai-analysis/rescan-targets-from-decision.txt || true
 
         echo "[Apply Decision] Config applied: SEVERITY=$SEVERITY THREADS=$THREADS"
       else

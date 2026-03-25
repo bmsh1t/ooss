@@ -1,0 +1,53 @@
+---
+title: "Attack Chains"
+description: "Import and query attack-chain workbench reports"
+---
+
+# Attack Chains
+
+Attack-chain reports store AI-generated attack paths, critical paths, and related metadata in a queryable workbench API.
+
+## List Attack Chain Reports
+
+```bash
+curl "http://localhost:8002/osm/api/attack-chains?workspace=example.com" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Get an Attack Chain Report
+
+```bash
+curl http://localhost:8002/osm/api/attack-chains/12 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Use `?verifiable_only=true` to filter the returned chains down to items with usable entry points and steps.
+
+## Import an Attack Chain Report
+
+```bash
+curl -X POST http://localhost:8002/osm/api/attack-chains/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace": "example.com",
+    "source_path": "/tmp/attack-chain-example.json",
+    "target": "example.com",
+    "run_uuid": "run-123",
+    "mermaid_path": "/tmp/attack-chain-example.mmd",
+    "text_path": "/tmp/attack-chain-example.txt"
+  }'
+```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `workspace` | string | Yes | Workspace name |
+| `source_path` | string | Yes | Local JSON report path |
+| `target` | string | No | Target label |
+| `run_uuid` | string | No | Related run UUID |
+| `mermaid_path` | string | No | Mermaid diagram file path |
+| `text_path` | string | No | Plain-text report file path |
+
+The imported JSON is normalized into a persistent report that can be queried later by the workbench UI/API.

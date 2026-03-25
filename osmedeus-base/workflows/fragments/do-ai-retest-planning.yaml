@@ -1,0 +1,335 @@
+kind: module
+name: ai-retest-planning
+description: Build an actionable retest plan from validated findings, attack chains, and semantic context
+
+params:
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: retestPlanMd
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.md"
+  - name: retestTargetsFile
+    default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+
+  - name: vulnValidationFile
+    default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: attackChainFile
+    default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
+  - name: pathPlanningFile
+    default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: aiDecisionFile
+    default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+
+  - name: retestFlow
+    default: "web-classic"
+  - name: retestPriority
+    default: "high"
+  - name: enableRetestPlanning
+    type: bool
+    default: true
+
+steps:
+  - name: prepare-retest-planning
+    type: function
+    pre_condition: "{{enableRetestPlanning}}"
+    functions:
+      - 'create_folder("{{Output}}/ai-analysis")'
+      - 'create_folder("{{Output}}/ai-analysis/.input")'
+      - 'log_info("Preparing AI retest planning for {{Target}}")'
+
+  - name: build-retest-context
+    type: bash
+    pre_condition: "{{enableRetestPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis/.input
+
+      CONFIRMED_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
+      ENTRY_COUNT=$(wc -l < "{{entryPointsFile}}" 2>/dev/null || echo 0)
+      BEST_COUNT=$(wc -l < "{{bestPathTargetsFile}}" 2>/dev/null || echo 0)
+      SEMANTIC_COUNT=0
+      if [ -f "{{semanticSearchFile}}" ] && jq empty "{{semanticSearchFile}}" 2>/dev/null; then
+        SEMANTIC_COUNT=$(jq -r '.total_results // 0' "{{semanticSearchFile}}" 2>/dev/null || echo 0)
+      fi
+
+      jq -n \
+        --arg target "{{Target}}" \
+        --arg retest_flow "{{retestFlow}}" \
+        --arg priority "{{retestPriority}}" \
+        --arg vuln_file "{{vulnValidationFile}}" \
+        --arg attack_chain_file "{{attackChainFile}}" \
+        --arg path_planning_file "{{pathPlanningFile}}" \
+        --arg semantic_file "{{semanticSearchFile}}" \
+        --arg decision_file "{{aiDecisionFile}}" \
+        --arg confirmed_file "{{confirmedUrlsFile}}" \
+        --arg entry_points_file "{{entryPointsFile}}" \
+        --arg best_targets_file "{{bestPathTargetsFile}}" \
+        --argjson confirmed_count "$CONFIRMED_COUNT" \
+        --argjson entry_count "$ENTRY_COUNT" \
+        --argjson best_count "$BEST_COUNT" \
+        --argjson semantic_count "$SEMANTIC_COUNT" \
+        '{
+          target: $target,
+          retest_flow: $retest_flow,
+          priority: $priority,
+          files: {
+            vuln_validation: $vuln_file,
+            attack_chain: $attack_chain_file,
+            path_planning: $path_planning_file,
+            semantic_search: $semantic_file,
+            ai_decision: $decision_file,
+            confirmed_urls: $confirmed_file,
+            entry_points: $entry_points_file,
+            best_targets: $best_targets_file
+          },
+          counts: {
+            confirmed_urls: $confirmed_count,
+            attack_chain_entry_points: $entry_count,
+            best_path_targets: $best_count,
+            semantic_results: $semantic_count
+          }
+        }' > {{Output}}/ai-analysis/.input/retest-context.json
+
+      if [ "$CONFIRMED_COUNT" -eq 0 ] && [ "$ENTRY_COUNT" -eq 0 ] && [ "$BEST_COUNT" -eq 0 ]; then
+        echo "[Retest] No actionable targets found, using fallback plan"
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.retest-plan-skip
+      else
+        rm -f {{Output}}/ai-analysis/.retest-plan-skip 2>/dev/null || true
+      fi
+
+  - name: ai-generate-retest-plan
+    type: agent
+    pre_condition: '{{enableRetestPlanning}} && !file_exists("{{Output}}/ai-analysis/.retest-plan-skip")'
+    max_iterations: 4
+    timeout: 600
+    on_error:
+      - action: continue
+    system_prompt: |
+      你是一个实战渗透测试负责人，要把扫描结果转成可执行的复测计划。
+
+      输出要求：
+      1. 先写简短分析，说明为什么这些目标值得复测
+      2. 然后输出一个 JSON 代码块
+
+      JSON 格式：
+      ```json
+      {
+        "summary": {
+          "recommended_flow": "web-classic",
+          "priority": "high",
+          "total_targets": 2,
+          "objective": "复测已确认漏洞并验证可利用链"
+        },
+        "targets": [
+          {
+            "target": "https://api.example.com/login",
+            "priority": "P1",
+            "reason": "已确认注入点，且属于攻击链入口",
+            "retest_actions": ["重复验证", "补充 payload", "权限边界检查"],
+            "recommended_modules": ["nuclei", "httpx"],
+            "workflow": "web-classic"
+          }
+        ],
+        "manual_checks": [
+          {
+            "title": "认证绕过",
+            "target": "https://api.example.com/login",
+            "reason": "高价值认证面"
+          }
+        ],
+        "automation_queue": [
+          {
+            "workflow": "web-classic",
+            "target": "https://api.example.com/login",
+            "priority": "high",
+            "reason": "confirmed + chain entry"
+          }
+        ]
+      }
+      ```
+
+      约束：
+      - target 字段必须是具体 URL 或主机
+      - 只输出和当前数据直接相关的条目
+      - 优先选择 confirmed URL、攻击链入口和最佳路径目标
+    query: |
+      为 {{Target}} 生成复测计划。
+
+      先读取 {{Output}}/ai-analysis/.input/retest-context.json 获取上下文。
+      然后按需读取里面列出的文件，结合 validated findings、attack chain、path planning、semantic search 和 ai decision，输出复测计划。
+
+      最终输出：
+      1. 简短分析
+      2. JSON 代码块
+    agent_tools:
+      - preset: read_file
+      - preset: file_exists
+      - preset: save_content
+    exports:
+      retest_plan_raw: "{{agent_content}}"
+
+  - name: save-retest-plan
+    type: bash
+    pre_condition: "{{enableRetestPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ -f "{{Output}}/ai-analysis/.retest-plan-skip" ]; then
+        jq -n \
+          --arg recommended_flow "{{retestFlow}}" \
+          --arg priority "{{retestPriority}}" \
+          '{
+            summary: {
+              recommended_flow: $recommended_flow,
+              priority: $priority,
+              total_targets: 0,
+              objective: "No actionable retest targets"
+            },
+            targets: [],
+            manual_checks: [],
+            automation_queue: []
+          }' > {{retestPlanOutput}}
+        exit 0
+      fi
+
+      RAW_FILE="{{Output}}/ai-analysis/.retest-plan-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/.retest-plan-json-{{TargetSpace}}.json"
+      FALLBACK_TARGETS="{{Output}}/ai-analysis/.retest-plan-fallback-targets-{{TargetSpace}}.txt"
+
+      cat > "$RAW_FILE" << 'AIEOF'
+      {{retest_plan_raw}}
+      AIEOF
+
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
+
+      if [ ! -s "$JSON_FILE" ]; then
+        sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
+      fi
+
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
+        jq \
+          --arg recommended_flow "{{retestFlow}}" \
+          --arg priority "{{retestPriority}}" \
+          '
+            .summary = ((.summary // {}) + {
+              recommended_flow: (.summary.recommended_flow // $recommended_flow),
+              priority: (.summary.priority // $priority),
+              total_targets: (.summary.total_targets // 0),
+              objective: (.summary.objective // "Retest plan generated")
+            })
+            | .targets = (.targets // [])
+            | .manual_checks = (.manual_checks // [])
+            | .automation_queue = (.automation_queue // [])
+          ' "$JSON_FILE" > {{retestPlanOutput}}
+      else
+        {
+          head -20 "{{confirmedUrlsFile}}" 2>/dev/null || true
+          head -10 "{{entryPointsFile}}" 2>/dev/null || true
+          head -10 "{{bestPathTargetsFile}}" 2>/dev/null || true
+        } | awk 'NF && !seen[$0]++' > "$FALLBACK_TARGETS" || true
+
+        FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
+        jq -n \
+          --arg recommended_flow "{{retestFlow}}" \
+          --arg priority "{{retestPriority}}" \
+          --argjson fallback_targets "$FALLBACK_JSON" \
+          '{
+            summary: {
+              recommended_flow: $recommended_flow,
+              priority: $priority,
+              total_targets: ($fallback_targets | length),
+              objective: (if ($fallback_targets | length) > 0 then "Fallback retest plan from confirmed URLs and attack-path signals" else "Retest plan generation fallback" end)
+            },
+            targets: [
+              $fallback_targets[] | {
+                target: .,
+                priority: "P1",
+                reason: "fallback target derived from confirmed URLs / attack-chain / best-path outputs",
+                retest_actions: ["重复验证", "补充 payload", "权限边界检查"],
+                recommended_modules: ["httpx", "nuclei"],
+                workflow: $recommended_flow
+              }
+            ],
+            manual_checks: [
+              $fallback_targets[0:5][] | {
+                title: "Manual verification",
+                target: .,
+                reason: "fallback review due missing structured AI plan"
+              }
+            ],
+            automation_queue: [
+              $fallback_targets[] | {
+                workflow: $recommended_flow,
+                target: .,
+                priority: $priority,
+                reason: "fallback retest queue target"
+              }
+            ]
+          }' > {{retestPlanOutput}}
+      fi
+
+      jq \
+        --arg recommended_flow "{{retestFlow}}" \
+        --arg priority "{{retestPriority}}" \
+        '
+          .summary = ((.summary // {}) + {
+            recommended_flow: (.summary.recommended_flow // $recommended_flow),
+            priority: (.summary.priority // $priority),
+            total_targets: (.summary.total_targets // 0),
+            objective: (.summary.objective // "Retest plan generation fallback")
+          })
+          | .targets = (.targets // [])
+          | .manual_checks = (.manual_checks // [])
+          | .automation_queue = (.automation_queue // [])
+        ' {{retestPlanOutput}} > {{retestPlanOutput}}.tmp 2>/dev/null && mv {{retestPlanOutput}}.tmp {{retestPlanOutput}} || true
+
+      rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_TARGETS" 2>/dev/null || true
+
+  - name: extract-retest-targets
+    type: bash
+    pre_condition: "{{enableRetestPlanning}}"
+    command: |
+      jq -r '
+        [
+          .targets[]?.target,
+          .automation_queue[]?.target
+        ] | map(select(. != null and . != "")) | .[]
+      ' {{retestPlanOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{retestTargetsFile}} || true
+
+      TARGET_COUNT=$(wc -l < {{retestTargetsFile}} 2>/dev/null || echo 0)
+      jq --argjson total "$TARGET_COUNT" '.summary.total_targets = $total' {{retestPlanOutput}} > {{retestPlanOutput}}.tmp 2>/dev/null && mv {{retestPlanOutput}}.tmp {{retestPlanOutput}} || true
+      echo "[Retest] Extracted $TARGET_COUNT targets"
+
+  - name: render-retest-plan-markdown
+    type: bash
+    pre_condition: "{{enableRetestPlanning}}"
+    command: |
+      {
+        echo "# AI 复测计划"
+        echo "## 目标: {{Target}}"
+        echo ""
+        jq -r '.summary | "- Recommended flow: \(.recommended_flow // "web-classic")\n- Priority: \(.priority // "high")\n- Total targets: \(.total_targets // 0)\n- Objective: \(.objective // "n/a")"' {{retestPlanOutput}} 2>/dev/null || true
+        echo ""
+        echo "## Targets"
+        jq -r '.targets[]? | "- [\(.priority // "P2")] \(.target // "unknown") :: \(.reason // "n/a")"' {{retestPlanOutput}} 2>/dev/null || echo "- none"
+        echo ""
+        echo "## Manual Checks"
+        jq -r '.manual_checks[]? | "- \(.title // "manual-check") :: \(.target // "unknown") :: \(.reason // "n/a")"' {{retestPlanOutput}} 2>/dev/null || echo "- none"
+      } > {{retestPlanMd}}
+
+  - name: log-retest-plan-complete
+    type: function
+    pre_condition: "{{enableRetestPlanning}}"
+    functions:
+      - 'log_info("AI retest planning completed for {{Target}}")'

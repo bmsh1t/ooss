@@ -1,0 +1,67 @@
+---
+title: "Campaigns"
+description: "Group queued runs, rerun failed targets, and queue deep scans"
+---
+
+# Campaigns
+
+Campaigns group multiple queued runs under one shared strategy, role, notes, and optional deep-scan policy.
+
+## List Campaigns
+
+```bash
+curl http://localhost:8002/osm/api/campaigns \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Create a Campaign
+
+```bash
+curl -X POST http://localhost:8002/osm/api/campaigns \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "wide-recon-batch",
+    "flow": "general",
+    "targets": ["example.com", "api.example.com"],
+    "priority": "high",
+    "auto_deep_scan": true,
+    "deep_scan_workflow": "superdomain-extensive-ai-hybrid",
+    "high_risk_severities": ["critical", "high"]
+  }'
+```
+
+Important request fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Campaign name |
+| `flow` / `module` | string | Workflow to queue |
+| `targets` | array | Inline targets |
+| `target_file` | string | File path containing targets |
+| `priority` | string | `low`, `normal`, `high`, `critical` |
+| `auto_deep_scan` | bool | Automatically queue a deep-scan run when high-risk findings appear |
+| `deep_scan_workflow` | string | Follow-up workflow name |
+| `deep_scan_workflow_kind` | string | `flow` or `module` |
+| `high_risk_severities` | array | Severities that trigger deep scan |
+
+## Get Campaign Status
+
+```bash
+curl http://localhost:8002/osm/api/campaigns/<campaign-id> \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Rerun Failed Targets
+
+```bash
+curl -X POST http://localhost:8002/osm/api/campaigns/<campaign-id>/rerun-failed \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Queue Deep Scan for High-Risk Targets
+
+```bash
+curl -X POST http://localhost:8002/osm/api/campaigns/<campaign-id>/deep-scan \
+  -H "Authorization: Bearer $TOKEN"
+```

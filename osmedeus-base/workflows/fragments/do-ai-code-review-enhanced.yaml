@@ -3,7 +3,7 @@
 # =============================================================================
 # 功能：
 # - 使用新增的 12 个安全 preset 工具
-# - 支持多种 Agent (iflow/claude-code/codex)
+# - 支持多种 Agent (claude-code/codex/opencode/gemini)
 # - 串行仓库扫描
 # - 增强 Memory 持久化
 # =============================================================================
@@ -27,7 +27,7 @@ params:
     type: bool
     default: true
   - name: codeReviewAgent
-    default: "iflow"
+    default: "claude-code"
   - name: maxReposToScan
     type: integer
     default: 5

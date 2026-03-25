@@ -36,7 +36,10 @@ See [Authentication](authentication.mdx) for details.
 | [Workspaces](workspaces.mdx) | List and manage workspaces |
 | [Artifacts](artifacts.mdx) | List and download output artifacts |
 | [Assets](assets.mdx) | View discovered assets |
+| [Knowledge Base](knowledge.mdx) | Ingest documents, search stored chunks, and auto-learn workspace findings |
+| [Campaigns](campaigns.mdx) | Group queued runs, rerun failed targets, and queue deep scans |
 | [Vulnerabilities](vulnerabilities.mdx) | View and manage vulnerabilities |
+| [Attack Chains](attack-chains.mdx) | Import and query AI attack-chain workbench reports |
 | [Event Logs](event-logs.mdx) | View execution event logs |
 | [Step Results](steps.mdx) | Query step execution results |
 | [Functions](functions.mdx) | Execute and list utility functions |
@@ -70,4 +73,34 @@ curl -X POST http://localhost:8002/osm/api/runs \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"flow": "subdomain-enum", "target": "example.com"}'
+
+# Ingest local documents into the workspace knowledge base
+curl -X POST http://localhost:8002/osm/api/knowledge/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/data/kb","workspace":"example.com","recursive":true}'
 ```
+
+## Knowledge Base Notes
+
+The local knowledge base can ingest and reuse:
+
+- `txt`, `md`, `markdown`, `log`
+- `yaml`, `yml`, `csv`
+- `json`, `jsonl`
+- `html`, `htm`
+- `epub`
+- `doc`, `docx`
+- `pdf`
+- `pptx`, `xlsx`
+
+Dependencies for richer document ingestion:
+
+- `docling` for `pdf`, `docx`, `pptx`, `xlsx`
+- `antiword` for legacy `.doc`
+- `python3` for the semantic-search helper scripts used by the AI workflow family
+
+Optional vector-search dependencies:
+
+- `JINA_API_KEY` or `OPENAI_API_KEY` to enable embeddings-backed retrieval
+- `chromadb` when running the Chroma hybrid-search fragment directly

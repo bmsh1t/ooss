@@ -101,9 +101,11 @@ osmedeus worker queue new -f general -t example.com   # Queue for later
 osmedeus worker queue run --concurrency 5              # Process queue
 
 # Local knowledge base
-osmedeus kb ingest -p ./notes -w example.com --recursive
-osmedeus kb search -q "jwt bypass" -w example.com
+osmedeus kb ingest --path ./notes -w example.com --recursive
+osmedeus kb search --query "jwt bypass" -w example.com
+osmedeus kb docs -w example.com
 osmedeus kb learn -w example.com
+osmedeus kb export -w example.com --output ./knowledge-index.txt
 
 # AI-heavy recon workflows
 osmedeus run -f superdomain-extensive-stable -t example.com
@@ -123,6 +125,90 @@ osmedeus agent --list
 # Show all usage examples
 osmedeus --usage-example
 ```
+
+## Knowledge Base and Vector Workflow Usage
+
+You can now extend the local knowledge base with your own documents and have the `superdomain-extensive-ai-{stable,hybrid,optimized,lite}` workflow family consume that knowledge during semantic search.
+
+### Supported document types
+
+- `txt`, `md`, `markdown`, `log`
+- `yaml`, `yml`, `csv`
+- `json`, `jsonl`
+- `html`, `htm`
+- `epub`
+- `doc`, `docx`
+- `pdf`
+- `pptx`, `xlsx`
+
+### Local dependencies
+
+- `docling`
+  - Required for `pdf`, `docx`, `pptx`, and `xlsx` ingestion
+- `antiword`
+  - Required for legacy `.doc` ingestion
+- `python3`
+  - Required by the semantic-search helper scripts already used by the AI workflow family
+
+### Optional dependencies
+
+- `JINA_API_KEY` or `OPENAI_API_KEY`
+  - Enables vector embeddings during `ai-semantic-search`
+- `chromadb`
+  - Needed only when you run the `ai-semantic-search-hybrid` fragment directly; the fragment will try to install it if missing
+
+### CLI workflow
+
+1. Ingest your documents into a workspace-scoped knowledge base:
+
+```bash
+osmedeus kb ingest --path /data/kb/books --workspace example.com --recursive
+osmedeus kb ingest --path /data/kb/playbook.pdf --workspace example.com
+```
+
+2. Verify the content is searchable:
+
+```bash
+osmedeus kb docs -w example.com
+osmedeus kb search --query "authentication bypass" -w example.com
+```
+
+3. Optionally synthesize scan findings back into the same workspace knowledge:
+
+```bash
+osmedeus kb learn -w example.com --include-ai
+```
+
+4. Run an AI workflow that will automatically use the same knowledge workspace during semantic search:
+
+```bash
+osmedeus run -f superdomain-extensive-ai-hybrid -t example.com
+```
+
+### Using a custom knowledge workspace
+
+By default, the AI semantic-search modules use `knowledgeWorkspace={{TargetSpace}}`. If you want to reuse a shared document corpus across different targets, pass a params file:
+
+```yaml
+# params.yaml
+knowledgeWorkspace: shared-websec
+includeKnowledgeBase: true
+maxKnowledgeChunks: 400
+```
+
+```bash
+osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
+```
+
+### What happens inside the workflow
+
+- `kb export` turns stored knowledge chunks into a line-oriented corpus for retrieval
+- `ai-semantic-search` now:
+  - performs direct `kb search` hits against the stored knowledge base
+  - exports knowledge chunks into the semantic index
+  - includes those chunks in vector embedding generation when embeddings are configured
+  - feeds both direct knowledge hits and vector recall candidates into the downstream semantic-search agent
+- `ai-knowledge-autolearn` still runs after reporting so future runs can reuse newly learned findings
 
 ## Recent Backend Additions
 
