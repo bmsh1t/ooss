@@ -71,7 +71,7 @@
 
 ### 3. Campaign Batch Operations
 
-- Current campaign layer is backend v1, focused on stable API capability.
+- Current campaign layer is backend v2-ish, with API/CLI target aggregation and attack-chain-aware deep-scan selection.
 - Not done yet:
   - richer campaign risk distribution views
   - campaign-level report/export
@@ -83,8 +83,7 @@
 - Current lifecycle center is backend v2-ish for storage and queue orchestration.
 - Not done yet:
   - less heuristic retest closure rules for edge cases
-  - stronger persistent linkage and reverse indexes between vulnerabilities, reports, and attack chains
-  - richer retest history timeline and evidence diff view
+  - richer evidence diff view on top of the existing evidence timeline
   - workspace-level duplicate cluster review tools
 
 ### 5. Attack Chain Workbench
@@ -92,7 +91,6 @@
 - Current attack-chain workbench is backend/API v2-ish.
 - Not done yet:
   - frontend or visual workbench page
-  - persistent backfill linking from attack chains back to vulnerabilities/assets
   - workspace-level attack-chain dashboard
   - campaign-aware attack-chain queue analytics
 
@@ -100,7 +98,6 @@
 
 - Root `README.md` and `plan.md` have been updated.
 - Not done yet:
-  - `docs/api/` entries for newly added campaign / vulnerability / attack-chain APIs
   - usage examples for new CLI/API capabilities
   - workflow authoring notes for attack-chain persistence and knowledge auto-learning
 

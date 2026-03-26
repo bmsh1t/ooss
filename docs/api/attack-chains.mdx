@@ -7,6 +7,12 @@ description: "Import and query attack-chain workbench reports"
 
 Attack-chain reports store AI-generated attack paths, critical paths, and related metadata in a queryable workbench API.
 
+When an attack-chain report is imported, Osmedeus now also tries to backfill matching vulnerability records in the same workspace with:
+
+- `attack_chain_ref`
+- merged `report_refs`
+- merged `related_assets`
+
 ## List Attack Chain Reports
 
 ```bash
@@ -51,3 +57,35 @@ curl -X POST http://localhost:8002/osm/api/attack-chains/import \
 | `text_path` | string | No | Plain-text report file path |
 
 The imported JSON is normalized into a persistent report that can be queried later by the workbench UI/API.
+
+**Response notes**
+
+- `linked_vulnerability_count` reports how many existing vulnerability rows were updated with reverse links during import.
+
+## Queue Retest from an Attack Chain
+
+```bash
+curl -X POST http://localhost:8002/osm/api/attack-chains/12/queue-retest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "module": "retest-module",
+    "verified_only": true
+  }'
+```
+
+This queues retest runs for linked vulnerabilities. The selected vulnerability records are also updated with the chosen `attack_chain_ref`.
+
+## Queue Deep Scan from an Attack Chain
+
+```bash
+curl -X POST http://localhost:8002/osm/api/attack-chains/12/queue-deep-scan \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "flow": "web-analysis",
+    "verified_only": true
+  }'
+```
+
+`verified_only=true` keeps detail reporting strict, but deep-scan queueing will still treat `retest` as operationally eligible after a prior retest queue action.

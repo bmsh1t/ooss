@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +12,50 @@ import (
 	"github.com/google/uuid"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
+	"github.com/uptrace/bun"
 )
+
+type vulnerabilityRunSummary struct {
+	RunUUID      string     `json:"run_uuid"`
+	WorkflowName string     `json:"workflow_name,omitempty"`
+	WorkflowKind string     `json:"workflow_kind,omitempty"`
+	Status       string     `json:"status,omitempty"`
+	TriggerType  string     `json:"trigger_type,omitempty"`
+	Target       string     `json:"target,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
+type vulnerabilityAssetRecord struct {
+	ID         int64     `json:"id"`
+	AssetValue string    `json:"asset_value"`
+	URL        string    `json:"url,omitempty"`
+	AssetType  string    `json:"asset_type,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type vulnerabilityAttackChainSummary struct {
+	ReportID    int64   `json:"report_id"`
+	ChainID     string  `json:"chain_id"`
+	ChainName   string  `json:"chain_name,omitempty"`
+	Target      string  `json:"target,omitempty"`
+	RunUUID     string  `json:"run_uuid,omitempty"`
+	SourcePath  string  `json:"source_path,omitempty"`
+	MatchedBy   string  `json:"matched_by,omitempty"`
+	Impact      string  `json:"impact,omitempty"`
+	Difficulty  string  `json:"difficulty,omitempty"`
+	Probability float64 `json:"success_probability,omitempty"`
+}
+
+type vulnerabilityDetailResponse struct {
+	database.Vulnerability
+	EvidenceTimeline    []database.VulnerabilityEvidence  `json:"evidence_timeline,omitempty"`
+	RelatedRuns         []vulnerabilityRunSummary         `json:"related_runs,omitempty"`
+	RelatedAssetRecords []vulnerabilityAssetRecord        `json:"related_asset_records,omitempty"`
+	RelatedAttackChains []vulnerabilityAttackChainSummary `json:"related_attack_chains,omitempty"`
+}
 
 // ListVulnerabilities handles listing vulnerabilities with pagination and filtering
 // @Summary List vulnerabilities
@@ -115,8 +159,10 @@ func GetVulnerability(cfg *config.Config) fiber.Handler {
 			})
 		}
 
+		detail := buildVulnerabilityDetail(ctx, vuln)
+
 		return c.JSON(fiber.Map{
-			"data": vuln,
+			"data": detail,
 		})
 	}
 }
@@ -696,4 +742,265 @@ func normalizeRetestPriority(priority string) string {
 	default:
 		return "high"
 	}
+}
+
+func buildVulnerabilityDetail(ctx context.Context, vuln *database.Vulnerability) vulnerabilityDetailResponse {
+	detail := vulnerabilityDetailResponse{
+		Vulnerability: *vuln,
+	}
+	detail.EvidenceTimeline = buildVulnerabilityEvidenceTimeline(vuln)
+	detail.RelatedRuns = findVulnerabilityRelatedRuns(ctx, vuln, detail.EvidenceTimeline)
+	detail.RelatedAssetRecords = findVulnerabilityRelatedAssets(ctx, vuln, detail.EvidenceTimeline)
+	detail.RelatedAttackChains = findVulnerabilityRelatedAttackChains(ctx, vuln, detail.EvidenceTimeline)
+	return detail
+}
+
+func buildVulnerabilityEvidenceTimeline(vuln *database.Vulnerability) []database.VulnerabilityEvidence {
+	history := database.ParseVulnerabilityEvidenceHistory(vuln.EvidenceHistory)
+	if len(history) == 0 {
+		history = append(history, database.VulnerabilityEvidence{
+			ObservedAt:     maxTime(vuln.LastSeenAt, vuln.UpdatedAt, vuln.CreatedAt),
+			SourceRunUUID:  strings.TrimSpace(vuln.SourceRunUUID),
+			Severity:       strings.TrimSpace(vuln.Severity),
+			Confidence:     strings.TrimSpace(vuln.Confidence),
+			VulnStatus:     strings.TrimSpace(vuln.VulnStatus),
+			AssetValue:     strings.TrimSpace(vuln.AssetValue),
+			ReportRefs:     append([]string(nil), vuln.ReportRefs...),
+			AttackChainRef: strings.TrimSpace(vuln.AttackChainRef),
+		})
+	}
+	sort.Slice(history, func(i, j int) bool {
+		return history[i].ObservedAt.Before(history[j].ObservedAt)
+	})
+	return history
+}
+
+func findVulnerabilityRelatedRuns(ctx context.Context, vuln *database.Vulnerability, history []database.VulnerabilityEvidence) []vulnerabilityRunSummary {
+	runUUIDs := make([]string, 0, len(history)+2)
+	runUUIDs = append(runUUIDs, vuln.SourceRunUUID, vuln.RetestRunUUID)
+	for _, item := range history {
+		runUUIDs = append(runUUIDs, item.SourceRunUUID)
+	}
+
+	seen := make(map[string]struct{})
+	result := make([]vulnerabilityRunSummary, 0)
+	for _, runUUID := range runUUIDs {
+		runUUID = strings.TrimSpace(runUUID)
+		if runUUID == "" {
+			continue
+		}
+		if _, ok := seen[runUUID]; ok {
+			continue
+		}
+		seen[runUUID] = struct{}{}
+
+		run, err := database.GetRunByID(ctx, runUUID, false, false)
+		if err != nil || run == nil {
+			continue
+		}
+		result = append(result, vulnerabilityRunSummary{
+			RunUUID:      run.RunUUID,
+			WorkflowName: run.WorkflowName,
+			WorkflowKind: run.WorkflowKind,
+			Status:       run.Status,
+			TriggerType:  run.TriggerType,
+			Target:       run.Target,
+			CreatedAt:    run.CreatedAt,
+			StartedAt:    run.StartedAt,
+			CompletedAt:  run.CompletedAt,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	return result
+}
+
+func findVulnerabilityRelatedAssets(ctx context.Context, vuln *database.Vulnerability, history []database.VulnerabilityEvidence) []vulnerabilityAssetRecord {
+	db := database.GetDB()
+	if db == nil {
+		return nil
+	}
+
+	candidates := make([]string, 0, len(vuln.RelatedAssets)+len(history)+1)
+	candidates = append(candidates, vuln.AssetValue)
+	candidates = append(candidates, vuln.RelatedAssets...)
+	for _, item := range history {
+		candidates = append(candidates, item.AssetValue)
+	}
+	candidates = dedupeNonEmptyStrings(candidates)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	seen := make(map[int64]struct{})
+	result := make([]vulnerabilityAssetRecord, 0)
+	for _, candidate := range candidates {
+		var assets []database.Asset
+		if err := db.NewSelect().
+			Model(&assets).
+			Column("id", "asset_value", "url", "asset_type", "source", "updated_at").
+			Where("workspace = ?", vuln.Workspace).
+			WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+				return q.
+					WhereOr("asset_value = ?", candidate).
+					WhereOr("url = ?", candidate).
+					WhereOr("external_url = ?", candidate)
+			}).
+			Order("updated_at DESC").
+			Limit(10).
+			Scan(ctx); err != nil {
+			continue
+		}
+		for _, asset := range assets {
+			if _, ok := seen[asset.ID]; ok {
+				continue
+			}
+			seen[asset.ID] = struct{}{}
+			result = append(result, vulnerabilityAssetRecord{
+				ID:         asset.ID,
+				AssetValue: asset.AssetValue,
+				URL:        asset.URL,
+				AssetType:  asset.AssetType,
+				Source:     asset.Source,
+				UpdatedAt:  asset.UpdatedAt,
+			})
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].UpdatedAt.After(result[j].UpdatedAt)
+	})
+	return result
+}
+
+func findVulnerabilityRelatedAttackChains(ctx context.Context, vuln *database.Vulnerability, history []database.VulnerabilityEvidence) []vulnerabilityAttackChainSummary {
+	db := database.GetDB()
+	if db == nil || strings.TrimSpace(vuln.Workspace) == "" {
+		return nil
+	}
+
+	var reports []database.AttackChainReport
+	if err := db.NewSelect().
+		Model(&reports).
+		Where("workspace = ?", vuln.Workspace).
+		Order("updated_at DESC").
+		Limit(50).
+		Scan(ctx); err != nil {
+		return nil
+	}
+
+	result := make([]vulnerabilityAttackChainSummary, 0)
+	seen := make(map[string]struct{})
+	for _, report := range reports {
+		for _, chain := range decodeAttackChains(report.AttackChainsJSON) {
+			matchedBy := matchVulnerabilityToAttackChain(vuln, history, report.ID, chain)
+			if matchedBy == "" {
+				continue
+			}
+			key := strconv.FormatInt(report.ID, 10) + ":" + chain.ChainID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, vulnerabilityAttackChainSummary{
+				ReportID:    report.ID,
+				ChainID:     chain.ChainID,
+				ChainName:   chain.ChainName,
+				Target:      report.Target,
+				RunUUID:     report.RunUUID,
+				SourcePath:  report.SourcePath,
+				MatchedBy:   matchedBy,
+				Impact:      chain.Impact,
+				Difficulty:  chain.Difficulty,
+				Probability: chain.SuccessProbability,
+			})
+		}
+	}
+	return result
+}
+
+func matchVulnerabilityToAttackChain(vuln *database.Vulnerability, history []database.VulnerabilityEvidence, reportID int64, chain attackChainItem) string {
+	if matchesAttackChainReference(vuln.AttackChainRef, reportID, chain.ChainID) {
+		return "attack_chain_ref"
+	}
+
+	urlCandidates := make([]string, 0, len(vuln.RelatedAssets)+len(history)+1)
+	urlCandidates = append(urlCandidates, vuln.AssetValue)
+	urlCandidates = append(urlCandidates, vuln.RelatedAssets...)
+	for _, item := range history {
+		urlCandidates = append(urlCandidates, item.AssetValue)
+	}
+	if url := strings.TrimSpace(chain.EntryPoint.URL); url != "" {
+		for _, candidate := range dedupeNonEmptyStrings(urlCandidates) {
+			if strings.Contains(normalizeURLMatchValue(candidate), normalizeURLMatchValue(url)) || strings.Contains(normalizeURLMatchValue(url), normalizeURLMatchValue(candidate)) {
+				return "entry_point_url"
+			}
+		}
+	}
+
+	nameCandidates := dedupeNonEmptyStrings([]string{
+		vuln.VulnTitle,
+		vuln.VulnInfo,
+	})
+	entryName := strings.ToLower(strings.TrimSpace(chain.EntryPoint.Vulnerability))
+	if entryName != "" {
+		for _, candidate := range nameCandidates {
+			normalized := strings.ToLower(strings.TrimSpace(candidate))
+			if normalized == "" {
+				continue
+			}
+			if strings.Contains(normalized, entryName) || strings.Contains(entryName, normalized) {
+				return "entry_point_vulnerability"
+			}
+		}
+	}
+
+	return ""
+}
+
+func matchesAttackChainReference(ref string, reportID int64, chainID string) bool {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if ref == "" {
+		return false
+	}
+	return strings.Contains(ref, strings.ToLower(strings.TrimSpace(chainID))) &&
+		strings.Contains(ref, strconv.FormatInt(reportID, 10))
+}
+
+func normalizeURLMatchValue(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSuffix(value, "/")
+	return value
+}
+
+func dedupeNonEmptyStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func maxTime(values ...time.Time) time.Time {
+	var result time.Time
+	for _, value := range values {
+		if value.IsZero() {
+			continue
+		}
+		if result.IsZero() || value.After(result) {
+			result = value
+		}
+	}
+	return result
 }

@@ -4162,6 +4162,11 @@ func unmarshalVulnerabilityEvidenceHistory(raw string) []VulnerabilityEvidence {
 	return history
 }
 
+// ParseVulnerabilityEvidenceHistory decodes stored evidence history JSON.
+func ParseVulnerabilityEvidenceHistory(raw string) []VulnerabilityEvidence {
+	return unmarshalVulnerabilityEvidenceHistory(raw)
+}
+
 func marshalVulnerabilityEvidenceHistory(history []VulnerabilityEvidence) string {
 	if len(history) == 0 {
 		return "[]"
@@ -4371,51 +4376,75 @@ func UpdateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) error {
 	if db == nil {
 		return fmt.Errorf("database not connected")
 	}
-
-	vuln.UpdatedAt = time.Now()
-	_, err := db.NewUpdate().
-		Model(vuln).
-		Column(
-			"vuln_info",
-			"vuln_title",
-			"vuln_desc",
-			"vuln_poc",
-			"severity",
-			"confidence",
-			"asset_type",
-			"asset_value",
-			"tags",
-			"detail_http_request",
-			"detail_http_response",
-			"raw_vuln_json",
-			"vuln_status",
-			"source_run_uuid",
-			"ai_verdict",
-			"ai_summary",
-			"analyst_verdict",
-			"analyst_notes",
-			"retest_status",
-			"retest_run_uuid",
-			"attack_chain_ref",
-			"related_assets",
-			"report_refs",
-			"verified_at",
-			"closed_at",
-			"updated_at",
-		).
-		WherePK().
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to update vulnerability: %w", err)
+	if vuln == nil {
+		return fmt.Errorf("vulnerability is required")
 	}
 
-	return nil
+	now := time.Now()
+	return Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var existing Vulnerability
+		if err := tx.NewSelect().
+			Model(&existing).
+			Where("id = ?", vuln.ID).
+			Limit(1).
+			Scan(ctx); err != nil {
+			return fmt.Errorf("vulnerability not found: %w", err)
+		}
+
+		prepared := prepareVulnerabilityRecordForWrite(&existing, vuln, now)
+		if _, err := tx.NewUpdate().
+			Model(prepared).
+			Column(
+				"workspace",
+				"vuln_info",
+				"vuln_title",
+				"vuln_desc",
+				"vuln_poc",
+				"severity",
+				"confidence",
+				"asset_type",
+				"asset_value",
+				"tags",
+				"detail_http_request",
+				"detail_http_response",
+				"raw_vuln_json",
+				"fingerprint_key",
+				"vuln_status",
+				"source_run_uuid",
+				"ai_verdict",
+				"ai_summary",
+				"analyst_verdict",
+				"analyst_notes",
+				"retest_status",
+				"retest_run_uuid",
+				"attack_chain_ref",
+				"related_assets",
+				"report_refs",
+				"evidence_version",
+				"evidence_history_json",
+				"first_seen_at",
+				"verified_at",
+				"closed_at",
+				"updated_at",
+				"last_seen_at",
+			).
+			WherePK().
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to update vulnerability: %w", err)
+		}
+
+		*vuln = *prepared
+		return nil
+	})
 }
 
 // QueueVulnerabilityRetest atomically updates vulnerability retest metadata and inserts the queued run.
 func QueueVulnerabilityRetest(ctx context.Context, vuln *Vulnerability, run *Run) error {
 	if db == nil {
 		return fmt.Errorf("database not connected")
+	}
+	if vuln == nil || run == nil {
+		return fmt.Errorf("vulnerability and run are required")
 	}
 
 	now := time.Now()
@@ -4439,9 +4468,11 @@ func QueueVulnerabilityRetest(ctx context.Context, vuln *Vulnerability, run *Run
 			return ErrVulnerabilityRetestInProgress
 		}
 
+		prepared := prepareVulnerabilityRecordForWrite(&current, vuln, now)
 		if _, err := tx.NewUpdate().
-			Model(vuln).
+			Model(prepared).
 			Column(
+				"workspace",
 				"vuln_info",
 				"vuln_title",
 				"vuln_desc",
@@ -4454,6 +4485,7 @@ func QueueVulnerabilityRetest(ctx context.Context, vuln *Vulnerability, run *Run
 				"detail_http_request",
 				"detail_http_response",
 				"raw_vuln_json",
+				"fingerprint_key",
 				"vuln_status",
 				"source_run_uuid",
 				"ai_verdict",
@@ -4465,14 +4497,19 @@ func QueueVulnerabilityRetest(ctx context.Context, vuln *Vulnerability, run *Run
 				"attack_chain_ref",
 				"related_assets",
 				"report_refs",
+				"evidence_version",
+				"evidence_history_json",
+				"first_seen_at",
 				"verified_at",
 				"closed_at",
 				"updated_at",
+				"last_seen_at",
 			).
 			WherePK().
 			Exec(ctx); err != nil {
 			return fmt.Errorf("failed to update vulnerability retest state: %w", err)
 		}
+		*vuln = *prepared
 
 		if _, err := tx.NewInsert().Model(run).Exec(ctx); err != nil {
 			return fmt.Errorf("failed to create retest run: %w", err)
@@ -4584,6 +4621,45 @@ func appendRetestSummary(existing, summary string) string {
 		return existing
 	}
 	return existing + "\n" + summary
+}
+
+func prepareVulnerabilityRecordForWrite(existing, incoming *Vulnerability, now time.Time) *Vulnerability {
+	prepared := *incoming
+	prepared.Workspace = strings.TrimSpace(firstNonEmpty(incoming.Workspace, existing.Workspace))
+	prepared.CreatedAt = existing.CreatedAt
+	prepared.FirstSeenAt = minNonZeroTime(existing.FirstSeenAt, incoming.FirstSeenAt, existing.CreatedAt, incoming.CreatedAt, now)
+	prepared.UpdatedAt = now
+	prepared.FingerprintKey = buildVulnerabilityFingerprint(&prepared)
+
+	if prepared.VerifiedAt == nil && existing.VerifiedAt != nil {
+		prepared.VerifiedAt = existing.VerifiedAt
+	}
+	if prepared.ClosedAt == nil && existing.ClosedAt != nil && strings.EqualFold(strings.TrimSpace(prepared.VulnStatus), "closed") {
+		prepared.ClosedAt = existing.ClosedAt
+	}
+	if !strings.EqualFold(strings.TrimSpace(prepared.VulnStatus), "closed") {
+		prepared.ClosedAt = nil
+	}
+
+	history := unmarshalVulnerabilityEvidenceHistory(existing.EvidenceHistory)
+	if len(history) == 0 {
+		history = append(history, buildVulnerabilityEvidence(existing, maxNonZeroTime(existing.LastSeenAt, existing.UpdatedAt, existing.CreatedAt, now)))
+	}
+
+	evidenceObservedAt := maxNonZeroTime(incoming.LastSeenAt, now)
+	evidence := buildVulnerabilityEvidence(&prepared, evidenceObservedAt)
+	if appendEvidenceIfChanged(&history, evidence) {
+		prepared.EvidenceVersion = maxInt(existing.EvidenceVersion, 1) + 1
+		prepared.LastSeenAt = evidenceObservedAt
+	} else {
+		prepared.EvidenceVersion = maxInt(existing.EvidenceVersion, 1)
+		prepared.LastSeenAt = maxNonZeroTime(incoming.LastSeenAt, existing.LastSeenAt, existing.UpdatedAt, existing.CreatedAt)
+	}
+	if prepared.LastSeenAt.IsZero() {
+		prepared.LastSeenAt = now
+	}
+	prepared.EvidenceHistory = marshalVulnerabilityEvidenceHistory(history)
+	return &prepared
 }
 
 // DeleteVulnerabilityByID deletes a vulnerability by ID

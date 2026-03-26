@@ -533,22 +533,32 @@ type campaignJobProgress struct {
 }
 
 type campaignTargetStatusCLI struct {
-	Target         string         `json:"target"`
-	Workspace      string         `json:"workspace"`
-	Status         string         `json:"status"`
-	RiskLevel      string         `json:"risk_level"`
-	VulnSummary    map[string]int `json:"vuln_summary"`
-	DeepScanQueued bool           `json:"deep_scan_queued"`
-	RunUUID        string         `json:"run_uuid"`
+	Target             string                                `json:"target"`
+	Workspace          string                                `json:"workspace"`
+	Status             string                                `json:"status"`
+	RiskLevel          string                                `json:"risk_level"`
+	VulnSummary        map[string]int                        `json:"vuln_summary"`
+	AttackChainSummary *database.AttackChainWorkspaceSummary `json:"attack_chain_summary,omitempty"`
+	DeepScanQueued     bool                                  `json:"deep_scan_queued"`
+	RunUUID            string                                `json:"run_uuid"`
 }
 
 type campaignStatusResponseCLI struct {
 	Campaign        *database.Campaign        `json:"campaign"`
 	Status          string                    `json:"status"`
 	Progress        campaignJobProgress       `json:"progress"`
+	Summary         campaignSignalSummaryCLI  `json:"summary"`
 	Targets         []campaignTargetStatusCLI `json:"targets"`
 	HighRiskTargets []string                  `json:"high_risk_targets"`
 	Runs            []*database.Run           `json:"runs"`
+}
+
+type campaignSignalSummaryCLI struct {
+	TargetsTotal               int `json:"targets_total"`
+	HighRiskTargets            int `json:"high_risk_targets"`
+	DeepScanQueuedTargets      int `json:"deep_scan_queued_targets"`
+	AttackChainAwareTargets    int `json:"attack_chain_aware_targets"`
+	VerifiedAttackChainTargets int `json:"verified_attack_chain_targets"`
 }
 
 func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Campaign) (*campaignStatusResponseCLI, error) {
@@ -570,7 +580,10 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 	}
 
 	progress := campaignJobProgress{Total: len(latestRuns)}
-	var targets []campaignTargetStatusCLI
+	var (
+		targets []campaignTargetStatusCLI
+		summary campaignSignalSummaryCLI
+	)
 	var highRiskTargets []string
 
 	for _, run := range latestRuns {
@@ -586,21 +599,34 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 		}
 
 		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		riskLevel := deriveCampaignRiskLevelCLI(vulnSummary)
+		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		riskLevel := deriveCampaignRiskLevelCLI(vulnSummary, attackChainSummary)
 		deepScanQueued, _ := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+		summary.TargetsTotal++
+		if deepScanQueued {
+			summary.DeepScanQueuedTargets++
+		}
+		if attackChainSummary != nil && attackChainSummary.ReportCount > 0 {
+			summary.AttackChainAwareTargets++
+		}
+		if attackChainSummary != nil && attackChainSummary.VerifiedHits > 0 {
+			summary.VerifiedAttackChainTargets++
+		}
 		targets = append(targets, campaignTargetStatusCLI{
-			Target:         run.Target,
-			Workspace:      run.Workspace,
-			Status:         run.Status,
-			RiskLevel:      riskLevel,
-			VulnSummary:    vulnSummary,
-			DeepScanQueued: deepScanQueued,
-			RunUUID:        run.RunUUID,
+			Target:             run.Target,
+			Workspace:          run.Workspace,
+			Status:             run.Status,
+			RiskLevel:          riskLevel,
+			VulnSummary:        vulnSummary,
+			AttackChainSummary: attackChainSummary,
+			DeepScanQueued:     deepScanQueued,
+			RunUUID:            run.RunUUID,
 		})
-		if campaignTargetIsHighRiskCLI(campaign, vulnSummary) {
+		if campaignTargetIsHighRiskCLI(campaign, vulnSummary, attackChainSummary) {
 			highRiskTargets = append(highRiskTargets, run.Target)
 		}
 	}
+	summary.HighRiskTargets = len(deduplicateTargets(highRiskTargets))
 
 	status := aggregateCampaignStatusCLI(progress)
 	_ = database.UpdateCampaignStatus(ctx, campaign.ID, status)
@@ -610,17 +636,22 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 		Campaign:        campaign,
 		Status:          status,
 		Progress:        progress,
+		Summary:         summary,
 		Targets:         targets,
 		HighRiskTargets: deduplicateTargets(highRiskTargets),
 		Runs:            runs,
 	}, nil
 }
 
-func deriveCampaignRiskLevelCLI(summary map[string]int) string {
+func deriveCampaignRiskLevelCLI(summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) string {
 	switch {
 	case summary["critical"] > 0:
 		return "critical"
+	case attackChainSummary != nil && attackChainSummary.CriticalChains > 0 && attackChainSummary.VerifiedHits > 0:
+		return "critical"
 	case summary["high"] > 0:
+		return "high"
+	case attackChainSummary != nil && attackChainSummary.HighImpactChains > 0 && attackChainSummary.VerifiedHits > 0:
 		return "high"
 	case summary["medium"] > 0:
 		return "medium"
@@ -631,10 +662,23 @@ func deriveCampaignRiskLevelCLI(summary map[string]int) string {
 	}
 }
 
-func campaignTargetIsHighRiskCLI(campaign *database.Campaign, summary map[string]int) bool {
+func campaignTargetIsHighRiskCLI(campaign *database.Campaign, summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) bool {
 	for _, severity := range normalizeHighRiskSeveritiesCLI(campaign.HighRiskSeverities) {
 		if summary[severity] > 0 {
 			return true
+		}
+		if attackChainSummary == nil || attackChainSummary.VerifiedHits <= 0 {
+			continue
+		}
+		switch severity {
+		case "critical":
+			if attackChainSummary.CriticalChains > 0 {
+				return true
+			}
+		case "high":
+			if attackChainSummary.HighImpactChains > 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -681,7 +725,8 @@ func queueCampaignDeepScanRunsCLI(ctx context.Context, cfg *config.Config, campa
 			continue
 		}
 		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		if !campaignTargetIsHighRiskCLI(campaign, vulnSummary) {
+		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		if !campaignTargetIsHighRiskCLI(campaign, vulnSummary, attackChainSummary) {
 			continue
 		}
 		exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)

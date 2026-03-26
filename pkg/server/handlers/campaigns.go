@@ -36,13 +36,14 @@ type CreateCampaignRequest struct {
 
 // CampaignTargetStatus is an aggregated target-level view for a campaign.
 type CampaignTargetStatus struct {
-	Target         string         `json:"target"`
-	Workspace      string         `json:"workspace"`
-	Status         string         `json:"status"`
-	RiskLevel      string         `json:"risk_level"`
-	VulnSummary    map[string]int `json:"vuln_summary"`
-	DeepScanQueued bool           `json:"deep_scan_queued"`
-	RunUUID        string         `json:"run_uuid"`
+	Target             string                                `json:"target"`
+	Workspace          string                                `json:"workspace"`
+	Status             string                                `json:"status"`
+	RiskLevel          string                                `json:"risk_level"`
+	VulnSummary        map[string]int                        `json:"vuln_summary"`
+	AttackChainSummary *database.AttackChainWorkspaceSummary `json:"attack_chain_summary,omitempty"`
+	DeepScanQueued     bool                                  `json:"deep_scan_queued"`
+	RunUUID            string                                `json:"run_uuid"`
 }
 
 // CampaignStatusResponse returns an aggregated campaign view.
@@ -50,9 +51,19 @@ type CampaignStatusResponse struct {
 	Campaign        *database.Campaign     `json:"campaign"`
 	Status          string                 `json:"status"`
 	Progress        JobProgress            `json:"progress"`
+	Summary         CampaignSignalSummary  `json:"summary"`
 	Targets         []CampaignTargetStatus `json:"targets"`
 	HighRiskTargets []string               `json:"high_risk_targets"`
 	Runs            []*database.Run        `json:"runs"`
+}
+
+// CampaignSignalSummary exposes aggregate risk/queue signals for a campaign.
+type CampaignSignalSummary struct {
+	TargetsTotal               int `json:"targets_total"`
+	HighRiskTargets            int `json:"high_risk_targets"`
+	DeepScanQueuedTargets      int `json:"deep_scan_queued_targets"`
+	AttackChainAwareTargets    int `json:"attack_chain_aware_targets"`
+	VerifiedAttackChainTargets int `json:"verified_attack_chain_targets"`
 }
 
 // ListCampaigns handles listing campaigns.
@@ -426,7 +437,10 @@ func buildCampaignStatusResponse(ctx context.Context, campaign *database.Campaig
 	}
 
 	progress := JobProgress{Total: len(latestRuns)}
-	var targets []CampaignTargetStatus
+	var (
+		targets []CampaignTargetStatus
+		summary CampaignSignalSummary
+	)
 	var highRiskTargets []string
 
 	for _, run := range latestRuns {
@@ -442,21 +456,34 @@ func buildCampaignStatusResponse(ctx context.Context, campaign *database.Campaig
 		}
 
 		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		riskLevel := deriveCampaignRiskLevel(vulnSummary)
+		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		riskLevel := deriveCampaignRiskLevel(vulnSummary, attackChainSummary)
 		deepScanQueued, _ := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+		summary.TargetsTotal++
+		if deepScanQueued {
+			summary.DeepScanQueuedTargets++
+		}
+		if attackChainSummary != nil && attackChainSummary.ReportCount > 0 {
+			summary.AttackChainAwareTargets++
+		}
+		if attackChainSummary != nil && attackChainSummary.VerifiedHits > 0 {
+			summary.VerifiedAttackChainTargets++
+		}
 		targets = append(targets, CampaignTargetStatus{
-			Target:         run.Target,
-			Workspace:      run.Workspace,
-			Status:         run.Status,
-			RiskLevel:      riskLevel,
-			VulnSummary:    vulnSummary,
-			DeepScanQueued: deepScanQueued,
-			RunUUID:        run.RunUUID,
+			Target:             run.Target,
+			Workspace:          run.Workspace,
+			Status:             run.Status,
+			RiskLevel:          riskLevel,
+			VulnSummary:        vulnSummary,
+			AttackChainSummary: attackChainSummary,
+			DeepScanQueued:     deepScanQueued,
+			RunUUID:            run.RunUUID,
 		})
-		if campaignTargetIsHighRisk(campaign, vulnSummary) {
+		if campaignTargetIsHighRisk(campaign, vulnSummary, attackChainSummary) {
 			highRiskTargets = append(highRiskTargets, run.Target)
 		}
 	}
+	summary.HighRiskTargets = len(deduplicateTargets(highRiskTargets))
 
 	status := aggregateStatus(progress)
 	_ = database.UpdateCampaignStatus(ctx, campaign.ID, status)
@@ -466,17 +493,22 @@ func buildCampaignStatusResponse(ctx context.Context, campaign *database.Campaig
 		Campaign:        campaign,
 		Status:          status,
 		Progress:        progress,
+		Summary:         summary,
 		Targets:         targets,
 		HighRiskTargets: deduplicateTargets(highRiskTargets),
 		Runs:            runs,
 	}, nil
 }
 
-func deriveCampaignRiskLevel(summary map[string]int) string {
+func deriveCampaignRiskLevel(summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) string {
 	switch {
 	case summary["critical"] > 0:
 		return "critical"
+	case attackChainSummary != nil && attackChainSummary.CriticalChains > 0 && attackChainSummary.VerifiedHits > 0:
+		return "critical"
 	case summary["high"] > 0:
+		return "high"
+	case attackChainSummary != nil && attackChainSummary.HighImpactChains > 0 && attackChainSummary.VerifiedHits > 0:
 		return "high"
 	case summary["medium"] > 0:
 		return "medium"
@@ -487,10 +519,23 @@ func deriveCampaignRiskLevel(summary map[string]int) string {
 	}
 }
 
-func campaignTargetIsHighRisk(campaign *database.Campaign, summary map[string]int) bool {
+func campaignTargetIsHighRisk(campaign *database.Campaign, summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) bool {
 	for _, severity := range normalizeHighRiskSeverities(campaign.HighRiskSeverities) {
 		if summary[severity] > 0 {
 			return true
+		}
+		if attackChainSummary == nil || attackChainSummary.VerifiedHits <= 0 {
+			continue
+		}
+		switch severity {
+		case "critical":
+			if attackChainSummary.CriticalChains > 0 {
+				return true
+			}
+		case "high":
+			if attackChainSummary.HighImpactChains > 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -512,7 +557,8 @@ func queueCampaignDeepScanRuns(ctx context.Context, campaign *database.Campaign)
 			continue
 		}
 		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		if !campaignTargetIsHighRisk(campaign, vulnSummary) {
+		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		if !campaignTargetIsHighRisk(campaign, vulnSummary, attackChainSummary) {
 			continue
 		}
 		exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)

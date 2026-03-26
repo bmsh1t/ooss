@@ -298,17 +298,22 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `GET /osm/api/campaigns/:id`
   - `POST /osm/api/campaigns/:id/rerun-failed`
   - `POST /osm/api/campaigns/:id/deep-scan`
+  - campaign target status now includes `attack_chain_summary` beside `vuln_summary`
+  - high-risk deep-scan escalation can now be triggered by verified critical/high-impact attack-chain signals, not only raw vulnerability severities
 - **Vulnerability Lifecycle APIs**
   - `GET /osm/api/vulnerabilities/board`
   - `PATCH /osm/api/vulnerabilities/:id`
   - `POST /osm/api/vulnerabilities/:id/retest`
   - vulnerability creation now supports merge-on-create with fingerprint dedup and evidence history
+  - vulnerability detail now resolves evidence timeline, related runs, related asset rows, and related attack-chain matches
 - **Attack Chain Workbench APIs**
   - `GET /osm/api/attack-chains`
   - `GET /osm/api/attack-chains/:id`
   - `POST /osm/api/attack-chains/import`
   - `POST /osm/api/attack-chains/:id/queue-retest`
   - `POST /osm/api/attack-chains/:id/queue-deep-scan`
+  - attack-chain import now backfills matching vulnerability rows with reverse `attack_chain_ref`, merged `report_refs`, and merged `related_assets`
+  - attack-chain retest queue now persists the selected chain linkage onto queued vulnerabilities
 - **Superdomain AI workflow closure**
   - `stable` and `hybrid` now generate persisted attack-chain visualization artifacts in addition to the attack-chain report
   - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
@@ -318,6 +323,7 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - Knowledge auto-learning now writes higher-signal learned knowledge back into the KB for future retrieval
 - **Verification snapshot**
   - Current source builds successfully with `make build`
+  - focused handler tests now cover vulnerability evidence/timeline enrichment, attack-chain reverse linkage, and campaign attack-chain-aware deep-scan selection
   - Local real-API regression passed for campaign, vulnerability, and attack-chain flows on a clean no-auth server instance
   - `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, `superdomain-extensive`, `superdomain-extensive-lite`, and `ai-knowledge-autolearn` all pass workflow validation
   - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support

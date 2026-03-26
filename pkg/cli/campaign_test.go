@@ -154,6 +154,20 @@ func TestBuildCampaignStatusResponseCLI_AggregatesLatestRuns(t *testing.T) {
 		_, err := database.GetDB().NewInsert().Model(vuln).Exec(ctx)
 		require.NoError(t, err)
 	}
+	report := &database.AttackChainReport{
+		Workspace:        "ws-b",
+		Target:           "https://b.example.com",
+		RunUUID:          "run-chain-b",
+		SourcePath:       "/tmp/ws-b-chain.json",
+		SourceHash:       "hash-b",
+		Status:           "ready",
+		TotalChains:      1,
+		HighImpactChains: 1,
+		VerifiedHits:     1,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, database.UpsertAttackChainReport(ctx, report))
 
 	resp, err := buildCampaignStatusResponseCLI(ctx, campaign)
 	require.NoError(t, err)
@@ -163,7 +177,13 @@ func TestBuildCampaignStatusResponseCLI_AggregatesLatestRuns(t *testing.T) {
 	assert.Equal(t, 2, resp.Progress.Total)
 	assert.Equal(t, 1, resp.Progress.Pending)
 	assert.Equal(t, 1, resp.Progress.Completed)
+	assert.Equal(t, 2, resp.Summary.TargetsTotal)
+	assert.Equal(t, 2, resp.Summary.HighRiskTargets)
+	assert.Equal(t, 1, resp.Summary.DeepScanQueuedTargets)
+	assert.Equal(t, 1, resp.Summary.AttackChainAwareTargets)
+	assert.Equal(t, 1, resp.Summary.VerifiedAttackChainTargets)
 	assert.Contains(t, resp.HighRiskTargets, "https://a.example.com")
+	assert.Contains(t, resp.HighRiskTargets, "https://b.example.com")
 
 	targetMap := make(map[string]campaignTargetStatusCLI)
 	for _, target := range resp.Targets {
@@ -175,6 +195,9 @@ func TestBuildCampaignStatusResponseCLI_AggregatesLatestRuns(t *testing.T) {
 	assert.Equal(t, "high", targetMap["https://a.example.com"].RiskLevel)
 	assert.True(t, targetMap["https://a.example.com"].DeepScanQueued)
 	assert.Equal(t, "queued", targetMap["https://b.example.com"].Status)
+	assert.Equal(t, "high", targetMap["https://b.example.com"].RiskLevel)
+	require.NotNil(t, targetMap["https://b.example.com"].AttackChainSummary)
+	assert.Equal(t, 1, targetMap["https://b.example.com"].AttackChainSummary.VerifiedHits)
 
 	refreshed, err := database.GetCampaignByID(ctx, campaign.ID)
 	require.NoError(t, err)
@@ -238,28 +261,43 @@ func TestQueueCampaignDeepScanRunsCLI_QueuesHighRiskTargetsOnly(t *testing.T) {
 		_, err := database.GetDB().NewInsert().Model(vuln).Exec(ctx)
 		require.NoError(t, err)
 	}
+	report := &database.AttackChainReport{
+		Workspace:        "ws-b",
+		Target:           "https://b.example.com",
+		RunUUID:          "run-chain-b",
+		SourcePath:       "/tmp/ws-b-chain.json",
+		SourceHash:       "hash-b",
+		Status:           "ready",
+		TotalChains:      1,
+		HighImpactChains: 1,
+		VerifiedHits:     1,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, database.UpsertAttackChainReport(ctx, report))
 
 	queued, targets, err := queueCampaignDeepScanRunsCLI(ctx, cfg, campaign)
 	require.NoError(t, err)
-	assert.Equal(t, 1, queued)
-	assert.Equal(t, []string{"https://a.example.com"}, targets)
+	assert.Equal(t, 2, queued)
+	assert.ElementsMatch(t, []string{"https://a.example.com", "https://b.example.com"}, targets)
 
 	runs, err := database.GetRunsByRunGroupID(ctx, campaign.ID)
 	require.NoError(t, err)
-	var deepScan *database.Run
+	var deepScans []*database.Run
 	for _, run := range runs {
 		if run.TriggerType == "campaign-deep-scan" {
-			deepScan = run
-			break
+			deepScans = append(deepScans, run)
 		}
 	}
-	require.NotNil(t, deepScan)
-	assert.Equal(t, "deep-flow", deepScan.WorkflowName)
-	assert.Equal(t, "critical", deepScan.RunPriority)
-	assert.Equal(t, "queue", deepScan.RunMode)
-	assert.Equal(t, "ws-a", deepScan.Workspace)
-	assert.Equal(t, "deep_scan", deepScan.Params["campaign_stage"])
-	assert.Equal(t, "run-a", deepScan.Params["campaign_source_run_uuid"])
+	require.Len(t, deepScans, 2)
+	workspaces := []string{deepScans[0].Workspace, deepScans[1].Workspace}
+	assert.ElementsMatch(t, []string{"ws-a", "ws-b"}, workspaces)
+	for _, deepScan := range deepScans {
+		assert.Equal(t, "deep-flow", deepScan.WorkflowName)
+		assert.Equal(t, "critical", deepScan.RunPriority)
+		assert.Equal(t, "queue", deepScan.RunMode)
+		assert.Equal(t, "deep_scan", deepScan.Params["campaign_stage"])
+	}
 
 	queuedAgain, targetsAgain, err := queueCampaignDeepScanRunsCLI(ctx, cfg, campaign)
 	require.NoError(t, err)

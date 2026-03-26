@@ -7,6 +7,13 @@ description: "Group queued runs, rerun failed targets, and queue deep scans"
 
 Campaigns group multiple queued runs under one shared strategy, role, notes, and optional deep-scan policy.
 
+Campaign target aggregation now includes both:
+
+- `vuln_summary`
+- `attack_chain_summary`
+
+That means a target can be promoted to high-risk not only by critical/high vulnerabilities, but also by verified high-impact attack-chain reports in the same workspace.
+
 ## List Campaigns
 
 ```bash
@@ -52,6 +59,31 @@ curl http://localhost:8002/osm/api/campaigns/<campaign-id> \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+The status response includes per-target aggregation fields such as:
+
+- `risk_level`
+- `vuln_summary`
+- `attack_chain_summary`
+- `deep_scan_queued`
+
+It also includes a top-level `summary` block with aggregate counters such as:
+
+- `targets_total`
+- `high_risk_targets`
+- `deep_scan_queued_targets`
+- `attack_chain_aware_targets`
+- `verified_attack_chain_targets`
+
+`attack_chain_summary` contains rolled-up values like:
+
+- `report_count`
+- `total_chains`
+- `critical_chains`
+- `high_impact_chains`
+- `queue_hits`
+- `verified_hits`
+- `last_queued_at`
+
 ## Rerun Failed Targets
 
 ```bash
@@ -65,3 +97,13 @@ curl -X POST http://localhost:8002/osm/api/campaigns/<campaign-id>/rerun-failed 
 curl -X POST http://localhost:8002/osm/api/campaigns/<campaign-id>/deep-scan \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+Deep-scan target selection now treats a workspace as high-risk when either of these is true:
+
+- it has vulnerabilities matching `high_risk_severities`
+- it has verified attack-chain signals that match the same risk band
+
+In practice:
+
+- `critical` risk can be triggered by verified critical chains
+- `high` risk can be triggered by verified high-impact chains

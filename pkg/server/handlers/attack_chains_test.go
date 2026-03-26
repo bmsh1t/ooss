@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -154,6 +155,9 @@ func TestGetAttackChainVerifiedOnlyAndQueueRetest(t *testing.T) {
 	assert.Equal(t, "retest", storedVuln.VulnStatus)
 	assert.Equal(t, "queued", storedVuln.RetestStatus)
 	assert.NotEmpty(t, storedVuln.RetestRunUUID)
+	assert.Equal(t, "report:"+strconv.FormatInt(report.ID, 10)+":chain-verified", storedVuln.AttackChainRef)
+	assert.Contains(t, storedVuln.ReportRefs, report.SourcePath)
+	assert.Contains(t, storedVuln.RelatedAssets, "https://app.acme.test/login")
 
 	body, err = json.Marshal(map[string]any{
 		"flow":          "web-analysis",
@@ -174,4 +178,98 @@ func TestGetAttackChainVerifiedOnlyAndQueueRetest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, storedReport.QueueHits)
 	assert.Equal(t, 1, storedReport.VerifiedHits)
+}
+
+func TestImportAttackChain_BackfillsVulnerabilityLinks(t *testing.T) {
+	cfg, cleanup := setupAttackChainHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	vuln := &database.Vulnerability{
+		Workspace:     "acme",
+		VulnInfo:      "sql-injection",
+		VulnTitle:     "SQL Injection",
+		Severity:      "high",
+		Confidence:    "certain",
+		AssetType:     "url",
+		AssetValue:    "https://app.acme.test/login",
+		VulnStatus:    "verified",
+		SourceRunUUID: "run-1",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastSeenAt:    now,
+	}
+	created, err := database.CreateVulnerabilityRecord(ctx, vuln)
+	require.NoError(t, err)
+
+	payload := map[string]any{
+		"attack_chain_summary": map[string]any{
+			"total_chains":       1,
+			"critical_chains":    1,
+			"high_impact_chains": 1,
+		},
+		"attack_chains": []map[string]any{
+			{
+				"chain_id":   "chain-login",
+				"chain_name": "Login SQLi Chain",
+				"entry_point": map[string]any{
+					"vulnerability": "SQL Injection",
+					"url":           "https://app.acme.test/login",
+					"severity":      "high",
+				},
+				"chain_steps": []map[string]any{
+					{"step": 1, "action": "exploit login"},
+				},
+				"final_objective":     "Dump user data",
+				"difficulty":          "medium",
+				"impact":              "high",
+				"success_probability": 0.8,
+			},
+		},
+		"critical_paths": []map[string]any{},
+	}
+
+	sourcePath := filepath.Join(cfg.BaseFolder, "attack-chain-import.json")
+	textPath := filepath.Join(cfg.BaseFolder, "attack-chain-import.txt")
+	mermaidPath := filepath.Join(cfg.BaseFolder, "attack-chain-import.mmd")
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sourcePath, raw, 0o600))
+	require.NoError(t, os.WriteFile(textPath, []byte("attack chain report"), 0o600))
+	require.NoError(t, os.WriteFile(mermaidPath, []byte("graph TD"), 0o600))
+
+	app := fiber.New()
+	app.Post("/attack-chains/import", ImportAttackChain(cfg))
+
+	body, err := json.Marshal(map[string]any{
+		"workspace":    "acme",
+		"target":       "app.acme.test",
+		"run_uuid":     "run-attack-1",
+		"source_path":  sourcePath,
+		"text_path":    textPath,
+		"mermaid_path": mermaidPath,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/attack-chains/import", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusCreated, resp.StatusCode)
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, float64(1), result["linked_vulnerability_count"])
+	data := result["data"].(map[string]any)
+	reportID := int64(data["id"].(float64))
+
+	storedVuln, err := database.GetVulnerabilityByID(ctx, created.Vulnerability.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "report:"+strconv.FormatInt(reportID, 10)+":chain-login", storedVuln.AttackChainRef)
+	assert.Contains(t, storedVuln.RelatedAssets, "https://app.acme.test/login")
+	assert.Contains(t, storedVuln.ReportRefs, sourcePath)
+	assert.Contains(t, storedVuln.ReportRefs, textPath)
+	assert.Contains(t, storedVuln.ReportRefs, mermaidPath)
+	assert.Equal(t, 2, storedVuln.EvidenceVersion)
 }

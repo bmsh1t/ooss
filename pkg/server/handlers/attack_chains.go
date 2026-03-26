@@ -268,6 +268,7 @@ func QueueAttackChainRetest(cfg *config.Config) fiber.Handler {
 					Workspace:    report.Workspace,
 				}
 
+				applyAttackChainLinkageToVulnerability(vuln, formatAttackChainRef(report.ID, chain.ChainID), collectAttackChainLinkAssets(report, chain.attackChainItem), buildAttackChainReportRefs(report), true)
 				vuln.VulnStatus = "retest"
 				vuln.RetestStatus = "queued"
 				vuln.RetestRunUUID = retestRunUUID
@@ -394,8 +395,9 @@ func ImportAttackChain(cfg *config.Config) fiber.Handler {
 			})
 		}
 
+		ctx := context.Background()
 		summary, err := attackchain.ImportFile(
-			context.Background(),
+			ctx,
 			req.Workspace,
 			req.SourcePath,
 			req.Target,
@@ -410,9 +412,17 @@ func ImportAttackChain(cfg *config.Config) fiber.Handler {
 			})
 		}
 
+		linkedWritebacks := 0
+		if summary != nil && summary.ID > 0 {
+			if report, err := database.GetAttackChainReportByID(ctx, summary.ID); err == nil {
+				linkedWritebacks, _ = backfillAttackChainVulnerabilityLinks(ctx, report)
+			}
+		}
+
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"data":    summary,
-			"message": "Attack chain report imported successfully",
+			"data":                       summary,
+			"message":                    "Attack chain report imported successfully",
+			"linked_vulnerability_count": linkedWritebacks,
 		})
 	}
 }
@@ -758,4 +768,112 @@ func attackChainDeepScanRunExists(ctx context.Context, runGroupID, workflowName,
 		Where("target = ?", target).
 		Count(ctx)
 	return err == nil && count > 0
+}
+
+func backfillAttackChainVulnerabilityLinks(ctx context.Context, report *database.AttackChainReport) (int, error) {
+	if report == nil || strings.TrimSpace(report.Workspace) == "" {
+		return 0, nil
+	}
+
+	assignments := make(map[int64]attackChainVulnerabilityWriteback)
+	for _, item := range enrichAttackChains(ctx, report.Workspace, decodeAttackChains(report.AttackChainsJSON)) {
+		assets := collectAttackChainLinkAssets(report, item.attackChainItem)
+		reportRefs := buildAttackChainReportRefs(report)
+		chainRef := formatAttackChainRef(report.ID, item.ChainID)
+		for _, linked := range item.LinkedVulnerabilities {
+			current := assignments[linked.ID]
+			if current.ChainRef == "" {
+				current.ChainRef = chainRef
+			}
+			current.RelatedAssets = append(current.RelatedAssets, assets...)
+			current.ReportRefs = append(current.ReportRefs, reportRefs...)
+			assignments[linked.ID] = current
+		}
+	}
+
+	updated := 0
+	for vulnID, assignment := range assignments {
+		vuln, err := database.GetVulnerabilityByID(ctx, vulnID)
+		if err != nil || vuln == nil {
+			continue
+		}
+		if !applyAttackChainLinkageToVulnerability(vuln, assignment.ChainRef, assignment.RelatedAssets, assignment.ReportRefs, false) {
+			continue
+		}
+		if err := database.UpdateVulnerabilityRecord(ctx, vuln); err != nil {
+			continue
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+type attackChainVulnerabilityWriteback struct {
+	ChainRef      string
+	RelatedAssets []string
+	ReportRefs    []string
+}
+
+func applyAttackChainLinkageToVulnerability(vuln *database.Vulnerability, chainRef string, relatedAssets, reportRefs []string, preferChainRef bool) bool {
+	if vuln == nil {
+		return false
+	}
+
+	changed := false
+	chainRef = strings.TrimSpace(chainRef)
+	if chainRef != "" {
+		switch {
+		case preferChainRef && vuln.AttackChainRef != chainRef:
+			vuln.AttackChainRef = chainRef
+			changed = true
+		case strings.TrimSpace(vuln.AttackChainRef) == "":
+			vuln.AttackChainRef = chainRef
+			changed = true
+		}
+	}
+
+	mergedAssets := dedupeNonEmptyStrings(append(append([]string{}, vuln.RelatedAssets...), relatedAssets...))
+	if !equalStringSlices(vuln.RelatedAssets, mergedAssets) {
+		vuln.RelatedAssets = mergedAssets
+		changed = true
+	}
+
+	mergedReportRefs := dedupeNonEmptyStrings(append(append([]string{}, vuln.ReportRefs...), reportRefs...))
+	if !equalStringSlices(vuln.ReportRefs, mergedReportRefs) {
+		vuln.ReportRefs = mergedReportRefs
+		changed = true
+	}
+
+	return changed
+}
+
+func collectAttackChainLinkAssets(report *database.AttackChainReport, chain attackChainItem) []string {
+	return dedupeNonEmptyStrings([]string{report.Target, chain.EntryPoint.URL})
+}
+
+func buildAttackChainReportRefs(report *database.AttackChainReport) []string {
+	if report == nil {
+		return nil
+	}
+	return dedupeNonEmptyStrings([]string{report.SourcePath, report.TextPath, report.MermaidPath})
+}
+
+func formatAttackChainRef(reportID int64, chainID string) string {
+	chainID = strings.TrimSpace(chainID)
+	if reportID <= 0 || chainID == "" {
+		return ""
+	}
+	return fmt.Sprintf("report:%d:%s", reportID, chainID)
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if strings.TrimSpace(left[i]) != strings.TrimSpace(right[i]) {
+			return false
+		}
+	}
+	return true
 }

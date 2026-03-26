@@ -27,6 +27,18 @@ type AttackChainReportResult struct {
 	Limit      int                 `json:"limit"`
 }
 
+// AttackChainWorkspaceSummary aggregates report-level metrics for one workspace.
+type AttackChainWorkspaceSummary struct {
+	Workspace        string     `json:"workspace"`
+	ReportCount      int        `json:"report_count"`
+	TotalChains      int        `json:"total_chains"`
+	CriticalChains   int        `json:"critical_chains"`
+	HighImpactChains int        `json:"high_impact_chains"`
+	QueueHits        int        `json:"queue_hits"`
+	VerifiedHits     int        `json:"verified_hits"`
+	LastQueuedAt     *time.Time `json:"last_queued_at,omitempty"`
+}
+
 // UpsertAttackChainReport creates or updates an attack-chain report keyed by workspace + source path.
 func UpsertAttackChainReport(ctx context.Context, report *AttackChainReport) error {
 	if db == nil {
@@ -206,4 +218,51 @@ func RecordAttackChainQueueActivity(ctx context.Context, id int64, queuedHits, v
 		return fmt.Errorf("failed to update attack chain queue metrics: %w", err)
 	}
 	return nil
+}
+
+// GetAttackChainWorkspaceSummary aggregates attack-chain signals for one workspace.
+func GetAttackChainWorkspaceSummary(ctx context.Context, workspace string) (*AttackChainWorkspaceSummary, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return &AttackChainWorkspaceSummary{}, nil
+	}
+
+	var result struct {
+		ReportCount      int        `bun:"report_count"`
+		TotalChains      int        `bun:"total_chains"`
+		CriticalChains   int        `bun:"critical_chains"`
+		HighImpactChains int        `bun:"high_impact_chains"`
+		QueueHits        int        `bun:"queue_hits"`
+		VerifiedHits     int        `bun:"verified_hits"`
+		LastQueuedAt     *time.Time `bun:"last_queued_at"`
+	}
+
+	if err := db.NewSelect().
+		Model((*AttackChainReport)(nil)).
+		ColumnExpr("COUNT(*) AS report_count").
+		ColumnExpr("COALESCE(SUM(total_chains), 0) AS total_chains").
+		ColumnExpr("COALESCE(SUM(critical_chains), 0) AS critical_chains").
+		ColumnExpr("COALESCE(SUM(high_impact_chains), 0) AS high_impact_chains").
+		ColumnExpr("COALESCE(SUM(queue_hits), 0) AS queue_hits").
+		ColumnExpr("COALESCE(SUM(verified_hits), 0) AS verified_hits").
+		ColumnExpr("MAX(last_queued_at) AS last_queued_at").
+		Where("workspace = ?", workspace).
+		Scan(ctx, &result); err != nil {
+		return nil, fmt.Errorf("failed to summarize attack-chain reports: %w", err)
+	}
+
+	return &AttackChainWorkspaceSummary{
+		Workspace:        workspace,
+		ReportCount:      result.ReportCount,
+		TotalChains:      result.TotalChains,
+		CriticalChains:   result.CriticalChains,
+		HighImpactChains: result.HighImpactChains,
+		QueueHits:        result.QueueHits,
+		VerifiedHits:     result.VerifiedHits,
+		LastQueuedAt:     result.LastQueuedAt,
+	}, nil
 }

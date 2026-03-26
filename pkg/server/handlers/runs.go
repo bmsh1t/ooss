@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -78,6 +79,11 @@ func computeWorkspace(target string, params map[string]string) string {
 	// If space_name param provided (via -S flag or API), use it directly
 	if spaceName := params["space_name"]; spaceName != "" {
 		return spaceName
+	}
+	if parsed, err := url.Parse(target); err == nil {
+		if host := parsed.Hostname(); host != "" {
+			return sanitizeTargetForWorkspace(host)
+		}
 	}
 	// Otherwise, sanitize the target for filesystem safety
 	return sanitizeTargetForWorkspace(target)

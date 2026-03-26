@@ -7,7 +7,7 @@ description: "View and manage vulnerability records"
 
 ## List Vulnerabilities
 
-Get a paginated list of vulnerabilities with optional filtering by workspace, severity, confidence, or asset value.
+Get a paginated list of vulnerabilities with optional filtering by workspace, severity, confidence, asset value, or lifecycle status.
 
 **List all vulnerabilities:**
 ```bash
@@ -51,6 +51,12 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&severi
   -H "Authorization: Bearer $TOKEN"
 ```
 
+**Filter by lifecycle status:**
+```bash
+curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&status=retest" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 **Query Parameters:**
 
 | Parameter | Type | Default | Description |
@@ -59,6 +65,7 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&severi
 | `severity` | string | - | Filter by severity (critical, high, medium, low, info) |
 | `confidence` | string | - | Filter by confidence (Certain, Firm, Tentative, Manual Review Required) |
 | `asset_value` | string | - | Filter by asset value (partial match) |
+| `status` | string | - | Filter by lifecycle status (`new`, `triaged`, `verified`, `false_positive`, `retest`, `closed`) |
 | `offset` | int | 0 | Number of records to skip |
 | `limit` | int | 20 | Maximum records to return (max 10000) |
 
@@ -71,34 +78,29 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&severi
       "workspace": "example.com",
       "vuln_info": "CVE-2024-1234",
       "vuln_title": "SQL Injection in Login Form",
-      "vuln_desc": "The login form is vulnerable to SQL injection via the username parameter.",
-      "vuln_poc": "username=' OR '1'='1' --&password=test",
       "severity": "critical",
       "confidence": "Certain",
-      "asset_type": "web",
       "asset_value": "https://example.com/login",
-      "tags": ["sqli", "owasp-top10", "authentication"],
-      "detail_http_request": "POST /login HTTP/1.1\nHost: example.com\n...",
-      "detail_http_response": "HTTP/1.1 200 OK\n...",
-      "raw_vuln_json": "{\"template\":\"sqli-login.yaml\",...}",
+      "vuln_status": "verified",
+      "fingerprint_key": "a1f8...",
+      "evidence_version": 3,
+      "source_run_uuid": "run-source-1",
+      "report_refs": ["reports/nuclei-login.md"],
       "created_at": "2025-01-15T10:30:00Z",
-      "updated_at": "2025-01-15T10:30:00Z"
+      "updated_at": "2025-01-15T11:10:00Z",
+      "last_seen_at": "2025-01-15T11:10:00Z"
     },
     {
       "id": 2,
       "workspace": "example.com",
       "vuln_info": "CVE-2024-5678",
       "vuln_title": "Cross-Site Scripting (XSS) in Search",
-      "vuln_desc": "Reflected XSS vulnerability in the search functionality.",
-      "vuln_poc": "<script>alert('XSS')</script>",
       "severity": "high",
       "confidence": "Firm",
-      "asset_type": "web",
       "asset_value": "https://example.com/search",
-      "tags": ["xss", "owasp-top10"],
-      "detail_http_request": "GET /search?q=<script>alert(1)</script> HTTP/1.1\n...",
-      "detail_http_response": "HTTP/1.1 200 OK\n...",
-      "raw_vuln_json": "{\"template\":\"xss-reflected.yaml\",...}",
+      "vuln_status": "triaged",
+      "fingerprint_key": "bf22...",
+      "evidence_version": 1,
       "created_at": "2025-01-15T10:31:00Z",
       "updated_at": "2025-01-15T10:31:00Z"
     }
@@ -182,21 +184,73 @@ curl http://localhost:8002/osm/api/vulnerabilities/1 \
     "workspace": "example.com",
     "vuln_info": "CVE-2024-1234",
     "vuln_title": "SQL Injection in Login Form",
-    "vuln_desc": "The login form is vulnerable to SQL injection via the username parameter.",
-    "vuln_poc": "username=' OR '1'='1' --&password=test",
     "severity": "critical",
     "confidence": "Certain",
     "asset_type": "web",
     "asset_value": "https://example.com/login",
-    "tags": ["sqli", "owasp-top10", "authentication"],
-    "detail_http_request": "POST /login HTTP/1.1\nHost: example.com\n...",
-    "detail_http_response": "HTTP/1.1 200 OK\n...",
-    "raw_vuln_json": "{\"template\":\"sqli-login.yaml\",...}",
+    "vuln_status": "retest",
+    "fingerprint_key": "a1f8...",
+    "source_run_uuid": "run-source-1",
+    "retest_status": "queued",
+    "retest_run_uuid": "retest-run-1",
+    "evidence_version": 2,
+    "evidence_timeline": [
+      {
+        "observed_at": "2025-01-15T10:30:00Z",
+        "source_run_uuid": "run-source-1",
+        "severity": "critical",
+        "confidence": "certain",
+        "vuln_status": "verified",
+        "asset_value": "https://example.com/login"
+      },
+      {
+        "observed_at": "2025-01-15T10:45:00Z",
+        "source_run_uuid": "run-source-1",
+        "severity": "critical",
+        "confidence": "certain",
+        "vuln_status": "retest",
+        "asset_value": "https://example.com/login"
+      }
+    ],
+    "related_runs": [
+      {
+        "run_uuid": "retest-run-1",
+        "workflow_name": "web-analysis",
+        "workflow_kind": "flow",
+        "status": "queued",
+        "trigger_type": "vuln-retest",
+        "target": "https://example.com/login"
+      }
+    ],
+    "related_asset_records": [
+      {
+        "id": 44,
+        "asset_value": "https://example.com/login",
+        "url": "https://example.com/login",
+        "asset_type": "url",
+        "source": "httpx"
+      }
+    ],
+    "related_attack_chains": [
+      {
+        "report_id": 12,
+        "chain_id": "chain-login",
+        "chain_name": "Login SQLi Chain",
+        "matched_by": "entry_point_url"
+      }
+    ],
     "created_at": "2025-01-15T10:30:00Z",
-    "updated_at": "2025-01-15T10:30:00Z"
+    "updated_at": "2025-01-15T10:45:00Z"
   }
 }
 ```
+
+`GET /vulnerabilities/:id` now returns the merged audit trail for a finding. The extra fields are:
+
+- `evidence_timeline`: parsed evidence history snapshots.
+- `related_runs`: resolved source/retest/history run references.
+- `related_asset_records`: matching asset rows in the same workspace.
+- `related_attack_chains`: matching attack-chain workbench entries resolved by ref, URL, or vulnerability name.
 
 **Error Response (404):**
 ```json
@@ -249,6 +303,11 @@ curl -X POST http://localhost:8002/osm/api/vulnerabilities \
 | `detail_http_request` | string | No | Raw HTTP request |
 | `detail_http_response` | string | No | Raw HTTP response |
 | `raw_vuln_json` | string | No | Raw JSON from scanner (nuclei, etc.) |
+| `vuln_status` | string | No | Initial lifecycle status |
+| `source_run_uuid` | string | No | Source run UUID used for dedup/timeline |
+| `attack_chain_ref` | string | No | Optional reverse link to an attack-chain item |
+| `related_assets` | array | No | Extra asset identifiers related to the finding |
+| `report_refs` | array | No | Related report file references |
 
 **Response (201 Created):**
 ```json
@@ -274,6 +333,8 @@ curl -X POST http://localhost:8002/osm/api/vulnerabilities \
   "message": "Vulnerability created successfully"
 }
 ```
+
+If the submitted finding resolves to the same `workspace + fingerprint_key`, the API merges it into the existing row instead of creating a duplicate. In that case the endpoint returns `200 OK` with `merged: true`, `created: false`, and an incremented `evidence_version`.
 
 ---
 
@@ -394,5 +455,23 @@ curl -X DELETE http://localhost:8002/osm/api/vulnerabilities/15 \
 | `detail_http_request` | string | Raw HTTP request that triggered the vulnerability |
 | `detail_http_response` | string | Raw HTTP response from the vulnerable endpoint |
 | `raw_vuln_json` | string | Raw JSON output from vulnerability scanner |
+| `fingerprint_key` | string | Stable deduplication key derived from workspace, finding identity, asset type, and asset value |
+| `vuln_status` | string | Lifecycle status |
+| `source_run_uuid` | string | Source run UUID currently associated with the record |
+| `retest_status` | string | Retest queue/execution state |
+| `retest_run_uuid` | string | Run UUID of the queued retest |
+| `attack_chain_ref` | string | Optional reverse link to an attack-chain record |
+| `related_assets` | array | Related asset identifiers stored on the vulnerability |
+| `report_refs` | array | Related report paths or references |
+| `evidence_version` | int | Monotonic version number for evidence changes |
+| `evidence_history` | string | Stored JSON history of evidence snapshots |
+| `evidence_timeline` | array | Parsed evidence history returned by `GET /vulnerabilities/:id` |
+| `related_runs` | array | Resolved run summaries returned by `GET /vulnerabilities/:id` |
+| `related_asset_records` | array | Resolved asset rows returned by `GET /vulnerabilities/:id` |
+| `related_attack_chains` | array | Resolved attack-chain links returned by `GET /vulnerabilities/:id` |
+| `first_seen_at` | timestamp | First observed timestamp across merged evidence |
+| `last_seen_at` | timestamp | Last evidence observation timestamp |
+| `verified_at` | timestamp | Timestamp when the finding entered `verified` |
+| `closed_at` | timestamp | Timestamp when the finding entered `closed` |
 | `created_at` | timestamp | Record creation timestamp |
 | `updated_at` | timestamp | Last update timestamp |
