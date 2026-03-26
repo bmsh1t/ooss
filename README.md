@@ -160,15 +160,13 @@ The practical storage layout is now split into two layers:
   - Required for `pdf`, `docx`, `pptx`, and `xlsx` ingestion
 - `antiword`
   - Required for legacy `.doc` ingestion
-- `python3`
-  - Required by the semantic-search helper scripts already used by the AI workflow family
 
 ### Optional dependencies
 
-- `JINA_API_KEY` or `OPENAI_API_KEY`
-  - Enables vector embeddings during `ai-semantic-search` and `kb vector index/search`
-- `chromadb`
-  - Needed only when you run the `ai-semantic-search-hybrid` fragment directly; the fragment will try to install it if missing
+- at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
+  - Enables vectorkb indexing/search and AI workflow semantic retrieval
+- a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model`
+  - Keeps vectorkb index/search bound to the same provider/model pair unless you override them explicitly
 
 ### Vector knowledge config
 
@@ -257,14 +255,18 @@ osmedeus run -f superdomain-extensive-hybrid -t example.com -P params.yaml
 - `ai-semantic-search` now:
   - performs direct `kb vector search` hits against the standalone `vector-kb.sqlite`
   - merges those results with direct `kb search` keyword hits as fallback/supplement
-  - exports knowledge chunks into the semantic index
-  - includes those chunks in vector embedding generation when embeddings are configured
+  - supports layered retrieval with primary/shared/global knowledge workspaces
+  - keeps vectorkb bound to the selected provider/model pair
   - feeds both direct knowledge hits and vector recall candidates into the downstream semantic-search agent
+- `ai-semantic-search-hybrid` now:
+  - uses vectorkb vector recall plus `kb search` keyword recall
+  - avoids Chroma/Python runtime-install behavior
+  - fuses vector hits, keyword hits, and local scan corpus hits through jq-based ranking
 - `ai-apply-decision` normalizes the AI output into `applied-ai-decision-{{TargetSpace}}.json`, `dynamic-config.yaml`, and `scan-env.sh`, so downstream modules consume one stable decision layer
 - `targeted-rescan` now feeds verified follow-up hits back into the main nuclei result set instead of leaving them isolated in a side artifact
 - `ai-post-followup-coordination` aggregates retest, operator queue, campaign handoff/create, and rescan outputs into `followup-decision-{{TargetSpace}}.json` and `.md`
 - the default follow-up workflow for retest/campaign execution is `web-analysis`
-- `ai-knowledge-autolearn` still runs after reporting so future runs can reuse newly learned findings
+- `ai-knowledge-autolearn` now generates structured learned knowledge documents such as workspace summary, verified findings, false-positive samples, and AI insights
 
 ### API usage
 
@@ -300,18 +302,23 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `GET /osm/api/vulnerabilities/board`
   - `PATCH /osm/api/vulnerabilities/:id`
   - `POST /osm/api/vulnerabilities/:id/retest`
+  - vulnerability creation now supports merge-on-create with fingerprint dedup and evidence history
 - **Attack Chain Workbench APIs**
   - `GET /osm/api/attack-chains`
   - `GET /osm/api/attack-chains/:id`
   - `POST /osm/api/attack-chains/import`
+  - `POST /osm/api/attack-chains/:id/queue-retest`
+  - `POST /osm/api/attack-chains/:id/queue-deep-scan`
 - **Superdomain AI workflow closure**
   - `stable` and `hybrid` now generate persisted attack-chain visualization artifacts in addition to the attack-chain report
   - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
   - All four workflows now emit a normalized `applied-ai-decision` artifact and a post-execution `followup-decision` artifact for downstream reuse and reporting
   - Retest, operator queue, campaign handoff, and targeted rescan are now folded back into the same decision chain instead of remaining isolated outputs
   - Retest lifecycle now propagates source run UUIDs so post-retest state can converge back to `verified`, `closed`, or `triaged`
+  - Knowledge auto-learning now writes higher-signal learned knowledge back into the KB for future retrieval
 - **Verification snapshot**
   - Current source builds successfully with `make build`
+  - Local real-API regression passed for campaign, vulnerability, and attack-chain flows on a clean no-auth server instance
   - `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, `superdomain-extensive`, `superdomain-extensive-lite`, and `ai-knowledge-autolearn` all pass workflow validation
   - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support
 

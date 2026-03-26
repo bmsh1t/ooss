@@ -117,6 +117,7 @@ func TestGetAttackChainVerifiedOnlyAndQueueRetest(t *testing.T) {
 	app := fiber.New()
 	app.Get("/attack-chains/:id", GetAttackChain(cfg))
 	app.Post("/attack-chains/:id/queue-retest", QueueAttackChainRetest(cfg))
+	app.Post("/attack-chains/:id/queue-deep-scan", QueueAttackChainDeepScan(cfg))
 
 	reportPath := "/attack-chains/" + strconv.FormatInt(report.ID, 10)
 	req := httptest.NewRequest("GET", reportPath+"?verified_only=true", nil)
@@ -154,8 +155,23 @@ func TestGetAttackChainVerifiedOnlyAndQueueRetest(t *testing.T) {
 	assert.Equal(t, "queued", storedVuln.RetestStatus)
 	assert.NotEmpty(t, storedVuln.RetestRunUUID)
 
+	body, err = json.Marshal(map[string]any{
+		"flow":          "web-analysis",
+		"verified_only": true,
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest("POST", reportPath+"/queue-deep-scan", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusCreated, resp.StatusCode)
+
+	queueResult = map[string]any{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&queueResult))
+	assert.Equal(t, float64(1), queueResult["queued"])
+
 	storedReport, err := database.GetAttackChainReportByID(ctx, report.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 1, storedReport.QueueHits)
+	assert.Equal(t, 2, storedReport.QueueHits)
 	assert.Equal(t, 1, storedReport.VerifiedHits)
 }

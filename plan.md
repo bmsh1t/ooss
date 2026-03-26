@@ -55,22 +55,19 @@
   - regression pass across modified queue / vuln / attack-chain paths
 - Verified already:
   - clean current-source build
+  - full `make test-unit` pass in the current host environment
   - lint/validate pass for all modified superdomain AI workflows and the new knowledge auto-learn fragment
   - targeted package/test coverage for the modified database, handler, and knowledge/URL mapping paths
-- Remaining environment blockers observed in this sandbox:
-  - tests that require local socket listeners (`httptest`)
-  - tests that require usable `tmux`
-  - tests that require local `uv` Python execution support
 - This is the highest-risk remaining gap.
 
 ### 2. Knowledge Base
 
-- Current knowledge base is still text/document based, not a real vector knowledge base yet.
+- Current knowledge base is now split into a main relational KB plus a standalone vectorkb retrieval layer.
 - Not done yet:
-  - embedding generation
-  - vector index / semantic retrieval
   - webpage/article ingestion
-  - cross-workspace relevance ranking
+  - richer cross-workspace ranking strategy beyond primary/shared/global layering
+  - stronger learned-document pruning and confidence aging
+  - writeback from more workflow outcomes, not only summary-style learned artifacts
 
 ### 3. Campaign Batch Operations
 
@@ -83,20 +80,21 @@
 
 ### 4. Vulnerability Lifecycle Center
 
-- Current lifecycle center is backend v1+.
+- Current lifecycle center is backend v2-ish for storage and queue orchestration.
 - Not done yet:
   - less heuristic retest closure rules for edge cases
-  - stronger persistent linkage between vulnerabilities, reports, and attack chains
-  - richer retest history timeline
+  - stronger persistent linkage and reverse indexes between vulnerabilities, reports, and attack chains
+  - richer retest history timeline and evidence diff view
+  - workspace-level duplicate cluster review tools
 
 ### 5. Attack Chain Workbench
 
-- Current attack-chain workbench is backend/API v1+.
+- Current attack-chain workbench is backend/API v2-ish.
 - Not done yet:
   - frontend or visual workbench page
   - persistent backfill linking from attack chains back to vulnerabilities/assets
-  - deeper filtering such as verified-only chain generation from stored vuln state
   - workspace-level attack-chain dashboard
+  - campaign-aware attack-chain queue analytics
 
 ### 6. Documentation
 
@@ -132,11 +130,11 @@
   - rerun history
   - campaign summary export
 
-### Priority 3: Vector Knowledge Base
+### Priority 3: Knowledge Productization
 
-- Introduce a real embedding-based retrieval path.
-- Keep this behind a stable abstraction so the current text/document KB remains usable.
-- Limit first scope to local document corpora only.
+- Add webpage/article ingestion.
+- Improve layered ranking and source confidence weighting.
+- Add maintenance controls for learned-document pruning and KB quality review.
 
 ### Priority 4: Documentation Completion
 

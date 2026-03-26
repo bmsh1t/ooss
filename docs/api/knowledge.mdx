@@ -125,6 +125,8 @@ curl -X POST http://localhost:8002/osm/api/knowledge/search \
   -H "Content-Type: application/json" \
   -d '{
     "workspace": "example.com",
+    "workspace_layers": ["example.com", "shared-websec", "global"],
+    "scope_layers": ["workspace", "public"],
     "query": "authentication bypass",
     "limit": 10
   }'
@@ -135,6 +137,8 @@ curl -X POST http://localhost:8002/osm/api/knowledge/search \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `workspace` | string | No | Restrict search to a workspace |
+| `workspace_layers` | string[] | No | Search multiple workspaces in order of priority |
+| `scope_layers` | string[] | No | Prefer matching knowledge scopes such as `workspace`, `project`, `public` |
 | `query` | string | Yes | Search phrase |
 | `limit` | int | No | Maximum hits to return |
 
@@ -165,7 +169,7 @@ curl -X POST http://localhost:8002/osm/api/knowledge/search \
 
 ## Learn Knowledge from a Workspace
 
-Generate a learned summary document from existing workspace assets, vulnerabilities, runs, and optional `ai-analysis` artifacts.
+Generate structured learned knowledge documents from existing workspace assets, vulnerabilities, runs, and optional `ai-analysis` artifacts.
 
 ```bash
 curl -X POST http://localhost:8002/osm/api/knowledge/learn \
@@ -231,6 +235,8 @@ curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
   -H "Content-Type: application/json" \
   -d '{
     "workspace": "example.com",
+    "workspace_layers": ["example.com", "shared-websec", "global"],
+    "scope_layers": ["workspace", "public"],
     "query": "authentication bypass",
     "limit": 10
   }'
@@ -241,6 +247,8 @@ curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `workspace` | string | No | Restrict search to a workspace |
+| `workspace_layers` | string[] | No | Search multiple workspaces in order of priority |
+| `scope_layers` | string[] | No | Prefer matching knowledge scopes such as `workspace`, `project`, `public` |
 | `query` | string | Yes | Natural-language semantic query |
 | `provider` | string | No | Override configured embedding provider |
 | `model` | string | No | Override configured embedding model |

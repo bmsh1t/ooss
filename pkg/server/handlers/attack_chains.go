@@ -199,7 +199,7 @@ func QueueAttackChainRetest(cfg *config.Config) fiber.Handler {
 		}
 
 		ctx := context.Background()
-		chains := selectAttackChainQueueItems(ctx, report, req)
+		chains := selectAttackChainQueueItems(ctx, report, req, false)
 		if len(chains) == 0 {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":   true,
@@ -222,7 +222,7 @@ func QueueAttackChainRetest(cfg *config.Config) fiber.Handler {
 					continue
 				}
 				seen[linked.ID] = struct{}{}
-				if req.VerifiedOnly && linked.VulnStatus != "verified" {
+				if req.VerifiedOnly && !isAttackChainOperationallyVerifiedStatus(linked.VulnStatus, false) {
 					continue
 				}
 				if linked.VulnStatus == "false_positive" || linked.VulnStatus == "closed" {
@@ -307,7 +307,7 @@ func QueueAttackChainDeepScan(cfg *config.Config) fiber.Handler {
 		}
 
 		ctx := context.Background()
-		chains := selectAttackChainQueueItems(ctx, report, req)
+		chains := selectAttackChainQueueItems(ctx, report, req, true)
 		if len(chains) == 0 {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":   true,
@@ -324,7 +324,7 @@ func QueueAttackChainDeepScan(cfg *config.Config) fiber.Handler {
 			verifiedHit int
 		)
 		for _, chain := range chains {
-			verifiedHit += chain.VerifiedLinkedCount
+			verifiedHit += countOperationallyVerifiedLinks(chain.LinkedVulnerabilities, true)
 		}
 
 		for _, target := range targets {
@@ -492,7 +492,7 @@ func enrichAttackChains(ctx context.Context, workspace string, chains []attackCh
 		linkedVulns := findLinkedVulnerabilities(ctx, workspace, chain)
 		verifiedCount := 0
 		for _, vuln := range linkedVulns {
-			if vuln.VulnStatus == "verified" {
+			if isAttackChainVerifiedStatus(vuln.VulnStatus) {
 				verifiedCount++
 			}
 		}
@@ -632,7 +632,7 @@ func parseAttackChainQueueRequest(c *fiber.Ctx) (*database.AttackChainReport, Qu
 	return report, req, workflowName, workflowKind, nil
 }
 
-func selectAttackChainQueueItems(ctx context.Context, report *database.AttackChainReport, req QueueAttackChainRequest) []attackChainWorkbenchItem {
+func selectAttackChainQueueItems(ctx context.Context, report *database.AttackChainReport, req QueueAttackChainRequest, includeRetestAsVerified bool) []attackChainWorkbenchItem {
 	chains := decodeAttackChains(report.AttackChainsJSON)
 	if len(req.ChainIDs) > 0 {
 		selected := make([]attackChainItem, 0, len(chains))
@@ -653,11 +653,32 @@ func selectAttackChainQueueItems(ctx context.Context, report *database.AttackCha
 	}
 	filtered := make([]attackChainWorkbenchItem, 0, len(items))
 	for _, item := range items {
-		if item.VerifiedLinkedCount > 0 {
+		if countOperationallyVerifiedLinks(item.LinkedVulnerabilities, includeRetestAsVerified) > 0 {
 			filtered = append(filtered, item)
 		}
 	}
 	return filtered
+}
+
+func countOperationallyVerifiedLinks(vulns []linkedVulnerability, includeRetest bool) int {
+	count := 0
+	for _, vuln := range vulns {
+		if isAttackChainOperationallyVerifiedStatus(vuln.VulnStatus, includeRetest) {
+			count++
+		}
+	}
+	return count
+}
+
+func isAttackChainOperationallyVerifiedStatus(status string, includeRetest bool) bool {
+	if isAttackChainVerifiedStatus(status) {
+		return true
+	}
+	return includeRetest && strings.EqualFold(strings.TrimSpace(status), "retest")
+}
+
+func isAttackChainVerifiedStatus(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "verified")
 }
 
 func extractAttackChainItems(items []attackChainWorkbenchItem) []attackChainItem {
