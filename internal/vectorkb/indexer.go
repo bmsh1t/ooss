@@ -132,7 +132,7 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 			ContentHash: group.docHash,
 			Status:      "ready",
 			ChunkCount:  len(chunks),
-			Metadata:    "",
+			Metadata:    firstVectorChunkMetadata(chunks),
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
 		}
@@ -161,6 +161,15 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 	}
 
 	return summary, nil
+}
+
+func firstVectorChunkMetadata(chunks []VectorChunk) string {
+	for _, chunk := range chunks {
+		if strings.TrimSpace(chunk.Metadata) != "" {
+			return chunk.Metadata
+		}
+	}
+	return ""
 }
 
 func loadDocumentGroups(ctx context.Context, workspace string, maxChunks int) ([]documentGroup, int, error) {

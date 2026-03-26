@@ -3829,6 +3829,8 @@ type VulnerabilityQuery struct {
 	Confidence string
 	AssetValue string
 	VulnStatus string
+	FingerprintKey string
+	SourceRunUUID  string
 	Offset     int
 	Limit      int
 }
@@ -3871,6 +3873,12 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 	if query.VulnStatus != "" {
 		baseQuery = baseQuery.Where("vuln_status = ?", query.VulnStatus)
 	}
+	if query.FingerprintKey != "" {
+		baseQuery = baseQuery.Where("fingerprint_key = ?", query.FingerprintKey)
+	}
+	if query.SourceRunUUID != "" {
+		baseQuery = baseQuery.Where("source_run_uuid = ?", query.SourceRunUUID)
+	}
 
 	// Get total count with filters
 	totalCount, err := baseQuery.Count(ctx)
@@ -3898,6 +3906,12 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 			}
 			if query.VulnStatus != "" {
 				q = q.Where("vuln_status = ?", query.VulnStatus)
+			}
+			if query.FingerprintKey != "" {
+				q = q.Where("fingerprint_key = ?", query.FingerprintKey)
+			}
+			if query.SourceRunUUID != "" {
+				q = q.Where("source_run_uuid = ?", query.SourceRunUUID)
 			}
 			return q
 		}).

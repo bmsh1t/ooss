@@ -81,7 +81,18 @@ type attackChainWorkbenchItem struct {
 	LinkedAssets             []linkedAsset         `json:"linked_assets,omitempty"`
 	LinkedVulnerabilityCount int                   `json:"linked_vulnerability_count"`
 	VerifiedLinkedCount      int                   `json:"verified_linked_count"`
+	OperationalLinkedCount   int                   `json:"operational_linked_count"`
 	VerificationRate         float64               `json:"verification_rate"`
+	ExecutionReady           bool                  `json:"execution_ready"`
+	QueueRecommendation      string                `json:"queue_recommendation,omitempty"`
+}
+
+type attackChainWorkbenchSummary struct {
+	TotalChains                int      `json:"total_chains"`
+	VerifiedChains             int      `json:"verified_chains"`
+	ExecutionReadyChains       int      `json:"execution_ready_chains"`
+	RecommendedRetestChainIDs  []string `json:"recommended_retest_chain_ids,omitempty"`
+	RecommendedDeepScanTargets []string `json:"recommended_deep_scan_targets,omitempty"`
 }
 
 type QueueAttackChainRequest struct {
@@ -177,6 +188,7 @@ func GetAttackChain(cfg *config.Config) fiber.Handler {
 		return c.JSON(fiber.Map{
 			"data": fiber.Map{
 				"report":              report,
+				"summary":             buildAttackChainWorkbenchSummary(report, enrichedChains),
 				"chains":              enrichedChains,
 				"critical_paths":      decodeAttackPaths(report.CriticalPathsJSON),
 				"execution_checklist": buildExecutionChecklist(extractAttackChainItems(enrichedChains)),
@@ -500,26 +512,58 @@ func enrichAttackChains(ctx context.Context, workspace string, chains []attackCh
 	result := make([]attackChainWorkbenchItem, 0, len(chains))
 	for _, chain := range chains {
 		linkedVulns := findLinkedVulnerabilities(ctx, workspace, chain)
+		linkedAssets := findLinkedAssets(ctx, workspace, chain)
 		verifiedCount := 0
 		for _, vuln := range linkedVulns {
 			if isAttackChainVerifiedStatus(vuln.VulnStatus) {
 				verifiedCount++
 			}
 		}
+		operationalCount := countOperationallyVerifiedLinks(linkedVulns, true)
 		verificationRate := 0.0
 		if len(linkedVulns) > 0 {
 			verificationRate = float64(verifiedCount) / float64(len(linkedVulns))
 		}
+		recommendation := "manual-review"
+		switch {
+		case operationalCount > 0:
+			recommendation = "queue-retest"
+		case len(linkedVulns) > 0 || len(linkedAssets) > 0:
+			recommendation = "queue-deep-scan"
+		}
 		result = append(result, attackChainWorkbenchItem{
 			attackChainItem:          chain,
 			LinkedVulnerabilities:    linkedVulns,
-			LinkedAssets:             findLinkedAssets(ctx, workspace, chain),
+			LinkedAssets:             linkedAssets,
 			LinkedVulnerabilityCount: len(linkedVulns),
 			VerifiedLinkedCount:      verifiedCount,
+			OperationalLinkedCount:   operationalCount,
 			VerificationRate:         verificationRate,
+			ExecutionReady:           operationalCount > 0,
+			QueueRecommendation:      recommendation,
 		})
 	}
 	return result
+}
+
+func buildAttackChainWorkbenchSummary(report *database.AttackChainReport, items []attackChainWorkbenchItem) attackChainWorkbenchSummary {
+	summary := attackChainWorkbenchSummary{
+		TotalChains: len(items),
+	}
+	for _, item := range items {
+		if item.VerifiedLinkedCount > 0 {
+			summary.VerifiedChains++
+		}
+		if item.ExecutionReady {
+			summary.ExecutionReadyChains++
+			if trimmed := strings.TrimSpace(item.ChainID); trimmed != "" {
+				summary.RecommendedRetestChainIDs = append(summary.RecommendedRetestChainIDs, trimmed)
+			}
+		}
+	}
+	summary.RecommendedRetestChainIDs = dedupeNonEmptyStrings(summary.RecommendedRetestChainIDs)
+	summary.RecommendedDeepScanTargets = collectAttackChainTargets(report, items)
+	return summary
 }
 
 func findLinkedVulnerabilities(ctx context.Context, workspace string, chain attackChainItem) []linkedVulnerability {

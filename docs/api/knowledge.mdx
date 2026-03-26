@@ -7,6 +7,8 @@ description: "Ingest local documents, search knowledge chunks, auto-learn worksp
 
 The local knowledge base lets you ingest local files into `knowledge_documents` and `knowledge_chunks`, search them from CLI or API, and synthesize workspace findings back into reusable knowledge.
 
+When you run `kb learn` with `scope=public`, the learned documents are now stored in the shared `public` layer while preserving the original source workspace in metadata. Keyword and vector search also default to `workspace + public` layered recall whenever a primary workspace is provided.
+
 For semantic retrieval, Osmedeus now also supports a standalone vector SQLite database, defaulting to `{{base_folder}}/knowledge/vector-kb.sqlite`. This keeps vector embeddings portable and reusable across workflows without mixing them into the main relational DB tables.
 
 It is also consumed by `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` during semantic search.
@@ -159,7 +161,16 @@ curl -X POST http://localhost:8002/osm/api/knowledge/search \
       "doc_type": "md",
       "section": "Bypass Notes",
       "snippet": "Try alg confusion and key confusion around JWT verification...",
-      "score": 32.0
+      "score": 32.0,
+      "metadata": {
+        "scope": "public",
+        "knowledge_layer": "public",
+        "source_workspace": "example.com",
+        "sample_type": "verified",
+        "source_confidence": 0.95,
+        "target_types": ["url"],
+        "labels": ["auto-learn", "verified"]
+      }
     }
   ]
 }
@@ -195,6 +206,11 @@ curl -X POST http://localhost:8002/osm/api/knowledge/learn \
 | `max_vulnerabilities` | int | No | Maximum vulnerabilities to include |
 | `max_runs` | int | No | Maximum runs to include |
 | `include_ai_analysis` | bool | No | Include files from `<workspace>/ai-analysis` |
+
+**Response notes**
+
+- `workspace` remains the source workspace that was learned from.
+- `storage_workspace` reports where the learned documents were actually stored. For `scope=public`, this will be `public`.
 
 ---
 

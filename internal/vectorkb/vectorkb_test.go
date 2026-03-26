@@ -526,6 +526,54 @@ func TestVectorKBUsesExplicitConfiguredProvider(t *testing.T) {
 	require.EqualValues(t, 2, atomic.LoadInt32(&vectorRequests))
 }
 
+func TestSearchIncludesPublicLayerFallbackAndMetadata(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	doc := &database.KnowledgeDocument{
+		Workspace:   "public",
+		SourcePath:  "kb://learned/public/shared/verified-findings.md",
+		SourceType:  "generated",
+		DocType:     "learned-findings",
+		Title:       "Shared Verified Findings",
+		ContentHash: "shared-doc-hash",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"public","knowledge_layer":"public","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"target_types":["url"],"labels":["auto-learn","verified"]}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "public",
+		ChunkIndex:  0,
+		Section:     "SQL Injection",
+		Content:     "Verified SQL injection on login URL with UNION payload.",
+		ContentHash: "shared-chunk-hash",
+		Metadata:    `{"scope":"public","knowledge_layer":"public","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"target_types":["url"],"labels":["auto-learn","verified"]}`,
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	_, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "public"})
+	require.NoError(t, err)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     5,
+	}, "verified sql injection login url")
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, "public", results[0].Workspace)
+	require.NotNil(t, results[0].Metadata)
+	require.Equal(t, "public", results[0].Metadata.Scope)
+	require.Equal(t, "verified", results[0].Metadata.SampleType)
+	require.Contains(t, results[0].Metadata.TargetTypes, "url")
+}
+
 func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {
 	t.Helper()
 

@@ -29,15 +29,17 @@ type KnowledgeDocumentResult struct {
 
 // KnowledgeSearchHit is a scored keyword-search hit for a chunk.
 type KnowledgeSearchHit struct {
-	DocumentID int64   `json:"document_id"`
-	ChunkID    int64   `json:"chunk_id"`
-	Workspace  string  `json:"workspace"`
-	Title      string  `json:"title"`
-	SourcePath string  `json:"source_path"`
-	DocType    string  `json:"doc_type"`
-	Section    string  `json:"section,omitempty"`
-	Snippet    string  `json:"snippet"`
-	Score      float64 `json:"score"`
+	DocumentID  int64                     `json:"document_id"`
+	ChunkID     int64                     `json:"chunk_id"`
+	Workspace   string                    `json:"workspace"`
+	Title       string                    `json:"title"`
+	SourcePath  string                    `json:"source_path"`
+	DocType     string                    `json:"doc_type"`
+	Section     string                    `json:"section,omitempty"`
+	Snippet     string                    `json:"snippet"`
+	Score       float64                   `json:"score"`
+	Metadata    *KnowledgeMetadataSummary `json:"metadata,omitempty"`
+	ContentHash string                    `json:"-"`
 }
 
 // KnowledgeSearchOptions controls layered keyword search.
@@ -58,6 +60,7 @@ type knowledgeSearchCandidate struct {
 	DocType       string `bun:"doc_type"`
 	Section       string `bun:"section"`
 	Content       string `bun:"content"`
+	ContentHash   string `bun:"content_hash"`
 	ChunkMetadata string `bun:"chunk_metadata"`
 	DocMetadata   string `bun:"doc_metadata"`
 }
@@ -221,6 +224,7 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 		ColumnExpr("kd.doc_type AS doc_type").
 		ColumnExpr("kc.section AS section").
 		ColumnExpr("kc.content AS content").
+		ColumnExpr("kc.content_hash AS content_hash").
 		ColumnExpr("COALESCE(kc.metadata_json, '') AS chunk_metadata").
 		ColumnExpr("COALESCE(kd.metadata_json, '') AS doc_metadata").
 		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id").
@@ -248,24 +252,30 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 
 	results := make([]KnowledgeSearchHit, 0, len(candidates))
 	for _, candidate := range candidates {
+		metadata := ParseKnowledgeMetadata(candidate.ChunkMetadata, candidate.DocMetadata)
 		score := computeKnowledgeScore(query, candidate.Title, candidate.SourcePath, candidate.Content)
 		score += computeKnowledgeLayerBoost(workspaces, candidate.Workspace)
 		score += computeKnowledgeScopeBoost(scopeLayers, candidate.ChunkMetadata, candidate.DocMetadata)
+		score += computeKnowledgeMetadataBoost(query, metadata)
 		if score <= 0 {
 			continue
 		}
 		results = append(results, KnowledgeSearchHit{
-			DocumentID: candidate.DocumentID,
-			ChunkID:    candidate.ChunkID,
-			Workspace:  candidate.Workspace,
-			Title:      candidate.Title,
-			SourcePath: candidate.SourcePath,
-			DocType:    candidate.DocType,
-			Section:    candidate.Section,
-			Snippet:    buildKnowledgeSnippet(query, candidate.Content),
-			Score:      score,
+			DocumentID:  candidate.DocumentID,
+			ChunkID:     candidate.ChunkID,
+			Workspace:   candidate.Workspace,
+			Title:       candidate.Title,
+			SourcePath:  candidate.SourcePath,
+			DocType:     candidate.DocType,
+			Section:     candidate.Section,
+			Snippet:     buildKnowledgeSnippet(query, candidate.Content),
+			Score:       score,
+			Metadata:    metadata,
+			ContentHash: candidate.ContentHash,
 		})
 	}
+
+	results = dedupeKnowledgeSearchHits(results)
 
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Score == results[j].Score {
@@ -349,7 +359,10 @@ func normalizeKnowledgeWorkspace(workspace string) string {
 func normalizeKnowledgeWorkspaceLayers(workspace string, layers []string) []string {
 	if len(layers) == 0 {
 		if trimmed := strings.TrimSpace(workspace); trimmed != "" {
-			return []string{trimmed}
+			if trimmed == "public" {
+				return []string{"public"}
+			}
+			return []string{trimmed, "public"}
 		}
 		return nil
 	}
@@ -443,6 +456,91 @@ func computeKnowledgeScopeBoost(scopeLayers []string, metadata ...string) float6
 		}
 	}
 	return 0
+}
+
+func computeKnowledgeMetadataBoost(query string, metadata *KnowledgeMetadataSummary) float64 {
+	if metadata == nil {
+		return 0
+	}
+
+	boost := metadata.SourceConfidence * 0.18
+	switch strings.ToLower(strings.TrimSpace(metadata.SampleType)) {
+	case "verified":
+		boost += 0.22
+	case "workspace-summary":
+		boost += 0.05
+	case "ai-analysis":
+		boost -= 0.03
+	case "false_positive":
+		if queryLooksLikeFalsePositiveIntent(query) {
+			boost += 0.08
+		} else {
+			boost -= 0.14
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(metadata.Scope)) {
+	case "workspace":
+		boost += 0.08
+	case "project":
+		boost += 0.04
+	case "public":
+		boost += 0.03
+	}
+
+	for _, targetType := range metadata.TargetTypes {
+		if queryMentionsKnowledgeTag(query, targetType) {
+			boost += 0.06
+			break
+		}
+	}
+
+	return boost
+}
+
+func queryLooksLikeFalsePositiveIntent(query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	for _, token := range []string{"false positive", "false_positive", "误报", "noise"} {
+		if strings.Contains(query, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func queryMentionsKnowledgeTag(query, tag string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	return query != "" && tag != "" && strings.Contains(query, tag)
+}
+
+func dedupeKnowledgeSearchHits(results []KnowledgeSearchHit) []KnowledgeSearchHit {
+	if len(results) <= 1 {
+		return results
+	}
+
+	bestByKey := make(map[string]KnowledgeSearchHit, len(results))
+	order := make([]string, 0, len(results))
+	for _, result := range results {
+		key := strings.TrimSpace(result.ContentHash)
+		if key == "" {
+			key = strings.TrimSpace(result.SourcePath) + "::" + strings.TrimSpace(result.Section) + "::" + strings.TrimSpace(result.Snippet)
+		}
+		if existing, ok := bestByKey[key]; ok {
+			if existing.Score >= result.Score {
+				continue
+			}
+		} else {
+			order = append(order, key)
+		}
+		bestByKey[key] = result
+	}
+
+	deduped := make([]KnowledgeSearchHit, 0, len(bestByKey))
+	for _, key := range order {
+		deduped = append(deduped, bestByKey[key])
+	}
+	return deduped
 }
 
 func extractKnowledgeScope(metadata ...string) string {

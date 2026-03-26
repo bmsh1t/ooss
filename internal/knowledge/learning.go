@@ -35,16 +35,17 @@ type LearnOptions struct {
 
 // LearnSummary reports the output of a knowledge learning run.
 type LearnSummary struct {
-	Workspace       string   `json:"workspace"`
-	Scope           string   `json:"scope"`
-	Documents       int      `json:"documents"`
-	Chunks          int      `json:"chunks"`
-	AssetsIncluded  int      `json:"assets_included"`
-	VulnsIncluded   int      `json:"vulnerabilities_included"`
-	RunsIncluded    int      `json:"runs_included"`
-	AIFilesIncluded []string `json:"ai_files_included,omitempty"`
-	SourcePath      string   `json:"source_path"`
-	SourcePaths     []string `json:"source_paths,omitempty"`
+	Workspace        string   `json:"workspace"`
+	StorageWorkspace string   `json:"storage_workspace,omitempty"`
+	Scope            string   `json:"scope"`
+	Documents        int      `json:"documents"`
+	Chunks           int      `json:"chunks"`
+	AssetsIncluded   int      `json:"assets_included"`
+	VulnsIncluded    int      `json:"vulnerabilities_included"`
+	RunsIncluded     int      `json:"runs_included"`
+	AIFilesIncluded  []string `json:"ai_files_included,omitempty"`
+	SourcePath       string   `json:"source_path"`
+	SourcePaths      []string `json:"source_paths,omitempty"`
 }
 
 // LearnWorkspace builds a synthetic knowledge document from a workspace's existing findings.
@@ -105,9 +106,12 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 
 	targetTypes := collectLearnedTargetTypes(assetResult)
 	generatedAt := time.Now().Format(time.RFC3339)
+	storageWorkspace := resolveLearnedKnowledgeWorkspace(workspace, scope)
 	baseMetadata := map[string]interface{}{
 		"scope":                    scope,
+		"knowledge_layer":          storageWorkspace,
 		"source":                   "auto-learn",
+		"source_workspace":         workspace,
 		"workspace":                workspace,
 		"assets_included":          len(assetResult.Data),
 		"vulnerabilities_included": len(vulnResult.Data),
@@ -135,6 +139,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 				"kind":              "workspace-summary",
 				"source_confidence": 0.72,
 				"sample_type":       "workspace-summary",
+				"labels":            []string{"auto-learn", "workspace-summary", scope},
 			}),
 		},
 		{
@@ -146,6 +151,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 				"kind":              "verified-findings",
 				"source_confidence": 0.95,
 				"sample_type":       "verified",
+				"labels":            []string{"auto-learn", "verified", scope},
 			}),
 		},
 		{
@@ -157,6 +163,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 				"kind":              "false-positive-samples",
 				"source_confidence": 0.90,
 				"sample_type":       "false_positive",
+				"labels":            []string{"auto-learn", "false-positive", "negative-sample", scope},
 			}),
 		},
 		{
@@ -168,6 +175,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 				"kind":              "ai-insights",
 				"source_confidence": 0.64,
 				"sample_type":       "ai-analysis",
+				"labels":            []string{"auto-learn", "ai-analysis", scope},
 			}),
 		},
 	}
@@ -187,7 +195,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 		if len(chunks) == 0 {
 			continue
 		}
-		if err := upsertKnowledgeContent(ctx, workspace, doc.sourcePath, doc.docType, doc.title, content, doc.metadata); err != nil {
+		if err := upsertKnowledgeContent(ctx, storageWorkspace, doc.sourcePath, doc.docType, doc.title, content, doc.metadata); err != nil {
 			return nil, err
 		}
 		totalDocs++
@@ -202,16 +210,17 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 	}
 
 	return &LearnSummary{
-		Workspace:       workspace,
-		Scope:           scope,
-		Documents:       totalDocs,
-		Chunks:          totalChunks,
-		AssetsIncluded:  len(assetResult.Data),
-		VulnsIncluded:   len(vulnResult.Data),
-		RunsIncluded:    len(runResult.Data),
-		AIFilesIncluded: aiFiles,
-		SourcePath:      sourcePath,
-		SourcePaths:     sourcePaths,
+		Workspace:        workspace,
+		StorageWorkspace: storageWorkspace,
+		Scope:            scope,
+		Documents:        totalDocs,
+		Chunks:           totalChunks,
+		AssetsIncluded:   len(assetResult.Data),
+		VulnsIncluded:    len(vulnResult.Data),
+		RunsIncluded:     len(runResult.Data),
+		AIFilesIncluded:  aiFiles,
+		SourcePath:       sourcePath,
+		SourcePaths:      sourcePaths,
 	}, nil
 }
 
@@ -270,6 +279,21 @@ func normalizeLearnScope(scope string) string {
 		return strings.ToLower(strings.TrimSpace(scope))
 	default:
 		return defaultLearnScope
+	}
+}
+
+func resolveLearnedKnowledgeWorkspace(workspace, scope string) string {
+	workspace = strings.TrimSpace(workspace)
+	switch normalizeLearnScope(scope) {
+	case "public":
+		return "public"
+	case "project":
+		if workspace == "" {
+			return "project"
+		}
+		return "project:" + workspace
+	default:
+		return workspace
 	}
 }
 

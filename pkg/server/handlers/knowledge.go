@@ -214,7 +214,11 @@ func LearnKnowledge(cfg *config.Config) fiber.Handler {
 				"message": err.Error(),
 			})
 		}
-		if err := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "learn"); err != nil {
+		indexWorkspace := strings.TrimSpace(summary.StorageWorkspace)
+		if indexWorkspace == "" {
+			indexWorkspace = strings.TrimSpace(summary.Workspace)
+		}
+		if err := maybeAutoIndexVectorKnowledge(ctx, cfg, indexWorkspace, "learn"); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":   true,
 				"message": err.Error(),

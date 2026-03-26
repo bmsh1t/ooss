@@ -129,10 +129,15 @@ func TestGetAttackChainVerifiedOnlyAndQueueRetest(t *testing.T) {
 	var getResult map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&getResult))
 	data := getResult["data"].(map[string]any)
+	summary := data["summary"].(map[string]any)
 	chains := data["chains"].([]any)
 	require.Len(t, chains, 1)
 	chain := chains[0].(map[string]any)
 	assert.Equal(t, "chain-verified", chain["chain_id"])
+	assert.Equal(t, true, chain["execution_ready"])
+	assert.Equal(t, "queue-retest", chain["queue_recommendation"])
+	assert.Equal(t, float64(1), summary["verified_chains"])
+	assert.Equal(t, float64(1), summary["execution_ready_chains"])
 
 	body, err := json.Marshal(map[string]any{
 		"module":        "retest-module",

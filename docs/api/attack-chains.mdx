@@ -29,6 +29,14 @@ curl http://localhost:8002/osm/api/attack-chains/12 \
 
 Use `?verifiable_only=true` to filter the returned chains down to items with usable entry points and steps.
 
+`GET /attack-chains/:id` now also returns:
+
+- `summary.verified_chains`
+- `summary.execution_ready_chains`
+- `summary.recommended_retest_chain_ids`
+- `summary.recommended_deep_scan_targets`
+- per-chain `execution_ready`, `operational_linked_count`, and `queue_recommendation`
+
 ## Import an Attack Chain Report
 
 ```bash
@@ -75,6 +83,8 @@ curl -X POST http://localhost:8002/osm/api/attack-chains/12/queue-retest \
 ```
 
 This queues retest runs for linked vulnerabilities. The selected vulnerability records are also updated with the chosen `attack_chain_ref`.
+
+Chains with at least one `verified` or queued `retest`-eligible linked vulnerability are surfaced as `queue-retest` recommendations in the detail API.
 
 ## Queue Deep Scan from an Attack Chain
 

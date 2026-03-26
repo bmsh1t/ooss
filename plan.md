@@ -8,6 +8,8 @@
   - File ingest for common local document types
   - Search and document listing APIs/CLI
   - Workspace knowledge auto-learning from scan outputs
+  - Workspace/public layered retrieval defaults and learned-knowledge metadata weighting
+  - Learned documents now preserve source confidence, sample type, target-type tags, and shared-layer storage
 - Campaign batch-operation backend v1 is in place.
   - Campaign entity and aggregation
   - Failed target rerun
@@ -18,17 +20,26 @@
   - Retest task creation and queue-state synchronization
   - Automatic post-retest closure based on imported retest results
   - Workspace vulnerability board API
+  - Vulnerability detail now exposes status timeline and retest timeline
+  - Vulnerability list now supports `fingerprint_key` and `source_run_uuid` filters
 - Attack chain workbench backend v1 is in place.
   - Attack-chain report persistence
   - Attack-chain import function/API
   - Summary/detail query APIs
   - Workflow fragments now write attack-chain outputs into the report store
   - Detail API now links chains back to matching vulnerabilities and assets
+  - Detail API now exposes execution-ready counts, queue recommendations, and recommended deep-scan targets
+  - ACP attack-chain input is now pre-curated to prefer verified findings and exclude false-positive nodes
 - Superdomain AI workflows are now more cohesive.
   - `stable` and `hybrid` include attack-chain visualization
   - `stable`, `hybrid`, `optimized`, and `lite` include post-run knowledge auto-learning
 - Current-source verification completed for this round:
   - `make build`
+  - targeted `go test ./internal/knowledge`
+  - targeted `go test ./internal/vectorkb`
+  - targeted `go test ./internal/database`
+  - targeted `go test ./pkg/server/handlers`
+  - targeted `go test ./pkg/cli`
   - workflow validation for `superdomain-extensive-stable`
   - workflow validation for `superdomain-extensive-hybrid`
   - workflow validation for `superdomain-extensive`
@@ -39,7 +50,6 @@
   - source run UUID propagation in vulnerability mapping
 - Static checks completed for the current round.
   - `gofmt`
-  - `git diff --check`
   - YAML structure review for modified workflow fragments
 
 ## Unfinished Work
@@ -65,7 +75,7 @@
 - Current knowledge base is now split into a main relational KB plus a standalone vectorkb retrieval layer.
 - Not done yet:
   - webpage/article ingestion
-  - richer cross-workspace ranking strategy beyond primary/shared/global layering
+  - richer cross-workspace ranking strategy beyond workspace/public defaults
   - stronger learned-document pruning and confidence aging
   - writeback from more workflow outcomes, not only summary-style learned artifacts
 
@@ -93,6 +103,7 @@
   - frontend or visual workbench page
   - workspace-level attack-chain dashboard
   - campaign-aware attack-chain queue analytics
+  - queue outcome feedback loop into attack-chain success-rate scoring
 
 ### 6. Documentation
 

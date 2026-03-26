@@ -66,6 +66,8 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&status
 | `confidence` | string | - | Filter by confidence (Certain, Firm, Tentative, Manual Review Required) |
 | `asset_value` | string | - | Filter by asset value (partial match) |
 | `status` | string | - | Filter by lifecycle status (`new`, `triaged`, `verified`, `false_positive`, `retest`, `closed`) |
+| `fingerprint_key` | string | - | Filter by the merged fingerprint key |
+| `source_run_uuid` | string | - | Filter by the currently linked source run UUID |
 | `offset` | int | 0 | Number of records to skip |
 | `limit` | int | 20 | Maximum records to return (max 10000) |
 
@@ -212,6 +214,30 @@ curl http://localhost:8002/osm/api/vulnerabilities/1 \
         "asset_value": "https://example.com/login"
       }
     ],
+    "status_timeline": [
+      {
+        "evidence_version": 1,
+        "observed_at": "2025-01-15T10:30:00Z",
+        "vuln_status": "verified",
+        "source_run_uuid": "run-source-1"
+      },
+      {
+        "evidence_version": 2,
+        "observed_at": "2025-01-15T10:45:00Z",
+        "vuln_status": "retest",
+        "retest_status": "queued",
+        "source_run_uuid": "run-source-1"
+      }
+    ],
+    "retest_timeline": [
+      {
+        "run_uuid": "retest-run-1",
+        "workflow_name": "web-analysis",
+        "workflow_kind": "flow",
+        "status": "queued",
+        "trigger_type": "vuln-retest"
+      }
+    ],
     "related_runs": [
       {
         "run_uuid": "retest-run-1",
@@ -248,6 +274,8 @@ curl http://localhost:8002/osm/api/vulnerabilities/1 \
 `GET /vulnerabilities/:id` now returns the merged audit trail for a finding. The extra fields are:
 
 - `evidence_timeline`: parsed evidence history snapshots.
+- `status_timeline`: evidence-version-aware status progression for the merged record.
+- `retest_timeline`: only the retest-related runs extracted from `related_runs`.
 - `related_runs`: resolved source/retest/history run references.
 - `related_asset_records`: matching asset rows in the same workspace.
 - `related_attack_chains`: matching attack-chain workbench entries resolved by ref, URL, or vulnerability name.
@@ -466,6 +494,8 @@ curl -X DELETE http://localhost:8002/osm/api/vulnerabilities/15 \
 | `evidence_version` | int | Monotonic version number for evidence changes |
 | `evidence_history` | string | Stored JSON history of evidence snapshots |
 | `evidence_timeline` | array | Parsed evidence history returned by `GET /vulnerabilities/:id` |
+| `status_timeline` | array | Version-aware status progression returned by `GET /vulnerabilities/:id` |
+| `retest_timeline` | array | Retest-only run timeline returned by `GET /vulnerabilities/:id` |
 | `related_runs` | array | Resolved run summaries returned by `GET /vulnerabilities/:id` |
 | `related_asset_records` | array | Resolved asset rows returned by `GET /vulnerabilities/:id` |
 | `related_attack_chains` | array | Resolved attack-chain links returned by `GET /vulnerabilities/:id` |

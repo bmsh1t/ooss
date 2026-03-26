@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
+	"github.com/j3ssie/osmedeus/v5/internal/database"
 	illm "github.com/j3ssie/osmedeus/v5/internal/llm"
 	"github.com/uptrace/bun"
 )
@@ -23,10 +24,12 @@ type searchRow struct {
 	DocType       string `bun:"doc_type"`
 	Section       string `bun:"section"`
 	Content       string `bun:"content"`
+	ContentHash   string `bun:"content_hash"`
 	Provider      string `bun:"provider"`
 	Model         string `bun:"model"`
 	EmbeddingJSON string `bun:"embedding_json"`
 	ChunkMetadata string `bun:"chunk_metadata"`
+	DocMetadata   string `bun:"doc_metadata"`
 }
 
 // Search queries the independent vector knowledge DB.
@@ -78,10 +81,12 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		ColumnExpr("vd.doc_type AS doc_type").
 		ColumnExpr("vc.section AS section").
 		ColumnExpr("vc.content AS content").
+		ColumnExpr("vc.content_hash AS content_hash").
 		ColumnExpr("ve.provider AS provider").
 		ColumnExpr("ve.model AS model").
 		ColumnExpr("ve.embedding_json AS embedding_json").
 		ColumnExpr("COALESCE(vc.metadata_json, '') AS chunk_metadata").
+		ColumnExpr("COALESCE(vd.metadata_json, '') AS doc_metadata").
 		Join("JOIN vector_chunks AS vc ON vc.id = ve.chunk_id").
 		Join("JOIN vector_documents AS vd ON vd.id = vc.document_id").
 		Where("ve.provider = ?", provider).
@@ -117,6 +122,8 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		keywordScore := computeKeywordScore(query, row.Title, row.SourcePath, row.Content)
 		layerBoost := computeVectorLayerBoost(workspaces, row.Workspace)
 		scopeBoost := computeVectorScopeBoost(scopeLayers, row.ChunkMetadata)
+		metadata := database.ParseKnowledgeMetadata(row.ChunkMetadata, row.DocMetadata)
+		metadataBoost := computeVectorMetadataBoost(query, metadata)
 		if vectorScore <= 0 && keywordScore <= 0 {
 			continue
 		}
@@ -134,10 +141,14 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 			Model:          row.Model,
 			VectorScore:    vectorScore,
 			KeywordScore:   keywordScore,
-			RelevanceScore: (vectorScore * hybridWeight) + (keywordScore * keywordWeight) + layerBoost + scopeBoost,
+			RelevanceScore: (vectorScore * hybridWeight) + (keywordScore * keywordWeight) + layerBoost + scopeBoost + metadataBoost,
 			Type:           "vector_kb",
+			Metadata:       metadata,
+			ContentHash:    row.ContentHash,
 		})
 	}
+
+	results = dedupeVectorSearchHits(results)
 
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].RelevanceScore == results[j].RelevanceScore {
@@ -154,7 +165,10 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 func normalizeVectorWorkspaceLayers(workspace string, layers []string) []string {
 	if len(layers) == 0 {
 		if trimmed := strings.TrimSpace(workspace); trimmed != "" {
-			return []string{trimmed}
+			if trimmed == "public" {
+				return []string{"public"}
+			}
+			return []string{trimmed, "public"}
 		}
 		return nil
 	}
@@ -226,6 +240,82 @@ func computeVectorScopeBoost(scopeLayers []string, metadata string) float64 {
 		}
 	}
 	return 0
+}
+
+func computeVectorMetadataBoost(query string, metadata *database.KnowledgeMetadataSummary) float64 {
+	if metadata == nil {
+		return 0
+	}
+
+	boost := metadata.SourceConfidence * 0.18
+	switch strings.ToLower(strings.TrimSpace(metadata.SampleType)) {
+	case "verified":
+		boost += 0.22
+	case "workspace-summary":
+		boost += 0.05
+	case "ai-analysis":
+		boost -= 0.03
+	case "false_positive":
+		if queryLooksLikeFalsePositiveIntent(query) {
+			boost += 0.08
+		} else {
+			boost -= 0.14
+		}
+	}
+
+	for _, targetType := range metadata.TargetTypes {
+		if queryMentionsKnowledgeTag(query, targetType) {
+			boost += 0.06
+			break
+		}
+	}
+
+	return boost
+}
+
+func dedupeVectorSearchHits(results []SearchHit) []SearchHit {
+	if len(results) <= 1 {
+		return results
+	}
+
+	bestByKey := make(map[string]SearchHit, len(results))
+	order := make([]string, 0, len(results))
+	for _, result := range results {
+		key := strings.TrimSpace(result.ContentHash)
+		if key == "" {
+			key = strings.TrimSpace(result.SourcePath) + "::" + strings.TrimSpace(result.Section) + "::" + strings.TrimSpace(result.Snippet)
+		}
+		if existing, ok := bestByKey[key]; ok {
+			if existing.RelevanceScore >= result.RelevanceScore {
+				continue
+			}
+		} else {
+			order = append(order, key)
+		}
+		bestByKey[key] = result
+	}
+
+	deduped := make([]SearchHit, 0, len(bestByKey))
+	for _, key := range order {
+		deduped = append(deduped, bestByKey[key])
+	}
+	return deduped
+}
+
+func queryLooksLikeFalsePositiveIntent(query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	for _, token := range []string{"false positive", "false_positive", "误报", "noise"} {
+		if strings.Contains(query, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func queryMentionsKnowledgeTag(query, tag string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	return query != "" && tag != "" && strings.Contains(query, tag)
 }
 
 func cosineSimilarity(left, right []float64) float64 {

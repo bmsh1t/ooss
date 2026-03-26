@@ -16,6 +16,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestListVulnerabilities_FiltersByFingerprintAndSourceRun(t *testing.T) {
+	cfg, cleanup := setupVulnerabilityHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	first := &database.Vulnerability{
+		Workspace:     "acme",
+		VulnInfo:      "sql-injection",
+		VulnTitle:     "SQL Injection",
+		Severity:      "high",
+		Confidence:    "certain",
+		AssetType:     "url",
+		AssetValue:    "https://app.acme.test/login",
+		VulnStatus:    "verified",
+		SourceRunUUID: "run-a",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastSeenAt:    now,
+	}
+	result, err := database.CreateVulnerabilityRecord(ctx, first)
+	require.NoError(t, err)
+	require.NotNil(t, result.Vulnerability)
+
+	second := &database.Vulnerability{
+		Workspace:     "acme",
+		VulnInfo:      "xss",
+		VulnTitle:     "Reflected XSS",
+		Severity:      "medium",
+		Confidence:    "firm",
+		AssetType:     "url",
+		AssetValue:    "https://app.acme.test/search",
+		VulnStatus:    "triaged",
+		SourceRunUUID: "run-b",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastSeenAt:    now,
+	}
+	_, err = database.CreateVulnerabilityRecord(ctx, second)
+	require.NoError(t, err)
+
+	app := fiber.New()
+	app.Get("/vulnerabilities", ListVulnerabilities(cfg))
+
+	req := httptest.NewRequest("GET", "/vulnerabilities?fingerprint_key="+result.Vulnerability.FingerprintKey+"&source_run_uuid=run-a", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	var payload struct {
+		Data []database.Vulnerability `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	require.Len(t, payload.Data, 1)
+	assert.Equal(t, "run-a", payload.Data[0].SourceRunUUID)
+	assert.Equal(t, result.Vulnerability.FingerprintKey, payload.Data[0].FingerprintKey)
+}
+
 func setupVulnerabilityHandlerDB(t *testing.T) (*config.Config, func()) {
 	t.Helper()
 
@@ -153,6 +212,8 @@ func TestGetVulnerability_EnrichesTimelineAndRelations(t *testing.T) {
 			VulnStatus          string                           `json:"vuln_status"`
 			EvidenceVersion     int                              `json:"evidence_version"`
 			EvidenceTimeline    []database.VulnerabilityEvidence `json:"evidence_timeline"`
+			StatusTimeline      []map[string]any                 `json:"status_timeline"`
+			RetestTimeline      []map[string]any                 `json:"retest_timeline"`
 			RelatedRuns         []map[string]any                 `json:"related_runs"`
 			RelatedAssetRecords []map[string]any                 `json:"related_asset_records"`
 			RelatedAttackChains []map[string]any                 `json:"related_attack_chains"`
@@ -164,8 +225,12 @@ func TestGetVulnerability_EnrichesTimelineAndRelations(t *testing.T) {
 	assert.Equal(t, "retest", payload.Data.VulnStatus)
 	assert.Equal(t, 2, payload.Data.EvidenceVersion)
 	require.Len(t, payload.Data.EvidenceTimeline, 2)
+	require.Len(t, payload.Data.StatusTimeline, 2)
+	require.Len(t, payload.Data.RetestTimeline, 1)
 	assert.Equal(t, "verified", payload.Data.EvidenceTimeline[0].VulnStatus)
 	assert.Equal(t, "retest", payload.Data.EvidenceTimeline[1].VulnStatus)
+	assert.Equal(t, float64(1), payload.Data.StatusTimeline[0]["evidence_version"])
+	assert.Equal(t, "queued", payload.Data.RetestTimeline[0]["status"])
 	require.Len(t, payload.Data.RelatedRuns, 2)
 	require.Len(t, payload.Data.RelatedAssetRecords, 1)
 	require.Len(t, payload.Data.RelatedAttackChains, 1)

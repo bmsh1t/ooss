@@ -249,7 +249,11 @@ func runKBLearn(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "learn"); err != nil {
+	indexWorkspace := strings.TrimSpace(summary.StorageWorkspace)
+	if indexWorkspace == "" {
+		indexWorkspace = strings.TrimSpace(summary.Workspace)
+	}
+	if err := maybeAutoIndexVectorKnowledge(ctx, cfg, indexWorkspace, "learn"); err != nil {
 		return err
 	}
 
@@ -265,6 +269,9 @@ func runKBLearn(cmd *cobra.Command, args []string) error {
 	printer := terminal.NewPrinter()
 	printer.Success("Knowledge learning completed")
 	fmt.Printf("Workspace: %s\n", summary.Workspace)
+	if strings.TrimSpace(summary.StorageWorkspace) != "" && strings.TrimSpace(summary.StorageWorkspace) != strings.TrimSpace(summary.Workspace) {
+		fmt.Printf("Stored In: %s\n", summary.StorageWorkspace)
+	}
 	fmt.Printf("Scope:     %s\n", summary.Scope)
 	fmt.Printf("Document:  %s\n", summary.SourcePath)
 	fmt.Printf("Chunks:    %d\n", summary.Chunks)

@@ -49,9 +49,33 @@ type vulnerabilityAttackChainSummary struct {
 	Probability float64 `json:"success_probability,omitempty"`
 }
 
+type vulnerabilityStatusTimelineItem struct {
+	EvidenceVersion int       `json:"evidence_version"`
+	ObservedAt      time.Time `json:"observed_at"`
+	VulnStatus      string    `json:"vuln_status,omitempty"`
+	RetestStatus    string    `json:"retest_status,omitempty"`
+	Severity        string    `json:"severity,omitempty"`
+	Confidence      string    `json:"confidence,omitempty"`
+	SourceRunUUID   string    `json:"source_run_uuid,omitempty"`
+	AttackChainRef  string    `json:"attack_chain_ref,omitempty"`
+}
+
+type vulnerabilityRetestTimelineItem struct {
+	RunUUID      string     `json:"run_uuid"`
+	WorkflowName string     `json:"workflow_name,omitempty"`
+	WorkflowKind string     `json:"workflow_kind,omitempty"`
+	Status       string     `json:"status,omitempty"`
+	TriggerType  string     `json:"trigger_type,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
 type vulnerabilityDetailResponse struct {
 	database.Vulnerability
 	EvidenceTimeline    []database.VulnerabilityEvidence  `json:"evidence_timeline,omitempty"`
+	StatusTimeline      []vulnerabilityStatusTimelineItem `json:"status_timeline,omitempty"`
+	RetestTimeline      []vulnerabilityRetestTimelineItem `json:"retest_timeline,omitempty"`
 	RelatedRuns         []vulnerabilityRunSummary         `json:"related_runs,omitempty"`
 	RelatedAssetRecords []vulnerabilityAssetRecord        `json:"related_asset_records,omitempty"`
 	RelatedAttackChains []vulnerabilityAttackChainSummary `json:"related_attack_chains,omitempty"`
@@ -80,6 +104,8 @@ func ListVulnerabilities(cfg *config.Config) fiber.Handler {
 		confidence := c.Query("confidence")
 		assetValue := c.Query("asset_value")
 		vulnStatus := c.Query("status")
+		fingerprintKey := c.Query("fingerprint_key")
+		sourceRunUUID := c.Query("source_run_uuid")
 		offset, _ := strconv.Atoi(c.Query("offset", "0"))
 		limit, _ := strconv.Atoi(c.Query("limit", "20"))
 
@@ -98,13 +124,15 @@ func ListVulnerabilities(cfg *config.Config) fiber.Handler {
 
 		// Get vulnerabilities from database
 		result, err := database.ListVulnerabilities(ctx, database.VulnerabilityQuery{
-			Workspace:  workspace,
-			Severity:   severity,
-			Confidence: confidence,
-			AssetValue: assetValue,
-			VulnStatus: vulnStatus,
-			Offset:     offset,
-			Limit:      limit,
+			Workspace:      workspace,
+			Severity:       severity,
+			Confidence:     confidence,
+			AssetValue:     assetValue,
+			VulnStatus:     vulnStatus,
+			FingerprintKey: fingerprintKey,
+			SourceRunUUID:  sourceRunUUID,
+			Offset:         offset,
+			Limit:          limit,
 		})
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -750,6 +778,8 @@ func buildVulnerabilityDetail(ctx context.Context, vuln *database.Vulnerability)
 	}
 	detail.EvidenceTimeline = buildVulnerabilityEvidenceTimeline(vuln)
 	detail.RelatedRuns = findVulnerabilityRelatedRuns(ctx, vuln, detail.EvidenceTimeline)
+	detail.StatusTimeline = buildVulnerabilityStatusTimeline(vuln, detail.EvidenceTimeline, detail.RelatedRuns)
+	detail.RetestTimeline = buildVulnerabilityRetestTimeline(detail.RelatedRuns)
 	detail.RelatedAssetRecords = findVulnerabilityRelatedAssets(ctx, vuln, detail.EvidenceTimeline)
 	detail.RelatedAttackChains = findVulnerabilityRelatedAttackChains(ctx, vuln, detail.EvidenceTimeline)
 	return detail
@@ -773,6 +803,64 @@ func buildVulnerabilityEvidenceTimeline(vuln *database.Vulnerability) []database
 		return history[i].ObservedAt.Before(history[j].ObservedAt)
 	})
 	return history
+}
+
+func buildVulnerabilityStatusTimeline(vuln *database.Vulnerability, history []database.VulnerabilityEvidence, runs []vulnerabilityRunSummary) []vulnerabilityStatusTimelineItem {
+	if vuln == nil {
+		return nil
+	}
+
+	runByUUID := make(map[string]vulnerabilityRunSummary, len(runs))
+	for _, run := range runs {
+		runByUUID[strings.TrimSpace(run.RunUUID)] = run
+	}
+
+	result := make([]vulnerabilityStatusTimelineItem, 0, len(history))
+	for idx, item := range history {
+		retestStatus := ""
+		runUUID := strings.TrimSpace(item.SourceRunUUID)
+		if run, ok := runByUUID[runUUID]; ok && strings.Contains(strings.ToLower(strings.TrimSpace(run.TriggerType)), "retest") {
+			retestStatus = strings.TrimSpace(run.Status)
+		}
+		if idx == len(history)-1 && strings.TrimSpace(vuln.RetestStatus) != "" {
+			retestStatus = strings.TrimSpace(vuln.RetestStatus)
+		}
+		result = append(result, vulnerabilityStatusTimelineItem{
+			EvidenceVersion: idx + 1,
+			ObservedAt:      item.ObservedAt,
+			VulnStatus:      strings.TrimSpace(item.VulnStatus),
+			RetestStatus:    retestStatus,
+			Severity:        strings.TrimSpace(item.Severity),
+			Confidence:      strings.TrimSpace(item.Confidence),
+			SourceRunUUID:   runUUID,
+			AttackChainRef:  strings.TrimSpace(item.AttackChainRef),
+		})
+	}
+	return result
+}
+
+func buildVulnerabilityRetestTimeline(runs []vulnerabilityRunSummary) []vulnerabilityRetestTimelineItem {
+	result := make([]vulnerabilityRetestTimelineItem, 0, len(runs))
+	for _, run := range runs {
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(run.TriggerType)), "retest") {
+			continue
+		}
+		result = append(result, vulnerabilityRetestTimelineItem{
+			RunUUID:      run.RunUUID,
+			WorkflowName: run.WorkflowName,
+			WorkflowKind: run.WorkflowKind,
+			Status:       run.Status,
+			TriggerType:  run.TriggerType,
+			CreatedAt:    run.CreatedAt,
+			StartedAt:    run.StartedAt,
+			CompletedAt:  run.CompletedAt,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result
 }
 
 func findVulnerabilityRelatedRuns(ctx context.Context, vuln *database.Vulnerability, history []database.VulnerabilityEvidence) []vulnerabilityRunSummary {

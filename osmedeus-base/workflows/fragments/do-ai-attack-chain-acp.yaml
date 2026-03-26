@@ -30,6 +30,8 @@ params:
     default: "{{Output}}/ai-analysis/must-verify-vulns-{{TargetSpace}}.txt"
   - name: pivotAssetsFile
     default: "{{Output}}/ai-analysis/pivot-assets-{{TargetSpace}}.txt"
+  - name: attackChainPreparedInput
+    default: "{{Output}}/ai-analysis/attack-chain-input-{{TargetSpace}}.json"
 
   # 输入文件
   - name: vulnValidationFile
@@ -66,6 +68,9 @@ params:
   - name: agentTimeout
     type: string
     default: "{{agentTimeout}}"
+  - name: attackChainVerifiedPreferred
+    type: bool
+    default: true
 
 steps:
   - name: prepare-attack-chain
@@ -112,30 +117,85 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # 优先使用已验证的漏洞数据
+      ATTACK_INPUT="{{attackChainPreparedInput}}"
+
+      # 优先整理已验证/已确认的漏洞数据，避免 agent 直接从原始噪声中建链
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
-        echo "[INFO] [Attack Chain] Using validated vulnerability data"
-        cat {{vulnValidationFile}} > {{Output}}/ai-analysis/attack-chain-input.json
+        echo "[INFO] [Attack Chain] Building curated validated input"
+        jq '
+          def norm_status:
+            (.status // .verification_status // .verdict // "" | tostring | ascii_downcase);
+          def norm_conf:
+            (.confidence // .score // 0.0 | tonumber? // 0.0);
+          . as $root
+          | ($root.findings // []) as $findings
+          | {
+              source: "validated-prepared",
+              target: "{{Target}}",
+              workspace: "{{TargetSpace}}",
+              verified_preferred: {{attackChainVerifiedPreferred}},
+              summary: {
+                total_findings: ($findings | length),
+                verified_findings: ($findings | map(select(norm_status == "verified" or norm_status == "confirmed")) | length),
+                candidate_findings: ($findings | map(select(norm_status != "false_positive")) | length),
+                false_positive_findings: ($findings | map(select(norm_status == "false_positive")) | length)
+              },
+              verified_findings: ($findings | map(select(norm_status == "verified" or norm_status == "confirmed"))),
+              candidate_findings: ($findings | map(select(norm_status != "false_positive" and norm_conf >= 0.55))),
+              false_positive_samples: ($findings | map(select(norm_status == "false_positive"))),
+              validation_summary: ($root.validation_summary // {}),
+              high_priority_items: ($root.high_priority_items // [])
+            }
+        ' "{{vulnValidationFile}}" > "$ATTACK_INPUT"
       else
         # 否则使用原始扫描数据构建输入
-        cat > {{Output}}/ai-analysis/attack-chain-input.json << 'EOF'
+        cat > "$ATTACK_INPUT" << 'EOF'
         {
           "source": "direct_scan",
-          "critical": [],
-          "high": [],
-          "secrets": [],
-          "confirmed": []
+          "target": "{{Target}}",
+          "workspace": "{{TargetSpace}}",
+          "verified_preferred": {{attackChainVerifiedPreferred}},
+          "summary": {
+            "total_findings": 0,
+            "verified_findings": 0,
+            "candidate_findings": 0,
+            "false_positive_findings": 0
+          },
+          "verified_findings": [],
+          "candidate_findings": [],
+          "false_positive_samples": []
         }
         EOF
-
-        # 收集 Critical 漏洞
-        if [ -f "{{nucleiCriticalFile}}" ]; then
-          jq -rn 'input | split("\n") | map(select(length > 0))' < {{nucleiCriticalFile}} 2>/dev/null || cat {{nucleiCriticalFile}} >> {{Output}}/ai-analysis/attack-chain-input.json
-        fi
       fi
 
+      for file in "{{nucleiCriticalFile}}" "{{nucleiHighFile}}" "{{sqliFile}}" "{{takeoverFile}}" "{{secretsFile}}" "{{confirmedUrlsFile}}"; do
+        if [ ! -f "$file" ]; then
+          mkdir -p "$(dirname "$file")"
+          : > "$file"
+        fi
+      done
+
+      # 追加原始高危输入，作为 verified 不足时的回退上下文
+      jq \
+        --rawfile critical "{{nucleiCriticalFile}}" \
+        --rawfile high "{{nucleiHighFile}}" \
+        --rawfile sqli "{{sqliFile}}" \
+        --rawfile takeover "{{takeoverFile}}" \
+        --rawfile secrets "{{secretsFile}}" \
+        --rawfile confirmed "{{confirmedUrlsFile}}" \
+        '
+          .raw_inputs = {
+            critical_lines: ($critical | split("\n") | map(select(length > 0))),
+            high_lines: ($high | split("\n") | map(select(length > 0))),
+            sqli_lines: ($sqli | split("\n") | map(select(length > 0))),
+            takeover_lines: ($takeover | split("\n") | map(select(length > 0))),
+            secrets_lines: ($secrets | split("\n") | map(select(length > 0))),
+            confirmed_urls: ($confirmed | split("\n") | map(select(length > 0)))
+          }
+        ' "$ATTACK_INPUT" > "$ATTACK_INPUT.tmp" && mv "$ATTACK_INPUT.tmp" "$ATTACK_INPUT"
+
       # 统计可用的漏洞数据
-      CHAIN_INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/attack-chain-input.json 2>/dev/null || echo 0)
+      CHAIN_INPUT_SIZE=$(wc -c < "$ATTACK_INPUT" 2>/dev/null || echo 0)
       echo "[INFO] [Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
 
   - name: ai-analyze-attack-chains
@@ -169,6 +229,9 @@ steps:
 
           ## 技术栈
           请使用 read_lines 工具读取 {{fingerprintFile}}
+
+          ## 预处理后的攻击链输入（主输入）
+          请使用 read_lines 工具读取 {{attackChainPreparedInput}}
 
           ## 已验证漏洞（优先使用）
           请使用 read_lines 工具读取 {{vulnValidationFile}}
@@ -250,6 +313,8 @@ steps:
           只输出 JSON，确保格式完全正确。
           
           额外要求：
+          - 优先仅基于 verified / confirmed findings 建链；如果 verified 为空，才退回到 non-false-positive 的高置信候选
+          - false_positive 样本只能用于排除和校准，不得作为攻击链节点
           - 如果 validated finding、semantic result、knowledge/vector 命中同时指向同一 URL、同一入口或同一产品弱点，要把它视为高优先级攻击链入口
           - 不要编造不存在的中间条件
           - 更偏向真实可落地的链路，而不是理论最复杂的链路

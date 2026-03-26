@@ -25,11 +25,11 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Declarative YAML Workflows** - Define pipelines with hooks, decision routing, module exclusion, and conditional branching across multiple runners (host, Docker, SSH)
 - **Distributed Execution** - Redis-based master-worker pattern with queue system, webhook triggers, and file sync across workers
 - **Rich Function Library** - 80+ utility functions including nmap integration, tmux sessions, SSH execution, TypeScript/Python scripting, SARIF parsing, and CDN/WAF classification
-- **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), search them from CLI/API, and synthesize scan findings back into reusable workspace knowledge
+- **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), search them from CLI/API, and synthesize scan findings back into reusable workspace/public knowledge layers
 - **Independent Vector Knowledge DB** - Store reusable semantic knowledge in a standalone `vector-kb.sqlite`, auto-index on `kb ingest` / `kb learn`, and let workflows query it directly
 - **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
-- **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, and workspace risk boards
-- **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report
+- **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, workspace risk boards, and evidence/status timelines
+- **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report with execution-ready recommendations
 - **Superdomain AI Workflow Family** - `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
 - **Event-Driven Scheduling** - Cron, file-watch, and event triggers with filtering, deduplication, and delayed task queues
 - **Agentic LLM Steps** - Tool-calling agent loops with sub-agent orchestration, memory management, and structured output; plus ACP subprocess agents (Claude Code, Codex, OpenCode, Gemini)
@@ -292,6 +292,8 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - Search/list stored documents from CLI and REST API
   - Auto-learn scan results back into the knowledge base for later reuse
   - Maintain a standalone `vector-kb.sqlite` with direct CLI/API semantic search
+  - Knowledge search now defaults to `workspace + public` layered recall when a workspace is provided
+  - Learned knowledge now preserves source confidence, sample type, target-type tags, and shared `public` storage
 - **Campaign APIs**
   - `GET /osm/api/campaigns`
   - `POST /osm/api/campaigns`
@@ -305,7 +307,8 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `PATCH /osm/api/vulnerabilities/:id`
   - `POST /osm/api/vulnerabilities/:id/retest`
   - vulnerability creation now supports merge-on-create with fingerprint dedup and evidence history
-  - vulnerability detail now resolves evidence timeline, related runs, related asset rows, and related attack-chain matches
+  - vulnerability list now supports `fingerprint_key` and `source_run_uuid` filters
+  - vulnerability detail now resolves evidence timeline, status timeline, retest timeline, related runs, related asset rows, and related attack-chain matches
 - **Attack Chain Workbench APIs**
   - `GET /osm/api/attack-chains`
   - `GET /osm/api/attack-chains/:id`
@@ -314,6 +317,7 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `POST /osm/api/attack-chains/:id/queue-deep-scan`
   - attack-chain import now backfills matching vulnerability rows with reverse `attack_chain_ref`, merged `report_refs`, and merged `related_assets`
   - attack-chain retest queue now persists the selected chain linkage onto queued vulnerabilities
+  - attack-chain detail now returns execution-ready counts, queue recommendations, and recommended deep-scan targets
 - **Superdomain AI workflow closure**
   - `stable` and `hybrid` now generate persisted attack-chain visualization artifacts in addition to the attack-chain report
   - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
@@ -321,6 +325,7 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - Retest, operator queue, campaign handoff, and targeted rescan are now folded back into the same decision chain instead of remaining isolated outputs
   - Retest lifecycle now propagates source run UUIDs so post-retest state can converge back to `verified`, `closed`, or `triaged`
   - Knowledge auto-learning now writes higher-signal learned knowledge back into the KB for future retrieval
+  - Attack-chain ACP input is now pre-curated to prefer verified findings and exclude false-positive nodes from chain generation
 - **Verification snapshot**
   - Current source builds successfully with `make build`
   - focused handler tests now cover vulnerability evidence/timeline enrichment, attack-chain reverse linkage, and campaign attack-chain-aware deep-scan selection
