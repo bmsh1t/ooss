@@ -83,7 +83,13 @@ params:
   - name: pathPlanningFile
     default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
   - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+  - name: fallbackSemanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: secondFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: thirdFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
   - name: retestPlanFile
     default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
   - name: operatorQueueFile
@@ -110,6 +116,12 @@ params:
     default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
   - name: semanticPriorityTargetsFile
     default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: retestTargetsFile
     default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
   - name: operatorQueueTargetsFile
@@ -198,47 +210,102 @@ steps:
     type: bash
     log: "Collecting scan statistics"
     command: |
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_severity_matches() {
+        file="$1"
+        severity="$2"
+        if [ -f "$file" ] && [ -s "$file" ]; then
+          jq -r --arg severity "$severity" 'select(.info.severity == $severity) | 1' "$file" 2>/dev/null | wc -l | tr -d ' '
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
+      for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_FILE="$candidate"
+          break
+        fi
+      done
+
+      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+          ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+          break
+        fi
+      done
+
       # 资产统计
-      SUBDOMAINS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
-      RESOLVED=$(wc -l < {{resolvedFile}} 2>/dev/null || echo 0)
-      URLS=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      SUBDOMAINS=$(count_lines "{{subdomainFile}}")
+      RESOLVED=$(count_lines "{{resolvedFile}}")
+      URLS=$(count_lines "{{httpFile}}")
       
       # 内容分析
-      JS_ENDPOINTS=$(wc -l < {{jsEndpointsFile}} 2>/dev/null || echo 0)
-      WS_MISCONFIG=$(wc -l < {{websocketMisconfigFile}} 2>/dev/null || echo 0)
-      GRAPHQL=$(wc -l < {{graphqlEndpointsFile}} 2>/dev/null || echo 0)
+      JS_ENDPOINTS=$(count_lines "{{jsEndpointsFile}}")
+      WS_MISCONFIG=$(count_lines "{{websocketMisconfigFile}}")
+      GRAPHQL=$(count_lines "{{graphqlEndpointsFile}}")
       
       # OSINT
-      EMAILS=$(wc -l < {{osintEmailsFile}} 2>/dev/null || echo 0)
-      CLOUD_ASSETS=$(wc -l < {{osintCloudFile}} 2>/dev/null || echo 0)
+      EMAILS=$(count_lines "{{osintEmailsFile}}")
+      CLOUD_ASSETS=$(count_lines "{{osintCloudFile}}")
       
       # 漏洞统计
-      CRITICAL=$(wc -l < {{nucleiCriticalFile}} 2>/dev/null || echo 0)
-      HIGH=$(wc -l < {{nucleiHighFile}} 2>/dev/null || echo 0)
-      TOTAL_VULNS=$(wc -l < {{nucleiFile}} 2>/dev/null || echo 0)
-      SECRETS=$(wc -l < {{secretFile}} 2>/dev/null || echo 0)
-      TAKEOVERS=$(wc -l < {{takeoverFile}} 2>/dev/null || echo 0)
+      CRITICAL=$(count_lines "{{nucleiCriticalFile}}")
+      HIGH=$(count_lines "{{nucleiHighFile}}")
+      TOTAL_VULNS=$(count_lines "{{nucleiFile}}")
+      SECRETS=$(count_lines "{{secretFile}}")
+      TAKEOVERS=$(count_lines "{{takeoverFile}}")
 
       # AI 闭环统计
       AI_CONFIRMED=$(jq -r '(.confirmed_real // .validation_summary.confirmed_real // 0)' {{vulnValidationFile}} 2>/dev/null || echo 0)
       ATTACK_CHAINS=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainFile}} 2>/dev/null || echo 0)
       PATH_PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningFile}} 2>/dev/null || echo 0)
-      RETEST_TARGETS=$(wc -l < {{retestTargetsFile}} 2>/dev/null || echo 0)
-      OPERATOR_TARGETS=$(wc -l < {{operatorQueueTargetsFile}} 2>/dev/null || echo 0)
-      CAMPAIGN_TARGETS=$(wc -l < {{campaignTargetsFile}} 2>/dev/null || echo 0)
-      CONFIRMED_URLS=$(wc -l < {{confirmedUrlsFile}} 2>/dev/null || echo 0)
-      ENTRY_POINTS=$(wc -l < {{entryPointsFile}} 2>/dev/null || echo 0)
-      BEST_PATH_TARGETS=$(wc -l < {{bestPathTargetsFile}} 2>/dev/null || echo 0)
-      SEMANTIC_PRIORITY_TARGETS=$(wc -l < {{semanticPriorityTargetsFile}} 2>/dev/null || echo 0)
+      RETEST_TARGETS=$(count_lines "{{retestTargetsFile}}")
+      OPERATOR_TARGETS=$(count_lines "{{operatorQueueTargetsFile}}")
+      CAMPAIGN_TARGETS=$(count_lines "{{campaignTargetsFile}}")
+      CONFIRMED_URLS=$(count_lines "{{confirmedUrlsFile}}")
+      ENTRY_POINTS=$(count_lines "{{entryPointsFile}}")
+      BEST_PATH_TARGETS=$(count_lines "{{bestPathTargetsFile}}")
+      SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
       OPERATOR_TASKS=$(jq -r '.summary.total_tasks // 0' {{operatorQueueFile}} 2>/dev/null || echo 0)
       RETEST_QUEUED=$(jq -r '.queued_targets // 0' {{retestQueueSummaryFile}} 2>/dev/null || echo 0)
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' {{campaignHandoffFile}} 2>/dev/null || echo false)
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
-      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' {{semanticSearchFile}} 2>/dev/null || echo 0)
-      RESCAN_TOTAL=$(wc -l < {{rescanFindingsFile}} 2>/dev/null || echo 0)
-      RESCAN_CRITICAL=$(jq -r 'select(.info.severity == "critical") | 1' {{rescanFindingsFile}} 2>/dev/null | wc -l | tr -d ' ')
-      RESCAN_HIGH=$(jq -r 'select(.info.severity == "high") | 1' {{rescanFindingsFile}} 2>/dev/null | wc -l | tr -d ' ')
+      CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' {{campaignCreateFile}} 2>/dev/null || echo "")
+      CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' {{campaignCreateFile}} 2>/dev/null || echo 0)
+      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
+      RESCAN_TOTAL=$(count_lines "{{rescanFindingsFile}}")
+      RESCAN_CRITICAL=$(count_severity_matches "{{rescanFindingsFile}}" "critical")
+      RESCAN_HIGH=$(count_severity_matches "{{rescanFindingsFile}}" "high")
       FOLLOWUP_NEXT_PHASE=$(jq -r '.execution_feedback.next_phase // "not_generated"' {{followupDecisionFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // "not_generated"' {{followupDecisionFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // "not_generated"' {{followupDecisionFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_MANUAL_FIRST=$(jq -r '[.seed_targets.manual_first_targets[]?] | length' {{followupDecisionFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_HIGH_CONFIDENCE=$(jq -r '[.seed_targets.high_confidence_targets[]?] | length' {{followupDecisionFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' {{followupDecisionFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_REUSE_SOURCES=$(jq -c '.seed_focus.reuse_sources // []' {{followupDecisionFile}} 2>/dev/null || echo '[]')
+      FOLLOWUP_NEXT_ACTIONS=$(jq -c '.next_actions // []' {{followupDecisionFile}} 2>/dev/null || echo '[]')
+      FOLLOWUP_MANUAL_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' {{followupDecisionFile}} 2>/dev/null || echo false)
+      FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' {{followupDecisionFile}} 2>/dev/null || echo false)
+      FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' {{followupDecisionFile}} 2>/dev/null || echo false)
       
       # 生成 JSON
       cat > {{jsonStatsFile}} << EOF
@@ -258,7 +325,9 @@ steps:
             "entry_points": $ENTRY_POINTS,
             "best_path_targets": $BEST_PATH_TARGETS,
             "semantic_priority_targets": $SEMANTIC_PRIORITY_TARGETS,
+            "semantic_priority_targets_file": "$ACTIVE_SEMANTIC_PRIORITY_FILE",
             "semantic_results": $SEMANTIC_RESULTS,
+            "semantic_results_file": "$ACTIVE_SEMANTIC_SEARCH_FILE",
             "attack_chains": $ATTACK_CHAINS,
             "path_phases": $PATH_PHASES,
             "retest_targets": $RETEST_TARGETS,
@@ -270,8 +339,20 @@ steps:
             "targeted_rescan_critical": $RESCAN_CRITICAL,
             "targeted_rescan_high": $RESCAN_HIGH,
             "followup_next_phase": "$FOLLOWUP_NEXT_PHASE",
+            "priority_mode": "$FOLLOWUP_PRIORITY_MODE",
+            "confidence_level": "$FOLLOWUP_CONFIDENCE_LEVEL",
+            "manual_first_targets": $FOLLOWUP_MANUAL_FIRST,
+            "high_confidence_targets": $FOLLOWUP_HIGH_CONFIDENCE,
+            "escalation_score": $FOLLOWUP_ESCALATION_SCORE,
+            "reuse_sources": $FOLLOWUP_REUSE_SOURCES,
+            "next_actions": $FOLLOWUP_NEXT_ACTIONS,
+            "manual_followup_needed": $FOLLOWUP_MANUAL_NEEDED,
+            "campaign_followup_recommended": $FOLLOWUP_CAMPAIGN_RECOMMENDED,
+            "queue_followup_effective": $FOLLOWUP_QUEUE_EFFECTIVE,
             "campaign_ready": $CAMPAIGN_READY,
-            "campaign_create_status": "$CAMPAIGN_CREATE_STATUS"
+            "campaign_create_status": "$CAMPAIGN_CREATE_STATUS",
+            "campaign_create_id": "$CAMPAIGN_CREATE_ID",
+            "campaign_create_queued_runs": $CAMPAIGN_CREATE_QUEUED_RUNS
           }
         }
       }
@@ -279,13 +360,28 @@ steps:
       
       echo "[STATS] Subdomains: $SUBDOMAINS, URLs: $URLS"
       echo "[STATS] Critical: $CRITICAL, High: $HIGH, Total: $TOTAL_VULNS"
-      echo "[STATS] AI: confirmed=$AI_CONFIRMED chains=$ATTACK_CHAINS retest=$RETEST_TARGETS operator_tasks=$OPERATOR_TASKS campaign=$CAMPAIGN_TARGETS"
+      echo "[STATS] AI: confirmed=$AI_CONFIRMED chains=$ATTACK_CHAINS retest=$RETEST_TARGETS operator_tasks=$OPERATOR_TASKS campaign=$CAMPAIGN_TARGETS priority_mode=$FOLLOWUP_PRIORITY_MODE confidence=$FOLLOWUP_CONFIDENCE_LEVEL escalation=$FOLLOWUP_ESCALATION_SCORE"
 
   - name: generate-assets-summary
     type: bash
     log: "Generating prioritized target pack summary"
     command: |
       mkdir -p {{reportDir}}
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
+      for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_FILE="$candidate"
+          break
+        fi
+      done
 
       {
         echo "# Prioritized Target Pack - {{Target}}"
@@ -314,8 +410,22 @@ steps:
         fi
         echo ""
         echo "## Semantic Priority Targets"
-        if [ -f "{{semanticPriorityTargetsFile}}" ] && [ -s "{{semanticPriorityTargetsFile}}" ]; then
-          head -50 "{{semanticPriorityTargetsFile}}" | sed 's/^/- /'
+        if text_has_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE"; then
+          head -50 "$ACTIVE_SEMANTIC_PRIORITY_FILE" | sed 's/^/- /'
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## Manual-First Targets"
+        if [ -f "{{followupDecisionFile}}" ] && jq -e '((.seed_targets.manual_first_targets // []) | length) > 0' "{{followupDecisionFile}}" >/dev/null 2>&1; then
+          jq -r '.seed_targets.manual_first_targets[]? | "- \(.)"' "{{followupDecisionFile}}" 2>/dev/null | head -50
+        else
+          echo "- none"
+        fi
+        echo ""
+        echo "## High-Confidence Targets"
+        if [ -f "{{followupDecisionFile}}" ] && jq -e '((.seed_targets.high_confidence_targets // []) | length) > 0' "{{followupDecisionFile}}" >/dev/null 2>&1; then
+          jq -r '.seed_targets.high_confidence_targets[]? | "- \(.)"' "{{followupDecisionFile}}" 2>/dev/null | head -50
         else
           echo "- none"
         fi
@@ -363,8 +473,20 @@ steps:
       OPERATOR_TASKS=$(jq -r '.statistics.ai.operator_tasks // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       CAMPAIGN_TARGETS=$(jq -r '.statistics.ai.campaign_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       CAMPAIGN_READY=$(jq -r '.statistics.ai.campaign_ready // false' {{jsonStatsFile}} 2>/dev/null || echo false)
+      CAMPAIGN_CREATE_STATUS=$(jq -r '.statistics.ai.campaign_create_status // "not_requested"' {{jsonStatsFile}} 2>/dev/null || echo not_requested)
+      CAMPAIGN_CREATE_ID=$(jq -r '.statistics.ai.campaign_create_id // ""' {{jsonStatsFile}} 2>/dev/null || echo "")
+      CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.statistics.ai.campaign_create_queued_runs // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       RESCAN_TOTAL=$(jq -r '.statistics.ai.targeted_rescan_findings // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
       FOLLOWUP_NEXT_PHASE=$(jq -r '.statistics.ai.followup_next_phase // "not_generated"' {{jsonStatsFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_PRIORITY_MODE=$(jq -r '.statistics.ai.priority_mode // "not_generated"' {{jsonStatsFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_CONFIDENCE_LEVEL=$(jq -r '.statistics.ai.confidence_level // "not_generated"' {{jsonStatsFile}} 2>/dev/null || echo not_generated)
+      FOLLOWUP_MANUAL_FIRST=$(jq -r '.statistics.ai.manual_first_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_HIGH_CONFIDENCE=$(jq -r '.statistics.ai.high_confidence_targets // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_ESCALATION_SCORE=$(jq -r '.statistics.ai.escalation_score // 0' {{jsonStatsFile}} 2>/dev/null || echo 0)
+      FOLLOWUP_REUSE_SOURCES=$(jq -r '(.statistics.ai.reuse_sources // []) | join(", ")' {{jsonStatsFile}} 2>/dev/null || echo "")
+      FOLLOWUP_MANUAL_NEEDED=$(jq -r '.statistics.ai.manual_followup_needed // false' {{jsonStatsFile}} 2>/dev/null || echo false)
+      FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.statistics.ai.campaign_followup_recommended // false' {{jsonStatsFile}} 2>/dev/null || echo false)
+      FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.statistics.ai.queue_followup_effective // false' {{jsonStatsFile}} 2>/dev/null || echo false)
       
       # 风险等级
       [ "$CRITICAL" -gt 0 ] && RISK_LEVEL="🔴 CRITICAL" && RISK_ACTION="立即修复关键漏洞"
@@ -414,7 +536,16 @@ steps:
         echo "| 🎯 Campaign 目标 | $CAMPAIGN_TARGETS |"
         echo "| 🔍 定向复扫新增 | $RESCAN_TOTAL |"
         echo "| 🧭 下一阶段 | $FOLLOWUP_NEXT_PHASE |"
+        echo "| 🎛️ Seed 优先模式 | $FOLLOWUP_PRIORITY_MODE |"
+        echo "| 📈 Seed 置信度 | $FOLLOWUP_CONFIDENCE_LEVEL |"
+        echo "| 🔥 Manual-first 目标 | $FOLLOWUP_MANUAL_FIRST |"
+        echo "| ✅ High-confidence 目标 | $FOLLOWUP_HIGH_CONFIDENCE |"
+        echo "| 📐 Escalation Score | $FOLLOWUP_ESCALATION_SCORE |"
+        echo "| 🔄 Reuse Sources | ${FOLLOWUP_REUSE_SOURCES:-none} |"
         echo "| 🚦 Campaign Ready | $CAMPAIGN_READY |"
+        echo "| 🚀 Campaign Create | $CAMPAIGN_CREATE_STATUS |"
+        echo "| 🆔 Campaign ID | ${CAMPAIGN_CREATE_ID:-none} |"
+        echo "| 🧵 Campaign Queued Runs | $CAMPAIGN_CREATE_QUEUED_RUNS |"
         echo ""
         echo "---"
         echo ""
@@ -429,6 +560,11 @@ steps:
           [ "$RETEST_TARGETS" -gt 0 ] && echo "- 优先对 AI 选出的复测目标补证据和补 payload。"
           [ "$OPERATOR_TASKS" -gt 0 ] && echo "- 先执行 operator queue 里的 P1/P2 任务，验证鉴权、业务逻辑、提权和横向可能性。"
           [ "$CAMPAIGN_TARGETS" -gt 0 ] && echo "- 将 campaign targets 作为后续深扫或人工接管目标包。"
+          { [ "$FOLLOWUP_PRIORITY_MODE" = "manual-first" ] || [ "$FOLLOWUP_MANUAL_NEEDED" = "true" ]; } && echo "- 当前 followup 判断偏 manual-first，应优先围绕 manual-first/high-confidence 目标做人审与利用链验证。"
+          [ "$FOLLOWUP_QUEUE_EFFECTIVE" = "true" ] && echo "- retest queue 已经生效，后续结果需要继续回灌 followup decision 和知识库。"
+          [ "$FOLLOWUP_CAMPAIGN_RECOMMENDED" = "true" ] && echo "- 当前满足 campaign follow-up 条件，可将 priority targets 打包给深扫或批量推进链路。"
+          [ "$CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] && echo "- campaign 已创建并排队 $CAMPAIGN_CREATE_QUEUED_RUNS 个 run，后续应优先追踪 campaign 结果并回灌知识库。"
+          [ -n "$FOLLOWUP_REUSE_SOURCES" ] && echo "- 本轮 followup 复用了这些来源: $FOLLOWUP_REUSE_SOURCES。复测时优先确认这些来源是否仍然有效。"
         fi
 
         echo ""
@@ -444,6 +580,30 @@ steps:
     type: bash
     log: "Generating full technical report"
     command: |
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
+      for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_FILE="$candidate"
+          break
+        fi
+      done
+
+      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+          ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+          break
+        fi
+      done
+
       cat {{summaryFile}} > {{fullReportFile}} 2>/dev/null || true
       
       echo -e "\n---\n\n## 详细发现\n" >> {{fullReportFile}}
@@ -545,7 +705,9 @@ steps:
           [
             "- Handoff ready: " + ((.handoff_ready // false) | tostring),
             "- Recommended flow: " + (.campaign_profile.recommended_flow // "web-analysis"),
-            "- Campaign targets: " + ((.counts.campaign_targets // 0) | tostring)
+            "- Campaign targets: " + ((.counts.campaign_targets // 0) | tostring),
+            "- Previous priority mode: " + (.campaign_profile.previous_priority_mode // "n/a"),
+            "- Previous confidence level: " + (.campaign_profile.previous_confidence_level // "n/a")
           ] | .[]
         ' {{campaignHandoffFile}} 2>/dev/null >> {{fullReportFile}} || true
       fi
@@ -555,10 +717,33 @@ steps:
         jq -r '
           [
             "- Next phase: " + (.execution_feedback.next_phase // "not_generated"),
+            "- Priority mode: " + (.seed_focus.priority_mode // "not_generated"),
+            "- Confidence level: " + (.seed_focus.confidence_level // "not_generated"),
+            "- Escalation score: " + ((.seed_focus.signal_scores.escalation_score // 0) | tostring),
+            "- Manual-first targets: " + (((.seed_targets.manual_first_targets // []) | length) | tostring),
+            "- High-confidence targets: " + (((.seed_targets.high_confidence_targets // []) | length) | tostring),
+            "- Reuse sources: " + ((.seed_focus.reuse_sources // []) | join(", ")),
             "- Manual follow-up needed: " + ((.execution_feedback.manual_followup_needed // false) | tostring),
-            "- Campaign follow-up recommended: " + ((.execution_feedback.campaign_followup_recommended // false) | tostring)
-          ] + [(.next_actions[]? | "- " + .)]
+            "- Campaign follow-up recommended: " + ((.execution_feedback.campaign_followup_recommended // false) | tostring),
+            "- Queue follow-up effective: " + ((.execution_feedback.queue_followup_effective // false) | tostring)
+          ] + [(.next_actions[]? | "- next-action: " + .)] | .[]
         ' {{followupDecisionFile}} 2>/dev/null >> {{fullReportFile}} || true
+      fi
+
+      if [ -f "{{campaignCreateFile}}" ] && jq empty "{{campaignCreateFile}}" 2>/dev/null; then
+        echo -e "\n### 🚀 Campaign Create Result\n" >> {{fullReportFile}}
+        jq -r '
+          [
+            "- Status: " + (.status // "unknown"),
+            "- Campaign ID: " + (.campaign_id // ""),
+            "- Queued runs: " + ((.queued_runs // 0) | tostring),
+            "- Workflow: " + (.workflow // "unknown"),
+            "- Priority: " + (.priority // "unknown"),
+            "- Priority mode: " + (.campaign_priority_mode // ""),
+            "- Confidence level: " + (.campaign_confidence_level // ""),
+            "- Follow-up next phase: " + (.campaign_followup_next_phase // "")
+          ] | .[]
+        ' {{campaignCreateFile}} 2>/dev/null >> {{fullReportFile}} || true
       fi
 
       if [ -f "{{rescanSummaryFile}}" ] && [ -s "{{rescanSummaryFile}}" ]; then
@@ -576,10 +761,12 @@ steps:
         echo "- Retest plan: {{retestPlanFile}}"
         echo "- Operator queue: {{operatorQueueFile}}"
         echo "- Campaign handoff: {{campaignHandoffFile}}"
+        echo "- Campaign create: {{campaignCreateFile}}"
         echo "- Follow-up decision: {{followupDecisionFile}}"
         echo "- Retest queue summary: {{retestQueueSummaryFile}}"
         echo "- Prioritized target pack: {{assetsSummaryFile}}"
-        echo "- Semantic priority targets: {{semanticPriorityTargetsFile}}"
+        echo "- Semantic search: $ACTIVE_SEMANTIC_SEARCH_FILE"
+        echo "- Semantic priority targets: $ACTIVE_SEMANTIC_PRIORITY_FILE"
       } >> {{fullReportFile}}
       
       echo -e "\n---\n\n*报告生成时间: $(date '+%Y-%m-%d %H:%M:%S')*" >> {{fullReportFile}}

@@ -25,12 +25,53 @@ params:
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
   - name: followupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+  - name: fallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: secondFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: thirdFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-results-{{TargetSpace}}.json"
+  - name: retestPlanFile
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueFile
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: campaignHandoffFile
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignCreateFile
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: retestQueueSummaryFile
+    default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: reportDir
     default: "{{Output}}/report"
   - name: vulnDbFile
     default: "{{Output}}/report/vuln.db"
   - name: enhancedSummaryFile
     default: "{{Output}}/report/enhanced-summary-{{TargetSpace}}.md"
+
+dependencies:
+  commands:
+    - jq
+    - sqlite3
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: enhanced-summary
+    path: "{{enhancedSummaryFile}}"
+    type: markdown
+    description: Enhanced summary with AI follow-up posture and operational status
 
 steps:
   - name: prepare-report
@@ -100,8 +141,17 @@ steps:
   - name: mermaid-topology
     type: bash
     command: |
-      SUBS=$(wc -l < {{subdomainFile}} 2>/dev/null || echo 0)
-      HTTP=$(wc -l < {{httpFile}} 2>/dev/null || echo 0)
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      SUBS=$(count_lines "{{subdomainFile}}")
+      HTTP=$(count_lines "{{httpFile}}")
       echo "graph TB" > "{{reportDir}}/topology.mmd"
       echo "  subgraph \"{{Target}}\"" >> "{{reportDir}}/topology.mmd"
       echo "    A[Subdomains: $SUBS]" >> "{{reportDir}}/topology.mmd"
@@ -113,10 +163,64 @@ steps:
   - name: write-enhanced-summary
     type: bash
     command: |
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
+      for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_FILE="$candidate"
+          break
+        fi
+      done
+
+      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+          ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+          break
+        fi
+      done
+
       TOTAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;" 2>/dev/null || echo 0)
       CRITICAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='critical';" 2>/dev/null || echo 0)
       HIGH=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='high';" 2>/dev/null || echo 0)
-      FOLLOWUP_PHASE=$(jq -r '.execution_feedback.next_phase // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+      FOLLOWUP_PHASE=$(jq -r '.execution_feedback.next_phase // .seed_focus.next_phase // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+      FOLLOWUP_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+      FOLLOWUP_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+      FOLLOWUP_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+      FOLLOWUP_MANUAL_FIRST=$(jq -r '[.seed_targets.manual_first_targets[]?] | length' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+      FOLLOWUP_HIGH_CONFIDENCE=$(jq -r '[.seed_targets.high_confidence_targets[]?] | length' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+      FOLLOWUP_REUSE_SOURCES=$(jq -r '(.seed_focus.reuse_sources // []) | join(", ")' "{{followupDecisionFile}}" 2>/dev/null || echo "")
+      FOLLOWUP_MANUAL_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+      FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+      FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+      FOLLOWUP_NEXT_ACTIONS=$(jq -r '(.next_actions // []) | join(" | ")' "{{followupDecisionFile}}" 2>/dev/null || echo "")
+      RETEST_TARGETS=$(jq -r '.summary.total_targets // ([.targets[]?] | length) // 0' "{{retestPlanFile}}" 2>/dev/null || echo 0)
+      OPERATOR_TASKS=$(jq -r '.summary.total_tasks // ([.tasks[]?] | length) // 0' "{{operatorQueueFile}}" 2>/dev/null || echo 0)
+      CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffFile}}" 2>/dev/null || echo false)
+      CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffFile}}" 2>/dev/null || echo 0)
+      CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateFile}}" 2>/dev/null || echo not_requested)
+      CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' "{{campaignCreateFile}}" 2>/dev/null || echo "")
+      CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' "{{campaignCreateFile}}" 2>/dev/null || echo 0)
+      RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummaryFile}}" 2>/dev/null || echo not_requested)
+      RETEST_QUEUED_TARGETS=$(jq -r '.queued_targets // 0' "{{retestQueueSummaryFile}}" 2>/dev/null || echo 0)
+      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
+      SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
 
       {
         echo "# Enhanced Report Summary"
@@ -125,7 +229,34 @@ steps:
         echo "- Total vulnerabilities: $TOTAL"
         echo "- Critical: $CRITICAL"
         echo "- High: $HIGH"
+        echo "- Semantic search results: $SEMANTIC_RESULTS"
+        echo "- Semantic search file: $ACTIVE_SEMANTIC_SEARCH_FILE"
+        echo "- Semantic priority targets: $SEMANTIC_PRIORITY_TARGETS"
+        echo "- Semantic priority file: $ACTIVE_SEMANTIC_PRIORITY_FILE"
+        echo ""
+        echo "## AI Follow-Up Posture"
         echo "- Next follow-up phase: $FOLLOWUP_PHASE"
+        echo "- Priority mode: $FOLLOWUP_PRIORITY_MODE"
+        echo "- Confidence level: $FOLLOWUP_CONFIDENCE_LEVEL"
+        echo "- Escalation score: $FOLLOWUP_ESCALATION_SCORE"
+        echo "- Manual-first seed targets: $FOLLOWUP_MANUAL_FIRST"
+        echo "- High-confidence seed targets: $FOLLOWUP_HIGH_CONFIDENCE"
+        echo "- Manual follow-up needed: $FOLLOWUP_MANUAL_NEEDED"
+        echo "- Campaign follow-up recommended: $FOLLOWUP_CAMPAIGN_RECOMMENDED"
+        echo "- Retest queue effective: $FOLLOWUP_QUEUE_EFFECTIVE"
+        echo "- Reuse sources: ${FOLLOWUP_REUSE_SOURCES:-none}"
+        echo "- Next actions: ${FOLLOWUP_NEXT_ACTIONS:-none}"
+        echo ""
+        echo "## Operational Status"
+        echo "- Retest planned targets: $RETEST_TARGETS"
+        echo "- Operator tasks: $OPERATOR_TASKS"
+        echo "- Campaign ready: $CAMPAIGN_READY"
+        echo "- Campaign targets: $CAMPAIGN_TARGETS"
+        echo "- Campaign create: $CAMPAIGN_CREATE_STATUS"
+        echo "- Campaign ID: ${CAMPAIGN_CREATE_ID:-n/a}"
+        echo "- Campaign queued runs: $CAMPAIGN_CREATE_QUEUED_RUNS"
+        echo "- Retest queue: $RETEST_QUEUE_STATUS"
+        echo "- Retest queued targets: $RETEST_QUEUED_TARGETS"
         echo ""
         echo "## Artifacts"
         echo "- CSV: {{reportDir}}/vulns-{{TargetSpace}}.csv"
@@ -134,6 +265,10 @@ steps:
         echo "- Mermaid topology: {{reportDir}}/topology.mmd"
         echo "- Applied AI decision: {{appliedDecisionFile}}"
         echo "- Follow-up decision: {{followupDecisionFile}}"
+        echo "- Campaign handoff: {{campaignHandoffFile}}"
+        echo "- Campaign create: {{campaignCreateFile}}"
+        echo "- Retest queue summary: {{retestQueueSummaryFile}}"
+        echo "- Semantic search: $ACTIVE_SEMANTIC_SEARCH_FILE"
       } > "{{enhancedSummaryFile}}"
 
   - name: log-complete
