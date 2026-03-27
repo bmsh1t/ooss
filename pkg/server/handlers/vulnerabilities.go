@@ -71,6 +71,31 @@ type vulnerabilityRetestTimelineItem struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
+type vulnerabilityGroupSummary struct {
+	ID                int64      `json:"id"`
+	Workspace         string     `json:"workspace"`
+	FingerprintKey    string     `json:"fingerprint_key,omitempty"`
+	VulnInfo          string     `json:"vuln_info,omitempty"`
+	VulnTitle         string     `json:"vuln_title,omitempty"`
+	AssetType         string     `json:"asset_type,omitempty"`
+	AssetValue        string     `json:"asset_value,omitempty"`
+	Severity          string     `json:"severity,omitempty"`
+	Confidence        string     `json:"confidence,omitempty"`
+	VulnStatus        string     `json:"vuln_status,omitempty"`
+	RetestStatus      string     `json:"retest_status,omitempty"`
+	AIVerdict         string     `json:"ai_verdict,omitempty"`
+	AnalystVerdict    string     `json:"analyst_verdict,omitempty"`
+	EvidenceVersions  int        `json:"evidence_versions"`
+	DistinctRuns      int        `json:"distinct_runs"`
+	AssetCount        int        `json:"asset_count"`
+	ReportRefCount    int        `json:"report_ref_count"`
+	AttackChainLinked bool       `json:"attack_chain_linked"`
+	FirstSeenAt       time.Time  `json:"first_seen_at,omitempty"`
+	LastSeenAt        time.Time  `json:"last_seen_at,omitempty"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+	ClosedAt          *time.Time `json:"closed_at,omitempty"`
+}
+
 type vulnerabilityDetailResponse struct {
 	database.Vulnerability
 	EvidenceTimeline    []database.VulnerabilityEvidence  `json:"evidence_timeline,omitempty"`
@@ -98,42 +123,11 @@ type vulnerabilityDetailResponse struct {
 // @Router /osm/api/vulnerabilities [get]
 func ListVulnerabilities(cfg *config.Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// Parse query parameters
-		workspace := c.Query("workspace")
-		severity := c.Query("severity")
-		confidence := c.Query("confidence")
-		assetValue := c.Query("asset_value")
-		vulnStatus := c.Query("status")
-		fingerprintKey := c.Query("fingerprint_key")
-		sourceRunUUID := c.Query("source_run_uuid")
-		offset, _ := strconv.Atoi(c.Query("offset", "0"))
-		limit, _ := strconv.Atoi(c.Query("limit", "20"))
-
-		// Validate pagination
-		if offset < 0 {
-			offset = 0
-		}
-		if limit <= 0 {
-			limit = 20
-		}
-		if limit > 10000 {
-			limit = 10000
-		}
-
+		query := buildVulnerabilityQuery(c)
 		ctx := context.Background()
 
 		// Get vulnerabilities from database
-		result, err := database.ListVulnerabilities(ctx, database.VulnerabilityQuery{
-			Workspace:      workspace,
-			Severity:       severity,
-			Confidence:     confidence,
-			AssetValue:     assetValue,
-			VulnStatus:     vulnStatus,
-			FingerprintKey: fingerprintKey,
-			SourceRunUUID:  sourceRunUUID,
-			Offset:         offset,
-			Limit:          limit,
-		})
+		result, err := database.ListVulnerabilities(ctx, query)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   true,
@@ -143,6 +137,36 @@ func ListVulnerabilities(cfg *config.Config) fiber.Handler {
 
 		return c.JSON(fiber.Map{
 			"data": result.Data,
+			"pagination": fiber.Map{
+				"total":  result.TotalCount,
+				"offset": result.Offset,
+				"limit":  result.Limit,
+			},
+		})
+	}
+}
+
+// ListVulnerabilityGroups returns fingerprint-level vulnerability groups with derived evidence counts.
+func ListVulnerabilityGroups(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		query := buildVulnerabilityQuery(c)
+		ctx := context.Background()
+
+		result, err := database.ListVulnerabilities(ctx, query)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+
+		groups := make([]vulnerabilityGroupSummary, 0, len(result.Data))
+		for i := range result.Data {
+			groups = append(groups, buildVulnerabilityGroupSummary(&result.Data[i]))
+		}
+
+		return c.JSON(fiber.Map{
+			"data": groups,
 			"pagination": fiber.Map{
 				"total":  result.TotalCount,
 				"offset": result.Offset,
@@ -251,6 +275,37 @@ type RetestVulnerabilityInput struct {
 	Module   string            `json:"module,omitempty"`
 	Params   map[string]string `json:"params,omitempty"`
 	Priority string            `json:"priority,omitempty"`
+}
+
+// BulkVulnerabilityActionInput applies the same lifecycle or retest action to multiple findings.
+type BulkVulnerabilityActionInput struct {
+	IDs             []int64           `json:"ids,omitempty"`
+	FingerprintKeys []string          `json:"fingerprint_keys,omitempty"`
+	Workspace       string            `json:"workspace,omitempty"`
+	Action          string            `json:"action"`
+	Status          string            `json:"status,omitempty"`
+	AIVerdict       string            `json:"ai_verdict,omitempty"`
+	AISummary       string            `json:"ai_summary,omitempty"`
+	AnalystVerdict  string            `json:"analyst_verdict,omitempty"`
+	AnalystNotes    string            `json:"analyst_notes,omitempty"`
+	AttackChainRef  string            `json:"attack_chain_ref,omitempty"`
+	RelatedAssets   []string          `json:"related_assets,omitempty"`
+	ReportRefs      []string          `json:"report_refs,omitempty"`
+	Flow            string            `json:"flow,omitempty"`
+	Module          string            `json:"module,omitempty"`
+	Params          map[string]string `json:"params,omitempty"`
+	Priority        string            `json:"priority,omitempty"`
+}
+
+type bulkVulnerabilityActionResult struct {
+	ID             int64  `json:"id"`
+	FingerprintKey string `json:"fingerprint_key,omitempty"`
+	Action         string `json:"action"`
+	Outcome        string `json:"outcome"`
+	Message        string `json:"message,omitempty"`
+	VulnStatus     string `json:"vuln_status,omitempty"`
+	RetestStatus   string `json:"retest_status,omitempty"`
+	RunUUID        string `json:"run_uuid,omitempty"`
 }
 
 // CreateVulnerability handles creating a new vulnerability
@@ -367,72 +422,11 @@ func UpdateVulnerability(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		if input.VulnInfo != "" {
-			vuln.VulnInfo = input.VulnInfo
-		}
-		if input.VulnTitle != "" {
-			vuln.VulnTitle = input.VulnTitle
-		}
-		if input.VulnDesc != "" {
-			vuln.VulnDesc = input.VulnDesc
-		}
-		if input.VulnPOC != "" {
-			vuln.VulnPOC = input.VulnPOC
-		}
-		if input.Severity != "" {
-			vuln.Severity = strings.ToLower(strings.TrimSpace(input.Severity))
-		}
-		if input.Confidence != "" {
-			vuln.Confidence = strings.TrimSpace(input.Confidence)
-		}
-		if input.AssetType != "" {
-			vuln.AssetType = input.AssetType
-		}
-		if input.AssetValue != "" {
-			vuln.AssetValue = input.AssetValue
-		}
-		if input.Tags != nil {
-			vuln.Tags = input.Tags
-		}
-		if input.DetailHTTPRequest != "" {
-			vuln.DetailHTTPRequest = input.DetailHTTPRequest
-		}
-		if input.DetailHTTPResponse != "" {
-			vuln.DetailHTTPResponse = input.DetailHTTPResponse
-		}
-		if input.RawVulnJSON != "" {
-			vuln.RawVulnJSON = input.RawVulnJSON
-		}
-		if input.VulnStatus != "" {
-			nextStatus := normalizeVulnerabilityStatus(input.VulnStatus)
-			if !isValidVulnerabilityTransition(vuln.VulnStatus, nextStatus) {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-					"error":   true,
-					"message": "Invalid vulnerability status transition",
-				})
-			}
-			vuln.VulnStatus = nextStatus
-		}
-		if input.AIVerdict != "" {
-			vuln.AIVerdict = normalizeVulnerabilityVerdict(input.AIVerdict)
-		}
-		if input.AISummary != "" {
-			vuln.AISummary = input.AISummary
-		}
-		if input.AnalystVerdict != "" {
-			vuln.AnalystVerdict = normalizeVulnerabilityVerdict(input.AnalystVerdict)
-		}
-		if input.AnalystNotes != "" {
-			vuln.AnalystNotes = input.AnalystNotes
-		}
-		if input.AttackChainRef != "" {
-			vuln.AttackChainRef = input.AttackChainRef
-		}
-		if input.RelatedAssets != nil {
-			vuln.RelatedAssets = input.RelatedAssets
-		}
-		if input.ReportRefs != nil {
-			vuln.ReportRefs = input.ReportRefs
+		if err := applyVulnerabilityUpdateInput(vuln, input); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
 		}
 
 		applyVulnerabilityStatusTimestamps(vuln)
@@ -446,6 +440,121 @@ func UpdateVulnerability(cfg *config.Config) fiber.Handler {
 		return c.JSON(fiber.Map{
 			"data":    vuln,
 			"message": "Vulnerability updated successfully",
+		})
+	}
+}
+
+// BulkVulnerabilityAction applies a shared lifecycle update or retest request to multiple findings.
+func BulkVulnerabilityAction(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var input BulkVulnerabilityActionInput
+		if err := c.BodyParser(&input); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": "Invalid request body",
+			})
+		}
+
+		action := normalizeBulkVulnerabilityAction(input.Action)
+		if action == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": "Invalid bulk action",
+			})
+		}
+
+		ctx := context.Background()
+		vulns, err := resolveBulkVulnerabilities(ctx, input)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+		if len(vulns) == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error":   true,
+				"message": "No matching vulnerabilities found",
+			})
+		}
+
+		var (
+			applied int
+			queued  int
+			skipped int
+			failed  int
+			items   []bulkVulnerabilityActionResult
+		)
+
+		updateInput, retestInput, err := buildBulkActionPayloads(action, input)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+
+		for _, vuln := range vulns {
+			item := bulkVulnerabilityActionResult{
+				ID:             vuln.ID,
+				FingerprintKey: vuln.FingerprintKey,
+				Action:         action,
+				VulnStatus:     vuln.VulnStatus,
+				RetestStatus:   vuln.RetestStatus,
+			}
+
+			switch action {
+			case "retest":
+				runUUID, err := queueVulnerabilityRetestTask(ctx, vuln, *retestInput)
+				switch {
+				case err == nil:
+					item.Outcome = "queued"
+					item.RunUUID = runUUID
+					item.VulnStatus = vuln.VulnStatus
+					item.RetestStatus = vuln.RetestStatus
+					queued++
+				case errors.Is(err, database.ErrVulnerabilityRetestInProgress):
+					item.Outcome = "skipped"
+					item.Message = err.Error()
+					skipped++
+				default:
+					item.Outcome = "failed"
+					item.Message = err.Error()
+					failed++
+				}
+			default:
+				if err := applyVulnerabilityUpdateInput(vuln, *updateInput); err != nil {
+					item.Outcome = "skipped"
+					item.Message = err.Error()
+					skipped++
+					items = append(items, item)
+					continue
+				}
+				applyVulnerabilityStatusTimestamps(vuln)
+				if err := database.UpdateVulnerabilityRecord(ctx, vuln); err != nil {
+					item.Outcome = "failed"
+					item.Message = err.Error()
+					failed++
+				} else {
+					item.Outcome = "updated"
+					item.VulnStatus = vuln.VulnStatus
+					item.RetestStatus = vuln.RetestStatus
+					applied++
+				}
+			}
+			items = append(items, item)
+		}
+
+		return c.JSON(fiber.Map{
+			"summary": fiber.Map{
+				"selected": len(vulns),
+				"updated":  applied,
+				"queued":   queued,
+				"skipped":  skipped,
+				"failed":   failed,
+				"action":   action,
+			},
+			"data": items,
 		})
 	}
 }
@@ -469,7 +578,7 @@ func RetestVulnerability(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		workflowName, workflowKind := resolveRetestWorkflow(input.Flow, input.Module)
+		workflowName, _ := resolveRetestWorkflow(input.Flow, input.Module)
 		if workflowName == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":   true,
@@ -486,44 +595,8 @@ func RetestVulnerability(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		target := strings.TrimSpace(vuln.AssetValue)
-		if target == "" {
-			target = vuln.Workspace
-		}
-
-		params := make(map[string]interface{})
-		for key, value := range input.Params {
-			params[key] = value
-		}
-		workspace := strings.TrimSpace(vuln.Workspace)
-		if workspace == "" {
-			workspace = computeWorkspace(target, input.Params)
-		}
-		params["target"] = target
-		params["workspace"] = workspace
-		params["space_name"] = workspace
-		params["retest_vulnerability_id"] = strconv.FormatInt(vuln.ID, 10)
-
-		retestRunUUID := uuid.New().String()
-		run := &database.Run{
-			RunUUID:      retestRunUUID,
-			WorkflowName: workflowName,
-			WorkflowKind: workflowKind,
-			Target:       target,
-			Params:       params,
-			Status:       "queued",
-			TriggerType:  "vuln-retest",
-			RunPriority:  normalizeRetestPriority(input.Priority),
-			RunMode:      "queue",
-			IsQueued:     true,
-			Workspace:    workspace,
-		}
-
-		vuln.VulnStatus = "retest"
-		vuln.RetestStatus = "queued"
-		vuln.RetestRunUUID = retestRunUUID
-		applyVulnerabilityStatusTimestamps(vuln)
-		if err := database.QueueVulnerabilityRetest(ctx, vuln, run); err != nil {
+		retestRunUUID, err := queueVulnerabilityRetestTask(ctx, vuln, input)
+		if err != nil {
 			if errors.Is(err, database.ErrVulnerabilityRetestInProgress) {
 				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 					"error":   true,
@@ -629,7 +702,14 @@ func GetVulnerabilitySummary(cfg *config.Config) fiber.Handler {
 func GetVulnerabilityBoard(cfg *config.Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		ctx := context.Background()
-		board, err := database.GetVulnerabilityBoard(ctx, c.Query("workspace"))
+		topTargetsLimit, _ := strconv.Atoi(c.Query("top_targets_limit", "10"))
+		if topTargetsLimit <= 0 {
+			topTargetsLimit = 10
+		}
+		if topTargetsLimit > 100 {
+			topTargetsLimit = 100
+		}
+		board, err := database.GetVulnerabilityBoardWithOptions(ctx, c.Query("workspace"), topTargetsLimit)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error":   true,
@@ -659,6 +739,118 @@ func normalizeVulnerabilityStatus(status string) string {
 	}
 }
 
+func buildVulnerabilityQuery(c *fiber.Ctx) database.VulnerabilityQuery {
+	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	status := strings.TrimSpace(c.Query("status"))
+	if status != "" {
+		status = normalizeVulnerabilityStatus(status)
+	}
+	aiVerdict := strings.TrimSpace(c.Query("ai_verdict"))
+	if aiVerdict != "" {
+		aiVerdict = normalizeVulnerabilityVerdict(aiVerdict)
+	}
+	analystVerdict := strings.TrimSpace(c.Query("analyst_verdict"))
+	if analystVerdict != "" {
+		analystVerdict = normalizeVulnerabilityVerdict(analystVerdict)
+	}
+
+	return database.VulnerabilityQuery{
+		Workspace:      strings.TrimSpace(c.Query("workspace")),
+		Severity:       strings.ToLower(strings.TrimSpace(c.Query("severity"))),
+		Confidence:     strings.TrimSpace(c.Query("confidence")),
+		AssetValue:     strings.TrimSpace(c.Query("asset_value")),
+		VulnStatus:     status,
+		RetestStatus:   strings.ToLower(strings.TrimSpace(c.Query("retest_status"))),
+		AIVerdict:      aiVerdict,
+		AnalystVerdict: analystVerdict,
+		FingerprintKey: strings.TrimSpace(c.Query("fingerprint_key")),
+		SourceRunUUID:  strings.TrimSpace(c.Query("source_run_uuid")),
+		ActiveOnly:     c.QueryBool("active_only", false),
+		HasAttackChain: c.QueryBool("has_attack_chain", false),
+		Offset:         offset,
+		Limit:          limit,
+	}
+}
+
+func buildVulnerabilityGroupSummary(vuln *database.Vulnerability) vulnerabilityGroupSummary {
+	history := buildVulnerabilityEvidenceTimeline(vuln)
+
+	runSet := make(map[string]struct{})
+	assetSet := make(map[string]struct{})
+	reportRefSet := make(map[string]struct{})
+	attackChainLinked := strings.TrimSpace(vuln.AttackChainRef) != ""
+
+	addStringToSet(runSet, vuln.SourceRunUUID)
+	addStringToSet(runSet, vuln.RetestRunUUID)
+	addStringToSet(assetSet, vuln.AssetValue)
+	for _, item := range vuln.RelatedAssets {
+		addStringToSet(assetSet, item)
+	}
+	for _, item := range vuln.ReportRefs {
+		addStringToSet(reportRefSet, item)
+	}
+
+	for _, item := range history {
+		addStringToSet(runSet, item.SourceRunUUID)
+		addStringToSet(assetSet, item.AssetValue)
+		for _, reportRef := range item.ReportRefs {
+			addStringToSet(reportRefSet, reportRef)
+		}
+		if strings.TrimSpace(item.AttackChainRef) != "" {
+			attackChainLinked = true
+		}
+	}
+
+	evidenceVersions := vuln.EvidenceVersion
+	if len(history) > evidenceVersions {
+		evidenceVersions = len(history)
+	}
+
+	return vulnerabilityGroupSummary{
+		ID:                vuln.ID,
+		Workspace:         vuln.Workspace,
+		FingerprintKey:    vuln.FingerprintKey,
+		VulnInfo:          vuln.VulnInfo,
+		VulnTitle:         vuln.VulnTitle,
+		AssetType:         vuln.AssetType,
+		AssetValue:        vuln.AssetValue,
+		Severity:          vuln.Severity,
+		Confidence:        vuln.Confidence,
+		VulnStatus:        vuln.VulnStatus,
+		RetestStatus:      vuln.RetestStatus,
+		AIVerdict:         vuln.AIVerdict,
+		AnalystVerdict:    vuln.AnalystVerdict,
+		EvidenceVersions:  evidenceVersions,
+		DistinctRuns:      len(runSet),
+		AssetCount:        len(assetSet),
+		ReportRefCount:    len(reportRefSet),
+		AttackChainLinked: attackChainLinked,
+		FirstSeenAt:       vuln.FirstSeenAt,
+		LastSeenAt:        vuln.LastSeenAt,
+		VerifiedAt:        vuln.VerifiedAt,
+		ClosedAt:          vuln.ClosedAt,
+	}
+}
+
+func addStringToSet(target map[string]struct{}, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	target[value] = struct{}{}
+}
+
 func normalizeVulnerabilityVerdict(verdict string) string {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
 	case "", "unknown":
@@ -673,6 +865,23 @@ func normalizeVulnerabilityVerdict(verdict string) string {
 		return "retest_required"
 	default:
 		return strings.ToLower(strings.TrimSpace(verdict))
+	}
+}
+
+func normalizeBulkVulnerabilityAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(strings.ReplaceAll(action, "-", "_"))) {
+	case "triage":
+		return "triage"
+	case "false_positive":
+		return "false_positive"
+	case "close":
+		return "close"
+	case "retest":
+		return "retest"
+	case "update":
+		return "update"
+	default:
+		return ""
 	}
 }
 
@@ -770,6 +979,252 @@ func normalizeRetestPriority(priority string) string {
 	default:
 		return "high"
 	}
+}
+
+func applyVulnerabilityUpdateInput(vuln *database.Vulnerability, input UpdateVulnerabilityInput) error {
+	if input.VulnInfo != "" {
+		vuln.VulnInfo = input.VulnInfo
+	}
+	if input.VulnTitle != "" {
+		vuln.VulnTitle = input.VulnTitle
+	}
+	if input.VulnDesc != "" {
+		vuln.VulnDesc = input.VulnDesc
+	}
+	if input.VulnPOC != "" {
+		vuln.VulnPOC = input.VulnPOC
+	}
+	if input.Severity != "" {
+		vuln.Severity = strings.ToLower(strings.TrimSpace(input.Severity))
+	}
+	if input.Confidence != "" {
+		vuln.Confidence = strings.TrimSpace(input.Confidence)
+	}
+	if input.AssetType != "" {
+		vuln.AssetType = input.AssetType
+	}
+	if input.AssetValue != "" {
+		vuln.AssetValue = input.AssetValue
+	}
+	if input.Tags != nil {
+		vuln.Tags = input.Tags
+	}
+	if input.DetailHTTPRequest != "" {
+		vuln.DetailHTTPRequest = input.DetailHTTPRequest
+	}
+	if input.DetailHTTPResponse != "" {
+		vuln.DetailHTTPResponse = input.DetailHTTPResponse
+	}
+	if input.RawVulnJSON != "" {
+		vuln.RawVulnJSON = input.RawVulnJSON
+	}
+	if input.VulnStatus != "" {
+		nextStatus := normalizeVulnerabilityStatus(input.VulnStatus)
+		if !isValidVulnerabilityTransition(vuln.VulnStatus, nextStatus) {
+			return errors.New("invalid vulnerability status transition")
+		}
+		vuln.VulnStatus = nextStatus
+	}
+	if input.AIVerdict != "" {
+		vuln.AIVerdict = normalizeVulnerabilityVerdict(input.AIVerdict)
+	}
+	if input.AISummary != "" {
+		vuln.AISummary = input.AISummary
+	}
+	if input.AnalystVerdict != "" {
+		vuln.AnalystVerdict = normalizeVulnerabilityVerdict(input.AnalystVerdict)
+	}
+	if input.AnalystNotes != "" {
+		vuln.AnalystNotes = input.AnalystNotes
+	}
+	if input.AttackChainRef != "" {
+		vuln.AttackChainRef = input.AttackChainRef
+	}
+	if input.RelatedAssets != nil {
+		vuln.RelatedAssets = input.RelatedAssets
+	}
+	if input.ReportRefs != nil {
+		vuln.ReportRefs = input.ReportRefs
+	}
+	return nil
+}
+
+func buildBulkActionPayloads(action string, input BulkVulnerabilityActionInput) (*UpdateVulnerabilityInput, *RetestVulnerabilityInput, error) {
+	switch action {
+	case "triage":
+		updateInput := UpdateVulnerabilityInput{
+			VulnStatus:     "triaged",
+			AIVerdict:      input.AIVerdict,
+			AISummary:      input.AISummary,
+			AnalystVerdict: input.AnalystVerdict,
+			AnalystNotes:   input.AnalystNotes,
+			AttackChainRef: input.AttackChainRef,
+			RelatedAssets:  input.RelatedAssets,
+			ReportRefs:     input.ReportRefs,
+		}
+		return &updateInput, nil, nil
+	case "false_positive":
+		updateInput := UpdateVulnerabilityInput{
+			VulnStatus:     "false_positive",
+			AIVerdict:      input.AIVerdict,
+			AISummary:      input.AISummary,
+			AnalystVerdict: input.AnalystVerdict,
+			AnalystNotes:   input.AnalystNotes,
+			AttackChainRef: input.AttackChainRef,
+			RelatedAssets:  input.RelatedAssets,
+			ReportRefs:     input.ReportRefs,
+		}
+		return &updateInput, nil, nil
+	case "close":
+		updateInput := UpdateVulnerabilityInput{
+			VulnStatus:     "closed",
+			AIVerdict:      input.AIVerdict,
+			AISummary:      input.AISummary,
+			AnalystVerdict: input.AnalystVerdict,
+			AnalystNotes:   input.AnalystNotes,
+			AttackChainRef: input.AttackChainRef,
+			RelatedAssets:  input.RelatedAssets,
+			ReportRefs:     input.ReportRefs,
+		}
+		return &updateInput, nil, nil
+	case "update":
+		updateInput := UpdateVulnerabilityInput{
+			VulnStatus:     input.Status,
+			AIVerdict:      input.AIVerdict,
+			AISummary:      input.AISummary,
+			AnalystVerdict: input.AnalystVerdict,
+			AnalystNotes:   input.AnalystNotes,
+			AttackChainRef: input.AttackChainRef,
+			RelatedAssets:  input.RelatedAssets,
+			ReportRefs:     input.ReportRefs,
+		}
+		if strings.TrimSpace(updateInput.VulnStatus) == "" &&
+			strings.TrimSpace(updateInput.AIVerdict) == "" &&
+			strings.TrimSpace(updateInput.AISummary) == "" &&
+			strings.TrimSpace(updateInput.AnalystVerdict) == "" &&
+			strings.TrimSpace(updateInput.AnalystNotes) == "" &&
+			strings.TrimSpace(updateInput.AttackChainRef) == "" &&
+			updateInput.RelatedAssets == nil &&
+			updateInput.ReportRefs == nil {
+			return nil, nil, errors.New("bulk update requires at least one mutable field")
+		}
+		return &updateInput, nil, nil
+	case "retest":
+		retestInput := RetestVulnerabilityInput{
+			Flow:     input.Flow,
+			Module:   input.Module,
+			Params:   input.Params,
+			Priority: input.Priority,
+		}
+		workflowName, _ := resolveRetestWorkflow(retestInput.Flow, retestInput.Module)
+		if workflowName == "" {
+			return nil, nil, errors.New("either flow or module is required for retest")
+		}
+		return nil, &retestInput, nil
+	default:
+		return nil, nil, errors.New("invalid bulk action")
+	}
+}
+
+func resolveBulkVulnerabilities(ctx context.Context, input BulkVulnerabilityActionInput) ([]*database.Vulnerability, error) {
+	if len(input.IDs) == 0 && len(input.FingerprintKeys) == 0 {
+		return nil, errors.New("either ids or fingerprint_keys is required")
+	}
+
+	seen := make(map[int64]struct{})
+	result := make([]*database.Vulnerability, 0, len(input.IDs)+len(input.FingerprintKeys))
+	for _, id := range input.IDs {
+		if id <= 0 {
+			continue
+		}
+		vuln, err := database.GetVulnerabilityByID(ctx, id)
+		if err != nil || vuln == nil {
+			continue
+		}
+		if workspace := strings.TrimSpace(input.Workspace); workspace != "" && !strings.EqualFold(strings.TrimSpace(vuln.Workspace), workspace) {
+			continue
+		}
+		if _, ok := seen[vuln.ID]; ok {
+			continue
+		}
+		seen[vuln.ID] = struct{}{}
+		result = append(result, vuln)
+	}
+
+	for _, fingerprintKey := range input.FingerprintKeys {
+		fingerprintKey = strings.TrimSpace(fingerprintKey)
+		if fingerprintKey == "" {
+			continue
+		}
+		items, err := database.ListVulnerabilities(ctx, database.VulnerabilityQuery{
+			Workspace:      strings.TrimSpace(input.Workspace),
+			FingerprintKey: fingerprintKey,
+			Limit:          100,
+		})
+		if err != nil {
+			continue
+		}
+		for i := range items.Data {
+			vuln := items.Data[i]
+			if _, ok := seen[vuln.ID]; ok {
+				continue
+			}
+			seen[vuln.ID] = struct{}{}
+			copyVuln := vuln
+			result = append(result, &copyVuln)
+		}
+	}
+
+	return result, nil
+}
+
+func queueVulnerabilityRetestTask(ctx context.Context, vuln *database.Vulnerability, input RetestVulnerabilityInput) (string, error) {
+	workflowName, workflowKind := resolveRetestWorkflow(input.Flow, input.Module)
+	if workflowName == "" {
+		return "", errors.New("either flow or module is required for retest")
+	}
+
+	target := strings.TrimSpace(vuln.AssetValue)
+	if target == "" {
+		target = vuln.Workspace
+	}
+
+	params := make(map[string]interface{})
+	for key, value := range input.Params {
+		params[key] = value
+	}
+	workspace := strings.TrimSpace(vuln.Workspace)
+	if workspace == "" {
+		workspace = computeWorkspace(target, input.Params)
+	}
+	params["target"] = target
+	params["workspace"] = workspace
+	params["space_name"] = workspace
+	params["retest_vulnerability_id"] = strconv.FormatInt(vuln.ID, 10)
+
+	retestRunUUID := uuid.New().String()
+	run := &database.Run{
+		RunUUID:      retestRunUUID,
+		WorkflowName: workflowName,
+		WorkflowKind: workflowKind,
+		Target:       target,
+		Params:       params,
+		Status:       "queued",
+		TriggerType:  "vuln-retest",
+		RunPriority:  normalizeRetestPriority(input.Priority),
+		RunMode:      "queue",
+		IsQueued:     true,
+		Workspace:    workspace,
+	}
+
+	vuln.VulnStatus = "retest"
+	vuln.RetestStatus = "queued"
+	vuln.RetestRunUUID = retestRunUUID
+	applyVulnerabilityStatusTimestamps(vuln)
+	if err := database.QueueVulnerabilityRetest(ctx, vuln, run); err != nil {
+		return "", err
+	}
+	return retestRunUUID, nil
 }
 
 func buildVulnerabilityDetail(ctx context.Context, vuln *database.Vulnerability) vulnerabilityDetailResponse {

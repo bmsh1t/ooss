@@ -101,7 +101,7 @@ func UpdateCampaignStatus(ctx context.Context, id, status string) error {
 	_, err := db.NewUpdate().
 		Model((*Campaign)(nil)).
 		Set("status = ?", status).
-		Set("updated_at = ?", time.Now()).
+		Set("updated_at = CASE WHEN status = ? THEN updated_at ELSE ? END", status, time.Now()).
 		Where("id = ?", id).
 		Exec(ctx)
 	if err != nil {
@@ -110,18 +110,38 @@ func UpdateCampaignStatus(ctx context.Context, id, status string) error {
 	return nil
 }
 
-// HasCampaignDeepScanRun checks whether a deep-scan run has already been queued for a workspace.
-func HasCampaignDeepScanRun(ctx context.Context, campaignID, workspace, workflowName string) (bool, error) {
+// UpdateCampaignParams updates the params payload for a campaign.
+func UpdateCampaignParams(ctx context.Context, id string, params map[string]interface{}) error {
+	if db == nil {
+		return fmt.Errorf("database not connected")
+	}
+	_, err := db.NewUpdate().
+		Model((*Campaign)(nil)).
+		Set("params = ?", params).
+		Set("updated_at = ?", time.Now()).
+		Where("id = ?", id).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to update campaign params: %w", err)
+	}
+	return nil
+}
+
+// HasCampaignDeepScanRun checks whether a deep-scan run has already been queued for a target.
+func HasCampaignDeepScanRun(ctx context.Context, campaignID, workspace, workflowName, target string) (bool, error) {
 	if db == nil {
 		return false, fmt.Errorf("database not connected")
 	}
-	count, err := db.NewSelect().
+	query := db.NewSelect().
 		Model((*Run)(nil)).
 		Where("run_group_id = ?", campaignID).
 		Where("workspace = ?", workspace).
 		Where("workflow_name = ?", workflowName).
-		Where("trigger_type = ?", "campaign-deep-scan").
-		Count(ctx)
+		Where("trigger_type = ?", "campaign-deep-scan")
+	if strings.TrimSpace(target) != "" {
+		query = query.Where("target = ?", strings.TrimSpace(target))
+	}
+	count, err := query.Count(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to query deep scan runs: %w", err)
 	}

@@ -54,11 +54,14 @@ type extractedChunk struct {
 
 // SearchOptions controls layered knowledge retrieval.
 type SearchOptions struct {
-	Workspace       string   `json:"workspace,omitempty"`
-	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
-	ScopeLayers     []string `json:"scope_layers,omitempty"`
-	Query           string   `json:"query"`
-	Limit           int      `json:"limit,omitempty"`
+	Workspace           string   `json:"workspace,omitempty"`
+	WorkspaceLayers     []string `json:"workspace_layers,omitempty"`
+	ScopeLayers         []string `json:"scope_layers,omitempty"`
+	Query               string   `json:"query"`
+	Limit               int      `json:"limit,omitempty"`
+	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
+	SampleTypes         []string `json:"sample_types,omitempty"`
+	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
 }
 
 // IngestPath ingests a single file or a directory tree into the local knowledge base.
@@ -779,11 +782,14 @@ func Search(ctx context.Context, workspace, query string, limit int) ([]database
 // SearchWithOptions proxies layered search to the database-backed implementation.
 func SearchWithOptions(ctx context.Context, opts SearchOptions) ([]database.KnowledgeSearchHit, error) {
 	return database.SearchKnowledgeWithOptions(ctx, database.KnowledgeSearchOptions{
-		Workspace:       strings.TrimSpace(opts.Workspace),
-		WorkspaceLayers: opts.WorkspaceLayers,
-		ScopeLayers:     opts.ScopeLayers,
-		Query:           opts.Query,
-		Limit:           opts.Limit,
+		Workspace:           strings.TrimSpace(opts.Workspace),
+		WorkspaceLayers:     opts.WorkspaceLayers,
+		ScopeLayers:         opts.ScopeLayers,
+		Query:               opts.Query,
+		Limit:               opts.Limit,
+		MinSourceConfidence: opts.MinSourceConfidence,
+		SampleTypes:         opts.SampleTypes,
+		ExcludeSampleTypes:  opts.ExcludeSampleTypes,
 	})
 }
 

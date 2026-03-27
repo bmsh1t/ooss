@@ -567,32 +567,8 @@ func buildAttackChainWorkbenchSummary(report *database.AttackChainReport, items 
 }
 
 func findLinkedVulnerabilities(ctx context.Context, workspace string, chain attackChainItem) []linkedVulnerability {
-	db := database.GetDB()
-	if db == nil {
-		return nil
-	}
-
-	var vulns []database.Vulnerability
-	query := db.NewSelect().
-		Model(&vulns).
-		Column("id", "vuln_title", "severity", "vuln_status", "asset_value").
-		Where("workspace = ?", workspace)
-
-	entryName := strings.ToLower(strings.TrimSpace(chain.EntryPoint.Vulnerability))
-	entryURL := strings.TrimSpace(chain.EntryPoint.URL)
-
-	if entryName != "" {
-		query = query.Where("LOWER(vuln_title) LIKE ?", "%"+entryName+"%")
-	}
-	if entryURL != "" {
-		query = query.Where("asset_value LIKE ?", "%"+entryURL+"%")
-	}
-
-	if entryName == "" && entryURL == "" {
-		return nil
-	}
-
-	if err := query.Order("updated_at DESC").Limit(10).Scan(ctx); err != nil {
+	vulns, err := attackchain.FindLinkedVulnerabilities(ctx, workspace, chain.EntryPoint.Vulnerability, chain.EntryPoint.URL, 10)
+	if err != nil {
 		return nil
 	}
 

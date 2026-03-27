@@ -44,11 +44,14 @@ type KnowledgeSearchHit struct {
 
 // KnowledgeSearchOptions controls layered keyword search.
 type KnowledgeSearchOptions struct {
-	Workspace       string
-	WorkspaceLayers []string
-	ScopeLayers     []string
-	Query           string
-	Limit           int
+	Workspace           string
+	WorkspaceLayers     []string
+	ScopeLayers         []string
+	Query               string
+	Limit               int
+	MinSourceConfidence float64
+	SampleTypes         []string
+	ExcludeSampleTypes  []string
 }
 
 type knowledgeSearchCandidate struct {
@@ -253,10 +256,13 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 	results := make([]KnowledgeSearchHit, 0, len(candidates))
 	for _, candidate := range candidates {
 		metadata := ParseKnowledgeMetadata(candidate.ChunkMetadata, candidate.DocMetadata)
+		if !KnowledgeMetadataMatchesFilters(metadata, opts.MinSourceConfidence, opts.SampleTypes, opts.ExcludeSampleTypes) {
+			continue
+		}
 		score := computeKnowledgeScore(query, candidate.Title, candidate.SourcePath, candidate.Content)
 		score += computeKnowledgeLayerBoost(workspaces, candidate.Workspace)
 		score += computeKnowledgeScopeBoost(scopeLayers, candidate.ChunkMetadata, candidate.DocMetadata)
-		score += computeKnowledgeMetadataBoost(query, metadata)
+		score += ComputeKnowledgeMetadataBoost(query, metadata)
 		if score <= 0 {
 			continue
 		}
@@ -458,62 +464,6 @@ func computeKnowledgeScopeBoost(scopeLayers []string, metadata ...string) float6
 	return 0
 }
 
-func computeKnowledgeMetadataBoost(query string, metadata *KnowledgeMetadataSummary) float64 {
-	if metadata == nil {
-		return 0
-	}
-
-	boost := metadata.SourceConfidence * 0.18
-	switch strings.ToLower(strings.TrimSpace(metadata.SampleType)) {
-	case "verified":
-		boost += 0.22
-	case "workspace-summary":
-		boost += 0.05
-	case "ai-analysis":
-		boost -= 0.03
-	case "false_positive":
-		if queryLooksLikeFalsePositiveIntent(query) {
-			boost += 0.08
-		} else {
-			boost -= 0.14
-		}
-	}
-
-	switch strings.ToLower(strings.TrimSpace(metadata.Scope)) {
-	case "workspace":
-		boost += 0.08
-	case "project":
-		boost += 0.04
-	case "public":
-		boost += 0.03
-	}
-
-	for _, targetType := range metadata.TargetTypes {
-		if queryMentionsKnowledgeTag(query, targetType) {
-			boost += 0.06
-			break
-		}
-	}
-
-	return boost
-}
-
-func queryLooksLikeFalsePositiveIntent(query string) bool {
-	query = strings.ToLower(strings.TrimSpace(query))
-	for _, token := range []string{"false positive", "false_positive", "误报", "noise"} {
-		if strings.Contains(query, token) {
-			return true
-		}
-	}
-	return false
-}
-
-func queryMentionsKnowledgeTag(query, tag string) bool {
-	query = strings.ToLower(strings.TrimSpace(query))
-	tag = strings.ToLower(strings.TrimSpace(tag))
-	return query != "" && tag != "" && strings.Contains(query, tag)
-}
-
 func dedupeKnowledgeSearchHits(results []KnowledgeSearchHit) []KnowledgeSearchHit {
 	if len(results) <= 1 {
 		return results
@@ -522,7 +472,10 @@ func dedupeKnowledgeSearchHits(results []KnowledgeSearchHit) []KnowledgeSearchHi
 	bestByKey := make(map[string]KnowledgeSearchHit, len(results))
 	order := make([]string, 0, len(results))
 	for _, result := range results {
-		key := strings.TrimSpace(result.ContentHash)
+		key := KnowledgeMetadataFingerprint(result.Metadata)
+		if key == "" {
+			key = strings.TrimSpace(result.ContentHash)
+		}
 		if key == "" {
 			key = strings.TrimSpace(result.SourcePath) + "::" + strings.TrimSpace(result.Section) + "::" + strings.TrimSpace(result.Snippet)
 		}

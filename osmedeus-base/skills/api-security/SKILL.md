@@ -1,19 +1,7 @@
 ---
-id: api-security
-name: API Security Testing
+name: api-security-testing
 description: API安全测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - api-security-testing
-  - api-testing
-tags:
-  - api
-  - auth
-  - authorization
-  - graphql
-target_types:
-  - api
-  - web
 ---
 
 # API安全测试

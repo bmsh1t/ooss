@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -83,6 +84,8 @@ type CampaignReportResponse struct {
 	DeepScan                    CampaignDeepScanReport    `json:"deep_scan"`
 	RerunHistory                CampaignRerunHistory      `json:"rerun_history"`
 	FiltersApplied              CampaignReportFilters     `json:"filters_applied"`
+	SortApplied                 CampaignReportSort        `json:"sort_applied"`
+	ProfileApplied              string                    `json:"profile_applied,omitempty"`
 	TotalTargets                int                       `json:"total_targets"`
 	ResultCount                 int                       `json:"result_count"`
 	Pagination                  CampaignReportPagination  `json:"pagination"`
@@ -95,6 +98,20 @@ type CampaignReportFilters struct {
 	Statuses     []string `json:"statuses,omitempty"`
 	TriggerTypes []string `json:"trigger_types,omitempty"`
 	Preset       string   `json:"preset,omitempty"`
+}
+
+// CampaignReportSort describes the active target-row ordering.
+type CampaignReportSort struct {
+	By    string `json:"by"`
+	Order string `json:"order"`
+}
+
+// CampaignProfileRequest stores a reusable report/export profile.
+type CampaignProfileRequest struct {
+	Description string                                `json:"description,omitempty"`
+	Filters     database.CampaignReportProfileFilters `json:"filters,omitempty"`
+	Sort        database.CampaignReportProfileSort    `json:"sort,omitempty"`
+	Format      string                                `json:"format,omitempty"`
 }
 
 // CampaignReportPagination describes the current report page after filters are applied.
@@ -353,9 +370,9 @@ func GetCampaignReport(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		filters, err := campaignReportFiltersFromQuery(c)
+		filters, sortSpec, _, profileApplied, statusCode, err := resolveCampaignReportQueryOptions(c, campaign)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			return c.Status(statusCode).JSON(fiber.Map{
 				"error":   true,
 				"message": err.Error(),
 			})
@@ -370,6 +387,8 @@ func GetCampaignReport(cfg *config.Config) fiber.Handler {
 			})
 		}
 		report = applyCampaignReportFilters(report, campaign, filters)
+		report = sortCampaignReport(report, sortSpec)
+		report.ProfileApplied = profileApplied
 		report = paginateCampaignReport(report, offset, limit)
 		return c.JSON(report)
 	}
@@ -387,9 +406,9 @@ func ExportCampaignReport(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		filters, err := campaignReportFiltersFromQuery(c)
+		filters, sortSpec, format, profileApplied, statusCode, err := resolveCampaignReportQueryOptions(c, campaign)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			return c.Status(statusCode).JSON(fiber.Map{
 				"error":   true,
 				"message": err.Error(),
 			})
@@ -404,9 +423,11 @@ func ExportCampaignReport(cfg *config.Config) fiber.Handler {
 			})
 		}
 		report = applyCampaignReportFilters(report, campaign, filters)
+		report = sortCampaignReport(report, sortSpec)
+		report.ProfileApplied = profileApplied
 		report = paginateCampaignReport(report, offset, limit)
 
-		if strings.EqualFold(strings.TrimSpace(c.Query("format")), "json") {
+		if strings.EqualFold(strings.TrimSpace(format), "json") {
 			return c.JSON(report)
 		}
 
@@ -421,6 +442,95 @@ func ExportCampaignReport(cfg *config.Config) fiber.Handler {
 		c.Set(fiber.HeaderContentType, "text/csv; charset=utf-8")
 		c.Set(fiber.HeaderContentDisposition, fmt.Sprintf("attachment; filename=%q", filename))
 		return c.Send(body)
+	}
+}
+
+// ListCampaignProfiles returns saved report/export profiles for a campaign.
+func ListCampaignProfiles(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := context.Background()
+		campaign, err := database.GetCampaignByID(ctx, c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error":   true,
+				"message": "Campaign not found",
+			})
+		}
+		profiles, err := database.ListCampaignReportProfiles(campaign)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+		return c.JSON(fiber.Map{
+			"data": profiles,
+		})
+	}
+}
+
+// SaveCampaignProfile stores or updates a report/export profile.
+func SaveCampaignProfile(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req CampaignProfileRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": "Invalid request body",
+			})
+		}
+		profile, err := database.UpsertCampaignReportProfile(context.Background(), c.Params("id"), database.CampaignReportProfile{
+			Name:        c.Params("name"),
+			Description: req.Description,
+			Filters:     req.Filters,
+			Sort:        req.Sort,
+			Format:      req.Format,
+		})
+		if err != nil {
+			statusCode := fiber.StatusInternalServerError
+			if strings.Contains(err.Error(), "campaign not found") {
+				statusCode = fiber.StatusNotFound
+			} else if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
+				statusCode = fiber.StatusBadRequest
+			}
+			return c.Status(statusCode).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+		return c.JSON(fiber.Map{
+			"message":     "Campaign profile saved",
+			"campaign_id": c.Params("id"),
+			"data":        profile,
+		})
+	}
+}
+
+// DeleteCampaignProfile removes a saved report/export profile.
+func DeleteCampaignProfile(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		deleted, err := database.DeleteCampaignReportProfile(context.Background(), c.Params("id"), c.Params("name"))
+		if err != nil {
+			statusCode := fiber.StatusInternalServerError
+			switch {
+			case strings.Contains(err.Error(), "campaign not found"):
+				statusCode = fiber.StatusNotFound
+			case errors.Is(err, database.ErrCampaignReportProfileNotFound):
+				statusCode = fiber.StatusNotFound
+			case strings.Contains(err.Error(), "invalid"):
+				statusCode = fiber.StatusBadRequest
+			}
+			return c.Status(statusCode).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+		return c.JSON(fiber.Map{
+			"message":     "Campaign profile deleted",
+			"campaign_id": c.Params("id"),
+			"deleted":     deleted,
+			"name":        strings.ToLower(strings.TrimSpace(c.Params("name"))),
+		})
 	}
 }
 
@@ -780,6 +890,82 @@ func campaignReportFiltersFromQuery(c *fiber.Ctx) (CampaignReportFilters, error)
 	)
 }
 
+func campaignReportSortFromQuery(c *fiber.Ctx) (CampaignReportSort, error) {
+	return normalizeCampaignReportSort(c.Query("sort_by"), c.Query("sort_order"))
+}
+
+func resolveCampaignReportQueryOptions(c *fiber.Ctx, campaign *database.Campaign) (CampaignReportFilters, CampaignReportSort, string, string, int, error) {
+	profileApplied := strings.TrimSpace(c.Query("profile"))
+	profileFilters := CampaignReportFilters{}
+	profileSort := CampaignReportSort{}
+	profileFormat := ""
+	if profileApplied != "" {
+		profile, err := database.GetCampaignReportProfile(campaign, profileApplied)
+		if err != nil {
+			statusCode := fiber.StatusInternalServerError
+			switch {
+			case errors.Is(err, database.ErrCampaignReportProfileNotFound):
+				statusCode = fiber.StatusNotFound
+			case strings.Contains(err.Error(), "invalid"):
+				statusCode = fiber.StatusBadRequest
+			}
+			return CampaignReportFilters{}, CampaignReportSort{}, "", "", statusCode, err
+		}
+		profileApplied = profile.Name
+		profileFilters = CampaignReportFilters{
+			RiskLevels:   append([]string(nil), profile.Filters.RiskLevels...),
+			Statuses:     append([]string(nil), profile.Filters.Statuses...),
+			TriggerTypes: append([]string(nil), profile.Filters.TriggerTypes...),
+			Preset:       profile.Filters.Preset,
+		}
+		profileSort = CampaignReportSort{
+			By:    profile.Sort.By,
+			Order: profile.Sort.Order,
+		}
+		profileFormat = profile.Format
+	}
+
+	if raw := c.Query("risk"); strings.TrimSpace(raw) != "" {
+		profileFilters.RiskLevels = splitCampaignFilterValues(raw)
+	}
+	if raw := c.Query("status"); strings.TrimSpace(raw) != "" {
+		profileFilters.Statuses = splitCampaignFilterValues(raw)
+	}
+	if raw := c.Query("trigger"); strings.TrimSpace(raw) != "" {
+		profileFilters.TriggerTypes = splitCampaignFilterValues(raw)
+	}
+	if raw := c.Query("preset"); strings.TrimSpace(raw) != "" {
+		profileFilters.Preset = raw
+	}
+	filters, err := normalizeCampaignReportFilters(profileFilters.RiskLevels, profileFilters.Statuses, profileFilters.TriggerTypes, profileFilters.Preset)
+	if err != nil {
+		return CampaignReportFilters{}, CampaignReportSort{}, "", "", fiber.StatusBadRequest, err
+	}
+
+	sortBy := profileSort.By
+	sortOrder := profileSort.Order
+	if raw := c.Query("sort_by"); strings.TrimSpace(raw) != "" {
+		sortBy = raw
+	}
+	if raw := c.Query("sort_order"); strings.TrimSpace(raw) != "" {
+		sortOrder = raw
+	}
+	sortSpec, err := normalizeCampaignReportSort(sortBy, sortOrder)
+	if err != nil {
+		return CampaignReportFilters{}, CampaignReportSort{}, "", "", fiber.StatusBadRequest, err
+	}
+
+	format := strings.TrimSpace(profileFormat)
+	if raw := c.Query("format"); strings.TrimSpace(raw) != "" {
+		format = strings.TrimSpace(raw)
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "" && format != "csv" && format != "json" {
+		return CampaignReportFilters{}, CampaignReportSort{}, "", "", fiber.StatusBadRequest, fmt.Errorf("unsupported campaign export format: %s", format)
+	}
+	return filters, sortSpec, format, profileApplied, fiber.StatusOK, nil
+}
+
 func campaignReportPageFromQuery(c *fiber.Ctx) (int, int) {
 	offset, _ := strconv.Atoi(c.Query("offset", "0"))
 	limit, _ := strconv.Atoi(c.Query("limit", "0"))
@@ -843,6 +1029,55 @@ func normalizeCampaignReportPreset(value string) string {
 	return value
 }
 
+func normalizeCampaignReportSort(by, order string) (CampaignReportSort, error) {
+	sortSpec := CampaignReportSort{
+		By:    normalizeCampaignReportSortBy(by),
+		Order: normalizeCampaignReportSortOrder(by, order),
+	}
+	switch sortSpec.By {
+	case "risk", "target", "latest_run", "open_high_risk":
+	default:
+		return CampaignReportSort{}, fmt.Errorf("unsupported campaign report sort_by: %s", by)
+	}
+	if sortSpec.Order != "asc" && sortSpec.Order != "desc" {
+		return CampaignReportSort{}, fmt.Errorf("unsupported campaign report sort_order: %s", order)
+	}
+	return sortSpec, nil
+}
+
+func normalizeCampaignReportSortBy(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	switch value {
+	case "", "risk", "target", "latest_run", "latest_run_at", "open_high_risk", "open_high_risk_findings":
+	default:
+		return value
+	}
+	switch value {
+	case "", "risk":
+		return "risk"
+	case "latest_run_at":
+		return "latest_run"
+	case "open_high_risk_findings":
+		return "open_high_risk"
+	default:
+		return value
+	}
+}
+
+func normalizeCampaignReportSortOrder(by, order string) string {
+	order = strings.ToLower(strings.TrimSpace(order))
+	if order == "asc" || order == "desc" {
+		return order
+	}
+	switch normalizeCampaignReportSortBy(by) {
+	case "target":
+		return "asc"
+	default:
+		return "desc"
+	}
+}
+
 func applyCampaignReportFilters(report *CampaignReportResponse, campaign *database.Campaign, filters CampaignReportFilters) *CampaignReportResponse {
 	if report == nil {
 		return nil
@@ -866,6 +1101,20 @@ func applyCampaignReportFilters(report *CampaignReportResponse, campaign *databa
 	}
 	filtered.ResultCount = len(filtered.Targets)
 	return &filtered
+}
+
+func sortCampaignReport(report *CampaignReportResponse, sortSpec CampaignReportSort) *CampaignReportResponse {
+	if report == nil {
+		return nil
+	}
+
+	sorted := *report
+	sorted.SortApplied = sortSpec
+	sorted.Targets = append([]CampaignReportTargetRow(nil), report.Targets...)
+	sort.SliceStable(sorted.Targets, func(i, j int) bool {
+		return campaignReportLess(sorted.Targets[i], sorted.Targets[j], sortSpec)
+	})
+	return &sorted
 }
 
 func paginateCampaignReport(report *CampaignReportResponse, offset, limit int) *CampaignReportResponse {
@@ -894,6 +1143,71 @@ func paginateCampaignReport(report *CampaignReportResponse, offset, limit int) *
 		HasMore:       end < totalMatched,
 	}
 	return &paginated
+}
+
+func campaignReportLess(left, right CampaignReportTargetRow, sortSpec CampaignReportSort) bool {
+	desc := sortSpec.Order == "desc"
+	switch sortSpec.By {
+	case "target":
+		if left.Target == right.Target {
+			return campaignReportDefaultLess(left, right)
+		}
+		return campaignCompareString(left.Target, right.Target, desc)
+	case "latest_run":
+		if left.LatestRunAt.Equal(right.LatestRunAt) {
+			return campaignReportDefaultLess(left, right)
+		}
+		return campaignCompareTime(left.LatestRunAt, right.LatestRunAt, desc)
+	case "open_high_risk":
+		if left.OpenHighRiskFindings == right.OpenHighRiskFindings {
+			return campaignReportDefaultLess(left, right)
+		}
+		return campaignCompareInt(left.OpenHighRiskFindings, right.OpenHighRiskFindings, desc)
+	case "risk":
+		fallthrough
+	default:
+		return campaignReportDefaultLessWithOrder(left, right, desc)
+	}
+}
+
+func campaignReportDefaultLess(left, right CampaignReportTargetRow) bool {
+	return campaignReportDefaultLessWithOrder(left, right, true)
+}
+
+func campaignReportDefaultLessWithOrder(left, right CampaignReportTargetRow, desc bool) bool {
+	leftRisk := campaignRiskRank(left.RiskLevel)
+	rightRisk := campaignRiskRank(right.RiskLevel)
+	if leftRisk != rightRisk {
+		return campaignCompareInt(leftRisk, rightRisk, desc)
+	}
+	if left.OpenHighRiskFindings != right.OpenHighRiskFindings {
+		return campaignCompareInt(left.OpenHighRiskFindings, right.OpenHighRiskFindings, desc)
+	}
+	if !left.LatestRunAt.Equal(right.LatestRunAt) {
+		return campaignCompareTime(left.LatestRunAt, right.LatestRunAt, desc)
+	}
+	return left.Target < right.Target
+}
+
+func campaignCompareString(left, right string, desc bool) bool {
+	if desc {
+		return left > right
+	}
+	return left < right
+}
+
+func campaignCompareInt(left, right int, desc bool) bool {
+	if desc {
+		return left > right
+	}
+	return left < right
+}
+
+func campaignCompareTime(left, right time.Time, desc bool) bool {
+	if desc {
+		return left.After(right)
+	}
+	return left.Before(right)
 }
 
 func campaignReportRowMatchesFilters(campaign *database.Campaign, row CampaignReportTargetRow, filters CampaignReportFilters) bool {

@@ -57,6 +57,12 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&status
   -H "Authorization: Bearer $TOKEN"
 ```
 
+**Filter active findings with retest / verdict state:**
+```bash
+curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&active_only=true&retest_status=running&ai_verdict=confirmed&has_attack_chain=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 **Query Parameters:**
 
 | Parameter | Type | Default | Description |
@@ -66,8 +72,13 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&status
 | `confidence` | string | - | Filter by confidence (Certain, Firm, Tentative, Manual Review Required) |
 | `asset_value` | string | - | Filter by asset value (partial match) |
 | `status` | string | - | Filter by lifecycle status (`new`, `triaged`, `verified`, `false_positive`, `retest`, `closed`) |
+| `retest_status` | string | - | Filter by retest run status (`queued`, `running`, `completed`, `failed`, `cancelled`) |
+| `ai_verdict` | string | - | Filter by AI verdict (`confirmed`, `false_positive`, `needs_verification`, `retest_required`) |
+| `analyst_verdict` | string | - | Filter by analyst verdict |
 | `fingerprint_key` | string | - | Filter by the merged fingerprint key |
 | `source_run_uuid` | string | - | Filter by the currently linked source run UUID |
+| `active_only` | bool | false | Exclude `false_positive` and `closed` findings |
+| `has_attack_chain` | bool | false | Only show findings already linked to an attack chain |
 | `offset` | int | 0 | Number of records to skip |
 | `limit` | int | 20 | Maximum records to return (max 10000) |
 
@@ -117,6 +128,25 @@ curl "http://localhost:8002/osm/api/vulnerabilities?workspace=example.com&status
 
 ---
 
+## List Vulnerability Groups
+
+Get fingerprint-level grouped findings with derived evidence counts. This is the lighter triage view for backlog review and retest planning.
+
+```bash
+curl "http://localhost:8002/osm/api/vulnerabilities/groups?workspace=example.com&has_attack_chain=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Each item includes:
+
+- `evidence_versions`: merged evidence snapshots in the fingerprint group
+- `distinct_runs`: unique source/retest runs observed in the group history
+- `asset_count`: unique primary/related assets touched by the finding
+- `report_ref_count`: unique report references accumulated over time
+- `attack_chain_linked`: whether the group is already tied to an attack chain
+
+---
+
 ## Get Vulnerability Summary
 
 Get a summary of vulnerabilities grouped by severity, optionally filtered by workspace.
@@ -163,8 +193,100 @@ curl "http://localhost:8002/osm/api/vulnerabilities/summary?workspace=example.co
 Get workspace-level lifecycle statistics and board-style aggregations.
 
 ```bash
-curl "http://localhost:8002/osm/api/vulnerabilities/board?workspace=example.com" \
+curl "http://localhost:8002/osm/api/vulnerabilities/board?workspace=example.com&top_targets_limit=5" \
   -H "Authorization: Bearer $TOKEN"
+```
+
+The board response also includes:
+
+- `top_targets`: top risky assets with finding counts, open high-risk counts, retest backlog, and attack-chain linkage counts
+- `review_coverage`: AI verdict totals, analyst verdict totals, reviewed vs unreviewed findings, and agreement/disagreement counts
+
+---
+
+## Bulk Vulnerability Actions
+
+Apply the same lifecycle or retest action to a selected set of findings. This is the practical triage endpoint for batch review, false-positive cleanup, and focused retest queueing.
+
+Supported actions:
+
+- `triage`
+- `false_positive`
+- `close`
+- `update`
+- `retest`
+
+Selection supports either:
+
+- `ids`: explicit vulnerability IDs
+- `fingerprint_keys`: merged finding groups
+
+You can also scope the selection with `workspace` to avoid cross-workspace matches.
+
+**Batch triage by IDs and fingerprint keys:**
+```bash
+curl -X POST http://localhost:8002/osm/api/vulnerabilities/bulk \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "triage",
+    "workspace": "example.com",
+    "ids": [12, 19],
+    "fingerprint_keys": ["a1f8...", "bf22..."],
+    "analyst_verdict": "confirmed",
+    "analyst_notes": "batch reviewed during daily triage"
+  }'
+```
+
+**Queue a shared retest task for selected findings:**
+```bash
+curl -X POST http://localhost:8002/osm/api/vulnerabilities/bulk \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retest",
+    "workspace": "example.com",
+    "fingerprint_keys": ["a1f8..."],
+    "module": "web-classic",
+    "priority": "critical",
+    "params": {
+      "recheck_mode": "focused"
+    }
+  }'
+```
+
+**Example response:**
+```json
+{
+  "summary": {
+    "selected": 2,
+    "updated": 1,
+    "queued": 1,
+    "skipped": 0,
+    "failed": 0,
+    "action": "retest"
+  },
+  "data": [
+    {
+      "id": 12,
+      "fingerprint_key": "a1f8...",
+      "action": "retest",
+      "outcome": "queued",
+      "vuln_status": "retest",
+      "retest_status": "queued",
+      "run_uuid": "b8b0d8c7-0b7a-4ee1-8b2f-3b3e6d7a2d11"
+    },
+    {
+      "id": 19,
+      "fingerprint_key": "bf22...",
+      "action": "retest",
+      "outcome": "skipped",
+      "message": "vulnerability retest already queued or running",
+      "vuln_status": "retest",
+      "retest_status": "running"
+    }
+  ]
+}
 ```
 
 ---

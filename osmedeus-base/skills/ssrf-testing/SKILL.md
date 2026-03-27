@@ -1,18 +1,7 @@
 ---
-id: ssrf-testing
-name: SSRF Testing
+name: ssrf-testing
 description: SSRF服务器端请求伪造测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - ssrf
-  - server-side-request-forgery
-tags:
-  - ssrf
-  - network
-  - cloud-metadata
-target_types:
-  - web
-  - api
 ---
 
 # SSRF服务器端请求伪造测试

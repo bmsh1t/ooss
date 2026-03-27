@@ -129,6 +129,54 @@ func TestIndexWorkspaceSkipsUnchangedDocuments(t *testing.T) {
 	require.Equal(t, 0, second.ChunksEmbedded)
 }
 
+func TestIndexWorkspaceReindexesWhenMetadataChanges(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/acme-playbook.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "Acme Playbook",
+		ContentHash: "doc-hash-1",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"sample_type":"verified","source_confidence":0.95}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "SQL Injection",
+		Content:     "Look for UNION based injection on login endpoints.",
+		ContentHash: "chunk-hash-1",
+		Metadata:    `{"sample_type":"verified","source_confidence":0.95}`,
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	first, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, 1, first.DocumentsIndexed)
+
+	doc.Metadata = `{"sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"stable-fp"}`
+	doc.UpdatedAt = now.Add(time.Minute)
+	chunks[0].Metadata = `{"sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"stable-fp"}`
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	second, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, 1, second.DocumentsSeen)
+	require.Equal(t, 1, second.DocumentsIndexed)
+	require.Equal(t, 0, second.DocumentsSkipped)
+	require.Equal(t, 1, second.ChunksEmbedded)
+}
+
 func TestDoctorAndPurgeDetectAndCleanStaleData(t *testing.T) {
 	cfg, cleanup := setupVectorKBTestEnv(t)
 	defer cleanup()
@@ -572,6 +620,235 @@ func TestSearchIncludesPublicLayerFallbackAndMetadata(t *testing.T) {
 	require.Equal(t, "public", results[0].Metadata.Scope)
 	require.Equal(t, "verified", results[0].Metadata.SampleType)
 	require.Contains(t, results[0].Metadata.TargetTypes, "url")
+}
+
+func TestSearchDedupesByMetadataFingerprintAcrossLayers(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/verified-findings.md",
+		SourceType:  "generated",
+		DocType:     "learned-findings",
+		Title:       "Verified Findings",
+		ContentHash: "doc-hash-acme",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"shared-vector-fp"}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Primary",
+		Content:     "Verified SQL injection on login with UNION proof",
+		ContentHash: "chunk-hash-acme",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"shared-vector-fp"}`,
+		CreatedAt:   now,
+	}}))
+
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, &database.KnowledgeDocument{
+		Workspace:   "public",
+		SourcePath:  "kb://learned/public/acme/verified-findings.md",
+		SourceType:  "generated",
+		DocType:     "learned-findings",
+		Title:       "Verified Findings",
+		ContentHash: "doc-hash-public",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"public","knowledge_layer":"public","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"shared-vector-fp"}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []database.KnowledgeChunk{{
+		Workspace:   "public",
+		ChunkIndex:  0,
+		Section:     "Shared",
+		Content:     "Verified SQL injection on login with UNION payload",
+		ContentHash: "chunk-hash-public",
+		Metadata:    `{"scope":"public","knowledge_layer":"public","source_workspace":"acme","sample_type":"verified","source_confidence":0.95,"retrieval_fingerprint":"shared-vector-fp"}`,
+		CreatedAt:   now,
+	}}))
+
+	_, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	_, err = IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "public"})
+	require.NoError(t, err)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     10,
+	}, "verified sql injection login union")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "acme", results[0].Workspace)
+}
+
+func TestSearchFiltersLowConfidenceAndFalsePositiveSamples(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/ai-insights.md",
+		SourceType:  "generated",
+		DocType:     "learned-ai-insights",
+		Title:       "AI Insights",
+		ContentHash: "doc-hash-ai",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"ai-analysis","source_confidence":0.52}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "AI",
+		Content:     "Auth bypass hypothesis and exploit path",
+		ContentHash: "chunk-hash-ai",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"ai-analysis","source_confidence":0.52}`,
+		CreatedAt:   now,
+	}}))
+
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/false-positive-samples.md",
+		SourceType:  "generated",
+		DocType:     "learned-false-positives",
+		Title:       "False Positive Samples",
+		ContentHash: "doc-hash-fp",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"false_positive","source_confidence":0.90}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Noise",
+		Content:     "False positive auth bypass caused by benign redirect",
+		ContentHash: "chunk-hash-fp",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"false_positive","source_confidence":0.90}`,
+		CreatedAt:   now,
+	}}))
+
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/verified-findings.md",
+		SourceType:  "generated",
+		DocType:     "learned-findings",
+		Title:       "Verified Findings",
+		ContentHash: "doc-hash-verified",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"verified","source_confidence":0.95}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Proof",
+		Content:     "Verified auth bypass proof with retest notes",
+		ContentHash: "chunk-hash-verified",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"verified","source_confidence":0.95}`,
+		CreatedAt:   now,
+	}}))
+
+	_, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace:           "acme",
+		Limit:               10,
+		MinSourceConfidence: 0.60,
+		ExcludeSampleTypes:  []string{"false_positive"},
+	}, "auth bypass proof")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.NotNil(t, results[0].Metadata)
+	require.Equal(t, "verified", results[0].Metadata.SampleType)
+}
+
+func TestSearchPrefersOperationalPlaybookForOperationalQuery(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	operationalDoc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/operational-playbook.md",
+		SourceType:  "generated",
+		DocType:     "learned-operational-playbook",
+		Title:       "Operational Playbook",
+		ContentHash: "operational-doc-hash",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  180,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"operator-followup","source_confidence":0.88,"target_types":["url"],"labels":["operator-followup","manual-followup","operator-queue","retest-plan","followup-decision","campaign-handoff"]}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	operationalChunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Manual Follow-up",
+		Content:     "Manual exploitation retest plan for admin auth bypass with proof capture and operator followup.",
+		ContentHash: "operational-chunk-hash",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"operator-followup","source_confidence":0.88,"target_types":["url"],"labels":["operator-followup","manual-followup","operator-queue","retest-plan","followup-decision","campaign-handoff"]}`,
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, operationalDoc, operationalChunks))
+
+	aiDoc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "kb://learned/workspace/acme/ai-insights.md",
+		SourceType:  "generated",
+		DocType:     "learned-ai-insights",
+		Title:       "AI Insights",
+		ContentHash: "ai-doc-hash",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  170,
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"ai-analysis","source_confidence":0.64,"target_types":["url"],"labels":["auto-learn","ai-analysis"]}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	aiChunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Summary",
+		Content:     "AI summary about admin auth bypass and attack path observations.",
+		ContentHash: "ai-chunk-hash",
+		Metadata:    `{"scope":"workspace","knowledge_layer":"acme","source_workspace":"acme","sample_type":"ai-analysis","source_confidence":0.64,"target_types":["url"],"labels":["auto-learn","ai-analysis"]}`,
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, aiDoc, aiChunks))
+
+	_, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     5,
+	}, "manual exploitation retest auth bypass admin proof")
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.NotNil(t, results[0].Metadata)
+	require.Equal(t, "operator-followup", results[0].Metadata.SampleType)
+	require.Equal(t, "Operational Playbook", results[0].Title)
 }
 
 func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {

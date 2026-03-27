@@ -31,7 +31,7 @@ osmedeus kb vector search --query "auth bypass admin api" -w example.com
 5. Run the optimized workflow with layered knowledge:
 
 ```bash
-osmedeus run -f superdomain-extensive -t example.com \
+osmedeus run -f superdomain-extensive-ai-optimized -t example.com \
   -p knowledgeWorkspace=example.com \
   -p sharedKnowledgeWorkspace=shared-web \
   -p globalKnowledgeWorkspace=global

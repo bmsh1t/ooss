@@ -1,18 +1,7 @@
 ---
-id: command-injection-testing
-name: Command Injection Testing
+name: command-injection-testing
 description: 命令注入漏洞测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - command-injection
-  - cmdi
-tags:
-  - rce
-  - injection
-  - shell
-target_types:
-  - web
-  - api
 ---
 
 # 命令注入漏洞测试

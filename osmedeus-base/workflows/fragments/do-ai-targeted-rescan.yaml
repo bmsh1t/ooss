@@ -30,10 +30,62 @@ params:
     default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
   - name: semanticPriorityTargetsFile
     default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: appliedDecisionFile
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: previousFollowupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_targets
+    default: ""
+  - name: previous_followup_focus_areas
+    default: ""
+  - name: previous_followup_manual_first_targets
+    default: ""
+  - name: previous_followup_high_confidence_targets
+    default: ""
+  - name: previous_followup_manual_first_targets_list
+    default: ""
+  - name: previous_followup_high_confidence_targets_list
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
+  - name: previous_followup_reasoning
+    default: ""
+  - name: previous_followup_scan_profile
+    default: ""
+  - name: previous_followup_severity
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_next_phase
+    default: ""
+  - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_manual_followup_needed
+    default: ""
+  - name: previous_followup_campaign_followup_recommended
+    default: ""
+  - name: previous_followup_queue_followup_effective
+    default: ""
+  - name: previous_followup_escalation_score
+    default: ""
+  - name: previous_followup_campaign_create_status
+    default: ""
+  - name: previous_followup_campaign_create_id
+    default: ""
+  - name: previous_followup_campaign_create_queued_runs
+    default: ""
   - name: rescanTargetsFile
     default: "{{Output}}/ai-analysis/rescan-targets-{{TargetSpace}}.txt"
 
@@ -96,12 +148,39 @@ steps:
       mkdir -p {{Output}}/ai-analysis
       TARGET_TMP="{{Output}}/ai-analysis/.rescan-targets-raw-{{TargetSpace}}.txt"
       : > "$TARGET_TMP"
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      csv_or_json_to_array() {
+        value="$1"
+        if [ -z "$value" ]; then
+          echo '[]'
+        elif printf '%s' "$value" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          printf '%s' "$value"
+        else
+          printf '%s' "$value" | jq -R 'split(",") | reduce .[] as $item ([]; ($item | gsub("^\\s+|\\s+$"; "")) as $normalized | if ($normalized != "" and (index($normalized) == null)) then . + [$normalized] else . end)'
+        fi
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
+      for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_FILE="$candidate"
+          break
+        fi
+      done
+
       ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
       if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
         ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
       fi
 
-      for f in "{{confirmedUrlsFile}}" "{{attackChainEntryPointsFile}}" "{{priorityTargetsFile}}" "{{semanticPriorityTargetsFile}}" "{{operatorQueueTargetsFile}}" "{{retestTargetsFile}}"; do
+      for f in "{{confirmedUrlsFile}}" "{{attackChainEntryPointsFile}}" "{{priorityTargetsFile}}" "$ACTIVE_SEMANTIC_PRIORITY_FILE" "{{operatorQueueTargetsFile}}" "{{retestTargetsFile}}"; do
         if [ -f "$f" ]; then
           cat "$f" >> "$TARGET_TMP" 2>/dev/null || true
         fi
@@ -109,6 +188,21 @@ steps:
 
       if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
         jq -r '.targets.rescan_targets[]? // .rescan_targets[]? // empty' "$ACTIVE_DECISION_FILE" 2>/dev/null >> "$TARGET_TMP" || true
+      fi
+      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        jq -r '((.seed_targets.rescan_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$TARGET_TMP" || true
+      else
+        PREV_PARAM_MANUAL_JSON=$(csv_or_json_to_array "{{previous_followup_manual_first_targets_list}}")
+        PREV_PARAM_HIGH_CONFIDENCE_JSON=$(csv_or_json_to_array "{{previous_followup_high_confidence_targets_list}}")
+        PREV_PARAM_COMBINED_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
+        PREV_PARAM_COMBINED_COUNT=$(printf '%s\n' "$PREV_PARAM_COMBINED_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        if [ "$PREV_PARAM_COMBINED_COUNT" -eq 0 ] 2>/dev/null; then
+          PREV_PARAM_COMBINED_JSON=$(jq -n \
+            --argjson manual "$PREV_PARAM_MANUAL_JSON" \
+            --argjson high "$PREV_PARAM_HIGH_CONFIDENCE_JSON" \
+            '($manual + $high) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' 2>/dev/null || echo '[]')
+        fi
+        printf '%s\n' "$PREV_PARAM_COMBINED_JSON" | jq -r '.[]? // empty' 2>/dev/null >> "$TARGET_TMP" || true
       fi
 
       awk 'NF && !seen[$0]++' "$TARGET_TMP" | head -{{maxRescanTargets}} > "{{rescanTargetsFile}}" || true
@@ -127,6 +221,18 @@ steps:
     pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
     command: |
       # 读取 AI 决策建议的扫描参数
+      normalize_int() {
+        value="$1"
+        case "$value" in
+          ''|*[!0-9]*)
+            echo 0
+            ;;
+          *)
+            echo "$value"
+            ;;
+        esac
+      }
+
       SEVERITY="{{defaultSeverity}}"
       THREADS={{defaultThreads}}
       RATE_LIMIT={{defaultRateLimit}}
@@ -170,8 +276,66 @@ steps:
         fi
 
         echo "[Rescan] AI decision loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_SEVERITY=$(jq -r '.seed_focus.severity // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_PROFILE=$(jq -r '.seed_focus.scan_profile // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        [ -n "$PREV_SEVERITY" ] && SEVERITY="$PREV_SEVERITY"
+        case "$PREV_PROFILE" in
+          aggressive)
+            THREADS=15
+            RATE_LIMIT=50
+            TIMEOUT="28800"
+            ;;
+          balanced)
+            THREADS=12
+            RATE_LIMIT=40
+            TIMEOUT="21600"
+            ;;
+        esac
+        echo "[Rescan] Previous followup seed loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
       else
-        echo "[Rescan] No AI decision found, using defaults"
+        PREV_PARAM_SEVERITY="{{previous_followup_severity}}"
+        PREV_PARAM_PROFILE="{{previous_followup_scan_profile}}"
+        PREV_PARAM_PRIORITY_MODE="{{previous_followup_priority_mode}}"
+        PREV_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
+        PREV_PARAM_ESCALATION_SCORE=$(normalize_int "{{previous_followup_escalation_score}}")
+
+        if [ -n "$PREV_PARAM_SEVERITY" ] || [ -n "$PREV_PARAM_PROFILE" ] || [ -n "$PREV_PARAM_PRIORITY_MODE" ] || [ -n "$PREV_PARAM_CONFIDENCE_LEVEL" ] || [ "$PREV_PARAM_ESCALATION_SCORE" -gt 0 ] 2>/dev/null; then
+          [ -n "$PREV_PARAM_SEVERITY" ] && SEVERITY="$PREV_PARAM_SEVERITY"
+          case "${PREV_PARAM_PROFILE:-focused}" in
+            aggressive)
+              THREADS=15
+              RATE_LIMIT=50
+              TIMEOUT="28800"
+              ;;
+            balanced)
+              THREADS=12
+              RATE_LIMIT=40
+              TIMEOUT="21600"
+              ;;
+            *)
+              THREADS={{defaultThreads}}
+              RATE_LIMIT={{defaultRateLimit}}
+              TIMEOUT="{{defaultTimeout}}"
+              ;;
+          esac
+
+          if [ "$PREV_PARAM_PRIORITY_MODE" = "manual-first" ] || [ "$PREV_PARAM_CONFIDENCE_LEVEL" = "high" ] || [ "$PREV_PARAM_ESCALATION_SCORE" -ge 12 ] 2>/dev/null; then
+            [ "$THREADS" -lt 15 ] 2>/dev/null && THREADS=15
+            [ "$RATE_LIMIT" -lt 50 ] 2>/dev/null && RATE_LIMIT=50
+            TIMEOUT="28800"
+          elif [ "$PREV_PARAM_PRIORITY_MODE" = "campaign-first" ] || [ "$PREV_PARAM_PRIORITY_MODE" = "retest-first" ] || [ "$PREV_PARAM_CONFIDENCE_LEVEL" = "medium" ] || [ "$PREV_PARAM_ESCALATION_SCORE" -ge 6 ] 2>/dev/null; then
+            [ "$THREADS" -lt 12 ] 2>/dev/null && THREADS=12
+            [ "$RATE_LIMIT" -lt 40 ] 2>/dev/null && RATE_LIMIT=40
+            if [ "$TIMEOUT" = "{{defaultTimeout}}" ] || [ "$TIMEOUT" -lt 21600 ] 2>/dev/null; then
+              TIMEOUT="21600"
+            fi
+          fi
+
+          echo "[Rescan] Queue previous followup params loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+        else
+          echo "[Rescan] No AI decision found, using defaults"
+        fi
       fi
 
       # 保存到工作目录（避免 /tmp 在容器/并发场景下的竞态问题）
@@ -319,6 +483,15 @@ steps:
       SKIPPED=false
       [ -f "{{Output}}/ai-analysis/.rescan-skip" ] && SKIPPED=true
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       {
         echo "# AI 定向深扫结果"
         echo "## 目标: {{Target}}"
@@ -328,12 +501,13 @@ steps:
         if [ "$SKIPPED" = "true" ]; then
           echo "> AI 验证无高置信度目标，跳过定向深扫"
         else
-          CRITICAL=$(wc -l < "{{rescanCriticalFile}}" 2>/dev/null || echo 0)
-          HIGH=$(wc -l < "{{rescanHighFile}}" 2>/dev/null || echo 0)
-          TOTAL=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+          CRITICAL=$(count_lines "{{rescanCriticalFile}}")
+          HIGH=$(count_lines "{{rescanHighFile}}")
+          TOTAL=$(count_lines "{{rescanOutputJsonl}}")
+          TARGETS=$(count_lines "{{rescanTargetsFile}}")
 
           echo "## 扫描统计"
-          echo "- 扫描目标数: $(wc -l < \"{{rescanTargetsFile}}\" 2>/dev/null || echo 0)"
+          echo "- 扫描目标数: $TARGETS"
           echo "- Critical 新发现: $CRITICAL"
           echo "- High 新发现: $HIGH"
           echo "- 总计新发现: $TOTAL"

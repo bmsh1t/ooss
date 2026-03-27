@@ -21,11 +21,14 @@ type KnowledgeIngestRequest struct {
 
 // KnowledgeSearchRequest performs keyword search across ingested knowledge chunks.
 type KnowledgeSearchRequest struct {
-	Query           string   `json:"query"`
-	Workspace       string   `json:"workspace,omitempty"`
-	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
-	ScopeLayers     []string `json:"scope_layers,omitempty"`
-	Limit           int      `json:"limit,omitempty"`
+	Query               string   `json:"query"`
+	Workspace           string   `json:"workspace,omitempty"`
+	WorkspaceLayers     []string `json:"workspace_layers,omitempty"`
+	ScopeLayers         []string `json:"scope_layers,omitempty"`
+	Limit               int      `json:"limit,omitempty"`
+	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
+	SampleTypes         []string `json:"sample_types,omitempty"`
+	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
 }
 
 // KnowledgeVectorIndexRequest indexes a workspace into the standalone vector DB.
@@ -38,13 +41,16 @@ type KnowledgeVectorIndexRequest struct {
 
 // KnowledgeVectorSearchRequest performs semantic search against the standalone vector DB.
 type KnowledgeVectorSearchRequest struct {
-	Query           string   `json:"query"`
-	Workspace       string   `json:"workspace,omitempty"`
-	WorkspaceLayers []string `json:"workspace_layers,omitempty"`
-	ScopeLayers     []string `json:"scope_layers,omitempty"`
-	Provider        string   `json:"provider,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	Limit           int      `json:"limit,omitempty"`
+	Query               string   `json:"query"`
+	Workspace           string   `json:"workspace,omitempty"`
+	WorkspaceLayers     []string `json:"workspace_layers,omitempty"`
+	ScopeLayers         []string `json:"scope_layers,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	Model               string   `json:"model,omitempty"`
+	Limit               int      `json:"limit,omitempty"`
+	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
+	SampleTypes         []string `json:"sample_types,omitempty"`
+	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
 }
 
 // KnowledgeLearnRequest synthesizes learned knowledge from an existing workspace.
@@ -160,11 +166,14 @@ func SearchKnowledge(cfg *config.Config) fiber.Handler {
 
 		ctx := context.Background()
 		results, err := knowledge.SearchWithOptions(ctx, knowledge.SearchOptions{
-			Workspace:       req.Workspace,
-			WorkspaceLayers: req.WorkspaceLayers,
-			ScopeLayers:     req.ScopeLayers,
-			Query:           req.Query,
-			Limit:           req.Limit,
+			Workspace:           req.Workspace,
+			WorkspaceLayers:     req.WorkspaceLayers,
+			ScopeLayers:         req.ScopeLayers,
+			Query:               req.Query,
+			Limit:               req.Limit,
+			MinSourceConfidence: req.MinSourceConfidence,
+			SampleTypes:         req.SampleTypes,
+			ExcludeSampleTypes:  req.ExcludeSampleTypes,
 		})
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -287,12 +296,15 @@ func SearchVectorKnowledge(cfg *config.Config) fiber.Handler {
 
 		ctx := context.Background()
 		results, err := vectorkb.Search(ctx, cfg, vectorkb.SearchOptions{
-			Workspace:       strings.TrimSpace(req.Workspace),
-			WorkspaceLayers: req.WorkspaceLayers,
-			ScopeLayers:     req.ScopeLayers,
-			Provider:        strings.TrimSpace(req.Provider),
-			Model:           strings.TrimSpace(req.Model),
-			Limit:           req.Limit,
+			Workspace:           strings.TrimSpace(req.Workspace),
+			WorkspaceLayers:     req.WorkspaceLayers,
+			ScopeLayers:         req.ScopeLayers,
+			Provider:            strings.TrimSpace(req.Provider),
+			Model:               strings.TrimSpace(req.Model),
+			Limit:               req.Limit,
+			MinSourceConfidence: req.MinSourceConfidence,
+			SampleTypes:         req.SampleTypes,
+			ExcludeSampleTypes:  req.ExcludeSampleTypes,
 		}, req.Query)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{

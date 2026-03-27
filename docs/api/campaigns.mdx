@@ -111,6 +111,9 @@ Optional query filters narrow the returned `targets` slice while keeping the top
 | `preset` | `preset=high-risk` | Apply an operator preset |
 | `offset` | `offset=20` | Skip N matched target rows after filters |
 | `limit` | `limit=50` | Return at most N matched rows after filters (`0` = all) |
+| `sort_by` | `sort_by=target` | Sort by `risk`, `target`, `latest_run`, or `open_high_risk` |
+| `sort_order` | `sort_order=asc` | Sort order override (`asc` or `desc`) |
+| `profile` | `profile=ops-handoff` | Apply a saved report/export profile before explicit query overrides |
 
 Available presets:
 
@@ -121,6 +124,7 @@ Available presets:
 The response also includes:
 
 - `filters_applied`
+- `sort_applied`
 - `total_targets`
 - `result_count`
 - `pagination`
@@ -182,6 +186,66 @@ Pagination works the same way for export:
 curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?status=completed&offset=100&limit=50" \
   -H "Authorization: Bearer $TOKEN" \
   -o campaign-page.csv
+```
+
+Sorting works the same way for export:
+
+```bash
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?sort_by=target&sort_order=desc" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o campaign-sorted.csv
+```
+
+Saved profiles can also drive both report and export:
+
+```bash
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/report?profile=ops-handoff" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?profile=ops-handoff" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+When a profile is applied:
+
+- saved `filters` and `sort` are loaded first
+- saved `format` becomes the default export format
+- explicit query parameters still win over the saved profile
+
+## Saved Report Profiles
+
+List saved profiles:
+
+```bash
+curl http://localhost:8002/osm/api/campaigns/<campaign-id>/profiles \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Save or update a reusable profile:
+
+```bash
+curl -X PUT http://localhost:8002/osm/api/campaigns/<campaign-id>/profiles/ops-handoff \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "operator handoff view",
+    "filters": {
+      "statuses": ["completed"],
+      "trigger_types": ["campaign-rerun"]
+    },
+    "sort": {
+      "by": "target",
+      "order": "desc"
+    },
+    "format": "json"
+  }'
+```
+
+Delete a saved profile:
+
+```bash
+curl -X DELETE http://localhost:8002/osm/api/campaigns/<campaign-id>/profiles/ops-handoff \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Rerun Failed Targets

@@ -11,7 +11,7 @@ When you run `kb learn` with `scope=public`, the learned documents are now store
 
 For semantic retrieval, Osmedeus now also supports a standalone vector SQLite database, defaulting to `{{base_folder}}/knowledge/vector-kb.sqlite`. This keeps vector embeddings portable and reusable across workflows without mixing them into the main relational DB tables.
 
-It is also consumed by `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` during semantic search.
+It is also consumed by `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` during semantic search.
 
 ## Supported Document Types
 
@@ -291,6 +291,6 @@ Recommended flow:
 
 1. Ingest your PDFs, markdown notes, ebooks, or vendor docs into the same workspace name you scan with.
 2. Let Osmedeus auto-index them into `vector-kb.sqlite`, or trigger `/knowledge/vector/index` manually.
-3. Run `superdomain-extensive-hybrid`, `superdomain-extensive-stable`, `superdomain-extensive`, or `superdomain-extensive-lite`.
+3. Run `superdomain-extensive-ai-hybrid`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-optimized`, or `superdomain-extensive-ai-lite`.
 4. The workflow will perform direct `kb vector search`, merge that with direct `kb search` keyword hits, still export chunks into the semantic corpus, and run post-report `kb learn` for reuse in future runs.
 5. During the AI closure, the workflow also writes a normalized `applied-ai-decision-<workspace>.json`, feeds targeted rescan findings back into the main vuln result set, and emits a `followup-decision-<workspace>.json` package after retest/operator/campaign coordination.

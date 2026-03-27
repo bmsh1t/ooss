@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/j3ssie/osmedeus/v5/internal/attackchain"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/core"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
@@ -620,12 +621,16 @@ func maybeQueueCampaignDeepScan(ctx context.Context, runUUID string) {
 		return
 	}
 
-	vulnSummary, err := database.GetVulnerabilitySummary(ctx, run.Workspace)
-	if err != nil || !campaignWorkspaceIsHighRisk(campaign.HighRiskSeverities, vulnSummary) {
+	vulnSummary, err := database.GetActiveVulnerabilitySummaryForTarget(ctx, run.Workspace, run.Target)
+	if err != nil {
+		return
+	}
+	attackChainSummary, err := attackchain.GetTargetSummary(ctx, run.Workspace, run.Target)
+	if err != nil || !campaignTargetIsHighRiskSignal(campaign.HighRiskSeverities, vulnSummary, attackChainSummary) {
 		return
 	}
 
-	exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+	exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow, run.Target)
 	if err != nil || exists {
 		return
 	}
@@ -651,13 +656,27 @@ func maybeQueueCampaignDeepScan(ctx context.Context, runUUID string) {
 	_ = database.CreateRun(ctx, deepScanRun)
 }
 
-func campaignWorkspaceIsHighRisk(severities []string, summary map[string]int) bool {
+func campaignTargetIsHighRiskSignal(severities []string, summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) bool {
 	if len(severities) == 0 {
 		severities = []string{"critical", "high"}
 	}
 	for _, severity := range severities {
-		if summary[strings.ToLower(strings.TrimSpace(severity))] > 0 {
+		severity = strings.ToLower(strings.TrimSpace(severity))
+		if summary[severity] > 0 {
 			return true
+		}
+		if attackChainSummary == nil || attackChainSummary.OperationalHits <= 0 {
+			continue
+		}
+		switch severity {
+		case "critical":
+			if attackChainSummary.CriticalChains > 0 {
+				return true
+			}
+		case "high":
+			if attackChainSummary.HighImpactChains > 0 {
+				return true
+			}
 		}
 	}
 	return false

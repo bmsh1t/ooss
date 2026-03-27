@@ -15,18 +15,23 @@ import (
 )
 
 var (
-	kbPath      string
-	kbWorkspace string
-	kbRecursive bool
-	kbQuery     string
-	kbLimit     int
-	kbOffset    int
-	kbScope     string
-	kbMaxAssets int
-	kbMaxVulns  int
-	kbMaxRuns   int
-	kbIncludeAI bool
-	kbOutput    string
+	kbPath                string
+	kbWorkspace           string
+	kbRecursive           bool
+	kbQuery               string
+	kbLimit               int
+	kbOffset              int
+	kbScope               string
+	kbMaxAssets           int
+	kbMaxVulns            int
+	kbMaxRuns             int
+	kbIncludeAI           bool
+	kbOutput              string
+	kbWorkspaceLayers     []string
+	kbScopeLayers         []string
+	kbMinSourceConfidence float64
+	kbSampleTypes         []string
+	kbExcludeSampleTypes  []string
 )
 
 var kbCmd = &cobra.Command{
@@ -73,6 +78,11 @@ func init() {
 	kbSearchCmd.Flags().StringVar(&kbQuery, "query", "", "search query")
 	kbSearchCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty searches all workspaces)")
 	kbSearchCmd.Flags().IntVar(&kbLimit, "limit", 10, "maximum number of results")
+	kbSearchCmd.Flags().StringSliceVar(&kbWorkspaceLayers, "workspace-layer", nil, "preferred workspace layers in ranking order")
+	kbSearchCmd.Flags().StringSliceVar(&kbScopeLayers, "scope-layer", nil, "preferred scope layers in ranking order")
+	kbSearchCmd.Flags().Float64Var(&kbMinSourceConfidence, "min-confidence", 0, "skip learned results below this source confidence")
+	kbSearchCmd.Flags().StringSliceVar(&kbSampleTypes, "sample-type", nil, "include only specific learned sample types")
+	kbSearchCmd.Flags().StringSliceVar(&kbExcludeSampleTypes, "exclude-sample-type", nil, "exclude specific learned sample types")
 	_ = kbSearchCmd.MarkFlagRequired("query")
 
 	kbDocsCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty lists all workspaces)")
@@ -159,7 +169,16 @@ func runKBSearch(cmd *cobra.Command, args []string) error {
 	defer func() { _ = database.Close() }()
 
 	ctx := context.Background()
-	results, err := knowledge.Search(ctx, kbWorkspace, kbQuery, kbLimit)
+	results, err := knowledge.SearchWithOptions(ctx, knowledge.SearchOptions{
+		Workspace:           kbWorkspace,
+		WorkspaceLayers:     kbWorkspaceLayers,
+		ScopeLayers:         kbScopeLayers,
+		Query:               kbQuery,
+		Limit:               kbLimit,
+		MinSourceConfidence: kbMinSourceConfidence,
+		SampleTypes:         kbSampleTypes,
+		ExcludeSampleTypes:  kbExcludeSampleTypes,
+	})
 	if err != nil {
 		return err
 	}

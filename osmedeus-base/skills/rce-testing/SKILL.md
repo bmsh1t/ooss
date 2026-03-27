@@ -1,21 +1,3 @@
----
-id: rce-testing
-name: Remote Code Execution Testing
-description: 远程代码执行与高危执行链测试的专业技能和方法论
-version: 1.0.0
-aliases:
-  - rce
-  - remote-code-execution
-tags:
-  - rce
-  - injection
-  - exploit
-target_types:
-  - web
-  - api
-  - host
----
-
 # RCE Testing Skill
 
 ## Overview

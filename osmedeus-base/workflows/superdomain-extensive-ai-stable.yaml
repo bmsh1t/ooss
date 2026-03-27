@@ -6,11 +6,11 @@
 # 特点：优先使用 agent-acp(claude-code) 以提升稳定性
 #
 # Usage:
-#   osmedeus run -f superdomain-extensive-stable -t example.com
+#   osmedeus run -f superdomain-extensive-ai-stable -t example.com
 # =============================================================================
 
 kind: flow
-name: superdomain-extensive-stable
+name: superdomain-extensive-ai-stable
 description: Ultimate reconnaissance - stable version using agent-acp for all AI analysis
 tags: "recon, domain, extensive, full, vuln, osint, super, ai, stable"
 
@@ -200,6 +200,54 @@ params:
   - name: followupDecisionOutput
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
 
+  # ===========================================================
+  # 上一轮 follow-up 回灌参数
+  # ===========================================================
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_targets
+    default: ""
+  - name: previous_followup_focus_areas
+    default: ""
+  - name: previous_followup_manual_first_targets
+    default: ""
+  - name: previous_followup_high_confidence_targets
+    default: ""
+  - name: previous_followup_reasoning
+    default: ""
+  - name: previous_followup_scan_profile
+    default: ""
+  - name: previous_followup_severity
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_next_phase
+    default: ""
+  - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_manual_followup_needed
+    default: ""
+  - name: previous_followup_campaign_followup_recommended
+    default: ""
+  - name: previous_followup_queue_followup_effective
+    default: ""
+  - name: previous_followup_escalation_score
+    default: ""
+  - name: previous_followup_campaign_create_status
+    default: ""
+  - name: previous_followup_campaign_create_id
+    default: ""
+  - name: previous_followup_campaign_create_queued_runs
+    default: ""
+  - name: previous_followup_manual_first_targets_list
+    default: ""
+  - name: previous_followup_high_confidence_targets_list
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
+
 # -----------------------------------------------------------------------------
 # MODULES SECTION
 # -----------------------------------------------------------------------------
@@ -297,12 +345,16 @@ modules:
       agentResultsOutput: "{{Output}}/ai-analysis/semantic-agent-results-early-{{TargetSpace}}.json"
       embeddingsOutput: "{{Output}}/ai-analysis/semantic-embeddings-early-{{TargetSpace}}.json"
       semanticHighlightsOutput: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+      semanticPriorityTargetsOutput: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
+      semanticPriorityVulnsOutput: "{{Output}}/ai-analysis/semantic-priority-vulns-early-{{TargetSpace}}.json"
       vectorSearchResultsOutput: "{{Output}}/ai-analysis/vector-search-results-early-{{TargetSpace}}.json"
+      vectorKnowledgeSearchOutput: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
       globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
+      searchStage: "early"
       searchQuery: "Admin panels, authentication flows, high-value endpoints, exposed services, and tech-specific exploitation ideas"
 
   # AI 实时 WAF 规避 - agent-acp 版本
@@ -357,12 +409,16 @@ modules:
       agentResultsOutput: "{{Output}}/ai-analysis/semantic-agent-results-post-vuln-{{TargetSpace}}.json"
       embeddingsOutput: "{{Output}}/ai-analysis/semantic-embeddings-post-vuln-{{TargetSpace}}.json"
       semanticHighlightsOutput: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
+      semanticPriorityTargetsOutput: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+      semanticPriorityVulnsOutput: "{{Output}}/ai-analysis/semantic-priority-vulns-post-vuln-{{TargetSpace}}.json"
       vectorSearchResultsOutput: "{{Output}}/ai-analysis/vector-search-results-post-vuln-{{TargetSpace}}.json"
+      vectorKnowledgeSearchOutput: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
       knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
       sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
       globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
       includeKnowledgeBase: "{{includeKnowledgeBase}}"
+      searchStage: "post-vuln"
       searchQuery: "Confirmed findings, exploit chains, auth bypass, pivot paths, retest payloads, and post-validation exploitation guidance"
 
   # AI 协调器 - 汇总所有 AI 分析结果，生成决策配置
@@ -375,6 +431,7 @@ modules:
       semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
       initialSemanticSearchFile: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
       initialSemanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+      semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
       knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
       initialKnowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
       vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
@@ -397,34 +454,59 @@ modules:
   # ===========================================================================
   # Phase 11: AI 定向二次扫描 (基于 AI 决策结果)
   # ===========================================================================
+  - name: ai-decision-semantic-search
+    path: fragments/do-ai-semantic-search.yaml
+    depends_on: [ai-apply-decision]
+    pre_condition: "{{enableLlmAnalysis}}"
+    params:
+      semanticIndexDir: "{{Output}}/ai-analysis/semantic-index-decision-followup"
+      searchResultsOutput: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+      agentResultsOutput: "{{Output}}/ai-analysis/semantic-agent-results-decision-followup-{{TargetSpace}}.json"
+      embeddingsOutput: "{{Output}}/ai-analysis/semantic-embeddings-decision-followup-{{TargetSpace}}.json"
+      semanticHighlightsOutput: "{{Output}}/ai-analysis/semantic-highlights-decision-followup-{{TargetSpace}}.json"
+      semanticPriorityTargetsOutput: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+      semanticPriorityVulnsOutput: "{{Output}}/ai-analysis/semantic-priority-vulns-decision-followup-{{TargetSpace}}.json"
+      vectorSearchResultsOutput: "{{Output}}/ai-analysis/vector-search-results-decision-followup-{{TargetSpace}}.json"
+      vectorKnowledgeSearchOutput: "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json"
+      knowledgeSearchOutput: "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json"
+      semanticPriorityTargetsInput: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+      knowledgeWorkspace: "{{knowledgeWorkspace}}"
+      sharedKnowledgeWorkspace: "{{sharedKnowledgeWorkspace}}"
+      globalKnowledgeWorkspace: "{{globalKnowledgeWorkspace}}"
+      includeKnowledgeBase: "{{includeKnowledgeBase}}"
+      searchStage: "decision-followup"
+      searchQuery: "Applied AI decision, prioritized retest targets, operator queue tasks, campaign handoff, targeted rescan guidance, and manual exploitation follow-up"
+
   - name: ai-retest-planning
     path: fragments/do-ai-retest-planning.yaml
-    depends_on: [ai-apply-decision, ai-path-planning, ai-attack-chain, ai-post-vuln-semantic-search]
+    depends_on: [ai-apply-decision, ai-path-planning, ai-attack-chain, ai-decision-semantic-search]
     pre_condition: "{{enableRetestPlanning}}"
     params:
       retestPlanOutput: "{{retestPlanOutput}}"
       retestFlow: "{{retestFlow}}"
       retestPriority: "{{retestPriority}}"
-      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
-      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
-      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+      knowledgeSearchFile: "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json"
+      vectorKnowledgeSearchFile: "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json"
 
   - name: ai-operator-queue
     path: fragments/do-ai-operator-queue.yaml
-    depends_on: [ai-retest-planning, ai-apply-decision]
+    depends_on: [ai-retest-planning, ai-apply-decision, ai-decision-semantic-search]
     pre_condition: "{{enableOperatorQueue}}"
     params:
       operatorQueueOutput: "{{operatorQueueOutput}}"
+      semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
 
   - name: ai-campaign-handoff
     path: fragments/do-ai-campaign-handoff.yaml
-    depends_on: [ai-retest-planning, ai-operator-queue, ai-apply-decision]
+    depends_on: [ai-retest-planning, ai-operator-queue, ai-apply-decision, ai-decision-semantic-search]
     pre_condition: "{{enableCampaignHandoff}}"
     params:
       campaignHandoffOutput: "{{campaignHandoffOutput}}"
       campaignCreateOutput: "{{campaignCreateOutput}}"
       retestPlanOutput: "{{retestPlanOutput}}"
       operatorQueueOutput: "{{operatorQueueOutput}}"
+      semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
       retestFlow: "{{retestFlow}}"
       retestPriority: "{{retestPriority}}"
       knowledgeWorkspace: "{{knowledgeWorkspace}}"
@@ -439,8 +521,10 @@ modules:
 
   - name: ai-targeted-rescan
     path: fragments/do-ai-targeted-rescan.yaml
-    depends_on: [ai-apply-decision, ai-retest-planning, ai-operator-queue]
+    depends_on: [ai-apply-decision, ai-retest-planning, ai-operator-queue, ai-decision-semantic-search]
     pre_condition: "{{enableLlmAnalysis}}"
+    params:
+      semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
 
   - name: ai-retest-queue
     path: fragments/do-ai-retest-queue.yaml
@@ -458,6 +542,7 @@ modules:
     pre_condition: "{{enableLlmAnalysis}}"
     params:
       followupDecisionOutput: "{{followupDecisionOutput}}"
+      semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
 
   # ===========================================================================
   # Phase 12: Final Report

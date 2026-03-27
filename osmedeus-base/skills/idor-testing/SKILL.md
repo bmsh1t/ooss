@@ -1,18 +1,7 @@
 ---
-id: idor-testing
-name: IDOR Testing
+name: idor-testing
 description: IDOR不安全的直接对象引用测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - idor
-  - broken-access-control
-tags:
-  - authorization
-  - object-reference
-  - access-control
-target_types:
-  - web
-  - api
 ---
 
 # IDOR不安全的直接对象引用测试

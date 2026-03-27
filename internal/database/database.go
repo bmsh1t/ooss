@@ -226,11 +226,6 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
-	// Create indexes for Vulnerability table
-	if err := createVulnerabilityIndexes(ctx); err != nil {
-		return err
-	}
-
 	// Create indexes for AttackChainReport table
 	if err := createAttackChainIndexes(ctx); err != nil {
 		return err
@@ -328,6 +323,16 @@ func Migrate(ctx context.Context) error {
 
 	// Add vulnerability evidence/dedup columns to vulnerabilities table if they don't exist
 	if err := addVulnerabilityEvidenceColumns(ctx); err != nil {
+		return err
+	}
+
+	// Backfill and reconcile vulnerability fingerprints before unique indexes.
+	if err := reconcileVulnerabilityFingerprints(ctx); err != nil {
+		return err
+	}
+
+	// Create indexes for Vulnerability table after lifecycle/evidence columns exist.
+	if err := createVulnerabilityIndexes(ctx); err != nil {
 		return err
 	}
 
@@ -672,6 +677,7 @@ func createVulnerabilityIndexes(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_confidence ON vulnerabilities(confidence)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_asset_value ON vulnerabilities(asset_value)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_fingerprint_key ON vulnerabilities(fingerprint_key)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_vulnerabilities_workspace_fingerprint_unique ON vulnerabilities(workspace, fingerprint_key) WHERE fingerprint_key <> ''",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_vuln_status ON vulnerabilities(vuln_status)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_status ON vulnerabilities(retest_status)",
 		"CREATE INDEX IF NOT EXISTS idx_vulnerabilities_retest_run_uuid ON vulnerabilities(retest_run_uuid)",

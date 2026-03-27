@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -23,6 +24,12 @@ type CreateVulnerabilityResult struct {
 	Vulnerability *Vulnerability `json:"vulnerability"`
 	Created       bool           `json:"created"`
 	Merged        bool           `json:"merged"`
+}
+
+type duplicateVulnerabilityGroup struct {
+	Workspace      string `bun:"workspace"`
+	FingerprintKey string `bun:"fingerprint_key"`
+	Count          int    `bun:"count"`
 }
 
 // SeedDatabase populates the database with sample data for development and testing
@@ -3824,15 +3831,20 @@ func ListEventLogs(ctx context.Context, query EventLogQuery) (*EventLogResult, e
 
 // VulnerabilityQuery holds query parameters for listing vulnerabilities
 type VulnerabilityQuery struct {
-	Workspace  string
-	Severity   string
-	Confidence string
-	AssetValue string
-	VulnStatus string
+	Workspace      string
+	Severity       string
+	Confidence     string
+	AssetValue     string
+	VulnStatus     string
+	RetestStatus   string
+	AIVerdict      string
+	AnalystVerdict string
 	FingerprintKey string
 	SourceRunUUID  string
-	Offset     int
-	Limit      int
+	ActiveOnly     bool
+	HasAttackChain bool
+	Offset         int
+	Limit          int
 }
 
 // VulnerabilityResult holds paginated vulnerability results
@@ -3855,30 +3867,7 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 	}
 
 	// Build base query
-	baseQuery := db.NewSelect().Model((*Vulnerability)(nil))
-
-	// Apply filters
-	if query.Workspace != "" {
-		baseQuery = baseQuery.Where("workspace = ?", query.Workspace)
-	}
-	if query.Severity != "" {
-		baseQuery = baseQuery.Where("severity = ?", query.Severity)
-	}
-	if query.Confidence != "" {
-		baseQuery = baseQuery.Where("confidence = ?", query.Confidence)
-	}
-	if query.AssetValue != "" {
-		baseQuery = baseQuery.Where("asset_value LIKE ?", "%"+query.AssetValue+"%")
-	}
-	if query.VulnStatus != "" {
-		baseQuery = baseQuery.Where("vuln_status = ?", query.VulnStatus)
-	}
-	if query.FingerprintKey != "" {
-		baseQuery = baseQuery.Where("fingerprint_key = ?", query.FingerprintKey)
-	}
-	if query.SourceRunUUID != "" {
-		baseQuery = baseQuery.Where("source_run_uuid = ?", query.SourceRunUUID)
-	}
+	baseQuery := applyVulnerabilityListFilters(db.NewSelect().Model((*Vulnerability)(nil)), query)
 
 	// Get total count with filters
 	totalCount, err := baseQuery.Count(ctx)
@@ -3891,30 +3880,7 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 	var vulnerabilities []Vulnerability
 	err = db.NewSelect().
 		Model(&vulnerabilities).
-		Apply(func(q *bun.SelectQuery) *bun.SelectQuery {
-			if query.Workspace != "" {
-				q = q.Where("workspace = ?", query.Workspace)
-			}
-			if query.Severity != "" {
-				q = q.Where("severity = ?", query.Severity)
-			}
-			if query.AssetValue != "" {
-				q = q.Where("asset_value LIKE ?", "%"+query.AssetValue+"%")
-			}
-			if query.Confidence != "" {
-				q = q.Where("confidence = ?", query.Confidence)
-			}
-			if query.VulnStatus != "" {
-				q = q.Where("vuln_status = ?", query.VulnStatus)
-			}
-			if query.FingerprintKey != "" {
-				q = q.Where("fingerprint_key = ?", query.FingerprintKey)
-			}
-			if query.SourceRunUUID != "" {
-				q = q.Where("source_run_uuid = ?", query.SourceRunUUID)
-			}
-			return q
-		}).
+		Apply(func(q *bun.SelectQuery) *bun.SelectQuery { return applyVulnerabilityListFilters(q, query) }).
 		Order("created_at DESC").
 		Offset(query.Offset).
 		Limit(query.Limit).
@@ -3925,6 +3891,46 @@ func ListVulnerabilities(ctx context.Context, query VulnerabilityQuery) (*Vulner
 	result.Data = vulnerabilities
 
 	return result, nil
+}
+
+func applyVulnerabilityListFilters(q *bun.SelectQuery, query VulnerabilityQuery) *bun.SelectQuery {
+	if query.Workspace != "" {
+		q = q.Where("workspace = ?", query.Workspace)
+	}
+	if query.Severity != "" {
+		q = q.Where("severity = ?", query.Severity)
+	}
+	if query.Confidence != "" {
+		q = q.Where("confidence = ?", query.Confidence)
+	}
+	if query.AssetValue != "" {
+		q = q.Where("asset_value LIKE ?", "%"+query.AssetValue+"%")
+	}
+	if query.VulnStatus != "" {
+		q = q.Where("vuln_status = ?", query.VulnStatus)
+	}
+	if query.RetestStatus != "" {
+		q = q.Where("retest_status = ?", query.RetestStatus)
+	}
+	if query.AIVerdict != "" {
+		q = q.Where("ai_verdict = ?", query.AIVerdict)
+	}
+	if query.AnalystVerdict != "" {
+		q = q.Where("analyst_verdict = ?", query.AnalystVerdict)
+	}
+	if query.FingerprintKey != "" {
+		q = q.Where("fingerprint_key = ?", query.FingerprintKey)
+	}
+	if query.SourceRunUUID != "" {
+		q = q.Where("source_run_uuid = ?", query.SourceRunUUID)
+	}
+	if query.ActiveOnly {
+		q = q.Where("vuln_status NOT IN ('false_positive', 'closed')")
+	}
+	if query.HasAttackChain {
+		q = q.Where("TRIM(COALESCE(attack_chain_ref, '')) <> ''")
+	}
+	return q
 }
 
 // GetVulnerabilityByID returns a vulnerability by ID
@@ -3977,22 +3983,184 @@ func CreateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) (*Creat
 	}
 
 	evidence := buildVulnerabilityEvidence(vuln, now)
-	returnResult := &CreateVulnerabilityResult{}
+	for attempt := 0; attempt < 2; attempt++ {
+		returnResult := &CreateVulnerabilityResult{}
 
-	err := Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
-		var existing Vulnerability
-		err := tx.NewSelect().
-			Model(&existing).
-			Where("workspace = ?", vuln.Workspace).
-			Where("fingerprint_key = ?", vuln.FingerprintKey).
-			Limit(1).
-			Scan(ctx)
-		switch {
-		case err == nil:
-			merged := mergeVulnerabilityRecords(&existing, vuln, evidence, now)
+		err := Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
+			var existing Vulnerability
+			err := tx.NewSelect().
+				Model(&existing).
+				Where("workspace = ?", vuln.Workspace).
+				Where("fingerprint_key = ?", vuln.FingerprintKey).
+				Limit(1).
+				Scan(ctx)
+			switch {
+			case err == nil:
+				merged := mergeVulnerabilityRecords(&existing, vuln, evidence, now)
+				if _, err := tx.NewUpdate().
+					Model(merged).
+					Column(
+						"vuln_info",
+						"vuln_title",
+						"vuln_desc",
+						"vuln_poc",
+						"severity",
+						"confidence",
+						"asset_type",
+						"asset_value",
+						"tags",
+						"detail_http_request",
+						"detail_http_response",
+						"raw_vuln_json",
+						"fingerprint_key",
+						"vuln_status",
+						"source_run_uuid",
+						"ai_verdict",
+						"ai_summary",
+						"analyst_verdict",
+						"analyst_notes",
+						"retest_status",
+						"retest_run_uuid",
+						"attack_chain_ref",
+						"related_assets",
+						"report_refs",
+						"evidence_version",
+						"evidence_history_json",
+						"first_seen_at",
+						"verified_at",
+						"closed_at",
+						"updated_at",
+						"last_seen_at",
+					).
+					WherePK().
+					Exec(ctx); err != nil {
+					return fmt.Errorf("failed to merge vulnerability: %w", err)
+				}
+				*returnResult = CreateVulnerabilityResult{
+					Vulnerability: merged,
+					Created:       false,
+					Merged:        true,
+				}
+				*vuln = *merged
+				return nil
+			case err != nil && err != sql.ErrNoRows:
+				return fmt.Errorf("failed to query existing vulnerability: %w", err)
+			}
+
+			vuln.EvidenceHistory = marshalVulnerabilityEvidenceHistory([]VulnerabilityEvidence{evidence})
+			_, err = tx.NewInsert().Model(vuln).Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to create vulnerability: %w", err)
+			}
+			*returnResult = CreateVulnerabilityResult{
+				Vulnerability: vuln,
+				Created:       true,
+				Merged:        false,
+			}
+			return nil
+		})
+		if err == nil {
+			return returnResult, nil
+		}
+		if !isVulnerabilityFingerprintConstraintError(err) || attempt == 1 {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("failed to create vulnerability record after retry")
+}
+
+func isVulnerabilityFingerprintConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errText := strings.ToLower(err.Error())
+	return (strings.Contains(errText, "duplicate key") || strings.Contains(errText, "unique constraint failed")) &&
+		(strings.Contains(errText, "fingerprint") || strings.Contains(errText, "workspace"))
+}
+
+func buildVulnerabilityFingerprint(vuln *Vulnerability) string {
+	parts := []string{
+		normalizeVulnerabilityFingerprintPart(vuln.Workspace),
+		normalizeVulnerabilityFingerprintPart(firstNonEmpty(vuln.VulnInfo, vuln.VulnTitle)),
+		normalizeVulnerabilityFingerprintPart(vuln.AssetType),
+		normalizeVulnerabilityFingerprintPart(vuln.AssetValue),
+	}
+	raw := strings.Join(parts, "::")
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func reconcileVulnerabilityFingerprints(ctx context.Context) error {
+	if db == nil {
+		return fmt.Errorf("database not connected")
+	}
+	if err := backfillMissingVulnerabilityFingerprints(ctx); err != nil {
+		return err
+	}
+	return reconcileDuplicateVulnerabilities(ctx)
+}
+
+func backfillMissingVulnerabilityFingerprints(ctx context.Context) error {
+	var rows []Vulnerability
+	if err := db.NewSelect().
+		Model(&rows).
+		Column("id", "workspace", "vuln_info", "vuln_title", "asset_type", "asset_value", "fingerprint_key").
+		Where("TRIM(COALESCE(fingerprint_key, '')) = ''").
+		Scan(ctx); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to load vulnerabilities for fingerprint backfill: %w", err)
+	}
+
+	for _, row := range rows {
+		fingerprint := buildVulnerabilityFingerprint(&row)
+		if strings.TrimSpace(fingerprint) == "" {
+			continue
+		}
+		if _, err := db.NewUpdate().
+			Model((*Vulnerability)(nil)).
+			Set("fingerprint_key = ?", fingerprint).
+			Where("id = ?", row.ID).
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to backfill vulnerability fingerprint: %w", err)
+		}
+	}
+	return nil
+}
+
+func reconcileDuplicateVulnerabilities(ctx context.Context) error {
+	var groups []duplicateVulnerabilityGroup
+	if err := db.NewSelect().
+		Table("vulnerabilities").
+		Column("workspace", "fingerprint_key").
+		ColumnExpr("COUNT(*) AS count").
+		Where("TRIM(COALESCE(fingerprint_key, '')) <> ''").
+		Group("workspace", "fingerprint_key").
+		Having("COUNT(*) > 1").
+		Scan(ctx, &groups); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to scan duplicate vulnerabilities: %w", err)
+	}
+
+	now := time.Now()
+	for _, group := range groups {
+		if err := Transaction(ctx, func(ctx context.Context, tx bun.Tx) error {
+			var rows []Vulnerability
+			if err := tx.NewSelect().
+				Model(&rows).
+				Where("workspace = ?", group.Workspace).
+				Where("fingerprint_key = ?", group.FingerprintKey).
+				OrderExpr("created_at ASC").
+				OrderExpr("id ASC").
+				Scan(ctx); err != nil {
+				return fmt.Errorf("failed to load duplicate vulnerability rows: %w", err)
+			}
+			if len(rows) <= 1 {
+				return nil
+			}
+
+			merged := mergeDuplicateVulnerabilityRows(rows, now)
 			if _, err := tx.NewUpdate().
 				Model(merged).
 				Column(
+					"workspace",
 					"vuln_info",
 					"vuln_title",
 					"vuln_desc",
@@ -4027,48 +4195,93 @@ func CreateVulnerabilityRecord(ctx context.Context, vuln *Vulnerability) (*Creat
 				).
 				WherePK().
 				Exec(ctx); err != nil {
-				return fmt.Errorf("failed to merge vulnerability: %w", err)
+				return fmt.Errorf("failed to update merged duplicate vulnerability: %w", err)
 			}
-			*returnResult = CreateVulnerabilityResult{
-				Vulnerability: merged,
-				Created:       false,
-				Merged:        true,
-			}
-			*vuln = *merged
-			return nil
-		case err != nil && err != sql.ErrNoRows:
-			return fmt.Errorf("failed to query existing vulnerability: %w", err)
-		}
 
-		vuln.EvidenceHistory = marshalVulnerabilityEvidenceHistory([]VulnerabilityEvidence{evidence})
-		_, err = tx.NewInsert().Model(vuln).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to create vulnerability: %w", err)
+			duplicateIDs := make([]int64, 0, len(rows)-1)
+			for _, row := range rows[1:] {
+				duplicateIDs = append(duplicateIDs, row.ID)
+			}
+			if len(duplicateIDs) == 0 {
+				return nil
+			}
+			if _, err := tx.NewDelete().
+				Model((*Vulnerability)(nil)).
+				Where("id IN (?)", bun.In(duplicateIDs)).
+				Exec(ctx); err != nil {
+				return fmt.Errorf("failed to remove duplicate vulnerabilities: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		*returnResult = CreateVulnerabilityResult{
-			Vulnerability: vuln,
-			Created:       true,
-			Merged:        false,
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
-	return returnResult, nil
+	return nil
 }
 
-func buildVulnerabilityFingerprint(vuln *Vulnerability) string {
-	parts := []string{
-		normalizeVulnerabilityFingerprintPart(vuln.Workspace),
-		normalizeVulnerabilityFingerprintPart(firstNonEmpty(vuln.VulnInfo, vuln.VulnTitle)),
-		normalizeVulnerabilityFingerprintPart(vuln.AssetType),
-		normalizeVulnerabilityFingerprintPart(vuln.AssetValue),
+func mergeDuplicateVulnerabilityRows(rows []Vulnerability, now time.Time) *Vulnerability {
+	merged := rows[0]
+	for _, row := range rows[1:] {
+		incoming := row
+		evidenceObservedAt := maxNonZeroTime(incoming.LastSeenAt, incoming.UpdatedAt, incoming.CreatedAt, now)
+		merged = *mergeVulnerabilityRecords(&merged, &incoming, buildVulnerabilityEvidence(&incoming, evidenceObservedAt), now)
 	}
-	raw := strings.Join(parts, "::")
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
+
+	history := collectMergedVulnerabilityHistory(rows, now)
+	if len(history) == 0 {
+		history = append(history, buildVulnerabilityEvidence(&merged, maxNonZeroTime(merged.LastSeenAt, merged.UpdatedAt, merged.CreatedAt, now)))
+	}
+	merged.EvidenceHistory = marshalVulnerabilityEvidenceHistory(history)
+	merged.EvidenceVersion = maxInt(len(history), 1)
+	merged.FirstSeenAt = minNonZeroTime(append([]time.Time{merged.FirstSeenAt}, vulnerabilityTimes(rows, func(v Vulnerability) time.Time {
+		return v.FirstSeenAt
+	})...)...)
+	merged.LastSeenAt = maxNonZeroTime(append([]time.Time{merged.LastSeenAt}, vulnerabilityTimes(rows, func(v Vulnerability) time.Time {
+		return v.LastSeenAt
+	})...)...)
+	merged.CreatedAt = minNonZeroTime(append([]time.Time{merged.CreatedAt}, vulnerabilityTimes(rows, func(v Vulnerability) time.Time {
+		return v.CreatedAt
+	})...)...)
+	merged.UpdatedAt = now
+	return &merged
+}
+
+func collectMergedVulnerabilityHistory(rows []Vulnerability, now time.Time) []VulnerabilityEvidence {
+	all := make([]VulnerabilityEvidence, 0)
+	for _, row := range rows {
+		history := unmarshalVulnerabilityEvidenceHistory(row.EvidenceHistory)
+		if len(history) == 0 {
+			history = append(history, buildVulnerabilityEvidence(&row, maxNonZeroTime(row.LastSeenAt, row.UpdatedAt, row.CreatedAt, now)))
+		}
+		for _, item := range history {
+			if item.ObservedAt.IsZero() {
+				item.ObservedAt = maxNonZeroTime(row.LastSeenAt, row.UpdatedAt, row.CreatedAt, now)
+			}
+			all = append(all, item)
+		}
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ObservedAt.Equal(all[j].ObservedAt) {
+			return evidenceComparableKey(all[i]) < evidenceComparableKey(all[j])
+		}
+		return all[i].ObservedAt.Before(all[j].ObservedAt)
+	})
+
+	merged := make([]VulnerabilityEvidence, 0, len(all))
+	for _, item := range all {
+		appendEvidenceIfChanged(&merged, item)
+	}
+	return merged
+}
+
+func vulnerabilityTimes(rows []Vulnerability, getter func(Vulnerability) time.Time) []time.Time {
+	values := make([]time.Time, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, getter(row))
+	}
+	return values
 }
 
 func normalizeVulnerabilityFingerprintPart(value string) string {
@@ -4287,6 +4500,15 @@ func choosePreferredVulnerabilityStatus(current, incoming string) string {
 	}
 	current = strings.ToLower(strings.TrimSpace(current))
 	incoming = strings.ToLower(strings.TrimSpace(incoming))
+	if current == "" {
+		return chooseNonEmpty(incoming, "new")
+	}
+	if incoming == "" {
+		return current
+	}
+	if current == "false_positive" && incoming == "verified" {
+		return incoming
+	}
 	if rank[incoming] > rank[current] {
 		if current == "verified" && incoming == "closed" {
 			return current
@@ -4295,9 +4517,6 @@ func choosePreferredVulnerabilityStatus(current, incoming string) string {
 			return current
 		}
 		return incoming
-	}
-	if current == "" {
-		return chooseNonEmpty(incoming, "new")
 	}
 	return current
 }
@@ -4584,15 +4803,6 @@ func FinalizeVulnerabilityRetest(ctx context.Context, retestRunUUID, runStatus s
 		vuln.AISummary = appendRetestSummary(vuln.AISummary, fmt.Sprintf("Retest run %s.", status))
 		return UpdateVulnerabilityRecord(ctx, &vuln)
 	case "completed":
-		importedCount, err := db.NewSelect().
-			Model((*Vulnerability)(nil)).
-			Where("workspace = ?", vuln.Workspace).
-			Where("source_run_uuid = ?", retestRunUUID).
-			Count(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to evaluate retest results: %w", err)
-		}
-
 		vuln.RetestStatus = "completed"
 		vuln.UpdatedAt = now
 
@@ -4604,16 +4814,10 @@ func FinalizeVulnerabilityRetest(ctx context.Context, retestRunUUID, runStatus s
 			}
 			vuln.ClosedAt = nil
 			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed and this finding was reproduced in the retest run.")
-		case importedCount > 0:
-			vuln.VulnStatus = "closed"
-			if vuln.ClosedAt == nil {
-				vuln.ClosedAt = &now
-			}
-			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed and this finding was not reproduced, while other findings were imported from the same run.")
 		default:
 			vuln.VulnStatus = "triaged"
 			vuln.ClosedAt = nil
-			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed without imported findings from this run; manual review is still required.")
+			vuln.AISummary = appendRetestSummary(vuln.AISummary, "Retest completed without a verified reproduction signal; manual review is still required before closing this finding.")
 		}
 
 		return UpdateVulnerabilityRecord(ctx, &vuln)
@@ -4698,8 +4902,7 @@ func DeleteVulnerabilityByID(ctx context.Context, id int64) error {
 	return nil
 }
 
-// GetVulnerabilitySummary returns a summary of vulnerabilities by severity for a workspace
-func GetVulnerabilitySummary(ctx context.Context, workspace string) (map[string]int, error) {
+func getVulnerabilitySummary(ctx context.Context, workspace string, activeOnly bool) (map[string]int, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
@@ -4717,9 +4920,11 @@ func GetVulnerabilitySummary(ctx context.Context, workspace string) (map[string]
 	if workspace != "" {
 		query = query.Where("workspace = ?", workspace)
 	}
+	if activeOnly {
+		query = query.Where("vuln_status NOT IN (?, ?)", "false_positive", "closed")
+	}
 
-	err := query.Scan(ctx, &results)
-	if err != nil {
+	if err := query.Scan(ctx, &results); err != nil {
 		return nil, fmt.Errorf("failed to get vulnerability summary: %w", err)
 	}
 
@@ -4729,6 +4934,71 @@ func GetVulnerabilitySummary(ctx context.Context, workspace string) (map[string]
 	}
 
 	return summary, nil
+}
+
+func getVulnerabilitySummaryForTarget(ctx context.Context, workspace, target string, activeOnly bool) (map[string]int, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	var results []struct {
+		Severity string `bun:"severity"`
+		Count    int    `bun:"count"`
+	}
+
+	query := db.NewSelect().
+		Model((*Vulnerability)(nil)).
+		ColumnExpr("severity, COUNT(*) AS count").
+		Group("severity")
+
+	if workspace != "" {
+		query = query.Where("workspace = ?", workspace)
+	}
+	if activeOnly {
+		query = query.Where("vuln_status NOT IN (?, ?)", "false_positive", "closed")
+	}
+
+	patterns := buildVulnerabilityTargetLikePatterns(target)
+	if len(patterns) > 0 {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			for _, pattern := range patterns {
+				q = q.WhereOr("LOWER(asset_value) LIKE ? ESCAPE '\\'", pattern)
+				q = q.WhereOr("LOWER(COALESCE(related_assets, '')) LIKE ? ESCAPE '\\'", pattern)
+			}
+			return q
+		})
+	}
+
+	if err := query.Scan(ctx, &results); err != nil {
+		return nil, fmt.Errorf("failed to get target vulnerability summary: %w", err)
+	}
+
+	summary := make(map[string]int)
+	for _, r := range results {
+		summary[r.Severity] = r.Count
+	}
+
+	return summary, nil
+}
+
+// GetVulnerabilitySummary returns a summary of vulnerabilities by severity for a workspace
+func GetVulnerabilitySummary(ctx context.Context, workspace string) (map[string]int, error) {
+	return getVulnerabilitySummary(ctx, workspace, false)
+}
+
+// GetVulnerabilitySummaryForTarget returns a summary of vulnerabilities by severity for a specific target inside a workspace.
+func GetVulnerabilitySummaryForTarget(ctx context.Context, workspace, target string) (map[string]int, error) {
+	return getVulnerabilitySummaryForTarget(ctx, workspace, target, false)
+}
+
+// GetActiveVulnerabilitySummary returns severity counts for currently actionable findings only.
+func GetActiveVulnerabilitySummary(ctx context.Context, workspace string) (map[string]int, error) {
+	return getVulnerabilitySummary(ctx, workspace, true)
+}
+
+// GetActiveVulnerabilitySummaryForTarget returns actionable findings only for a specific target inside a workspace.
+func GetActiveVulnerabilitySummaryForTarget(ctx context.Context, workspace, target string) (map[string]int, error) {
+	return getVulnerabilitySummaryForTarget(ctx, workspace, target, true)
 }
 
 // GetVulnerabilityStatusSummary returns vulnerability counts grouped by lifecycle status.
@@ -4762,23 +5032,97 @@ func GetVulnerabilityStatusSummary(ctx context.Context, workspace string) (map[s
 	return summary, nil
 }
 
+func buildVulnerabilityTargetLikePatterns(target string) []string {
+	target = strings.TrimSpace(strings.ToLower(target))
+	if target == "" {
+		return nil
+	}
+
+	candidates := []string{target}
+	if parsed, err := url.Parse(target); err == nil {
+		if host := strings.TrimSpace(strings.ToLower(parsed.Hostname())); host != "" {
+			candidates = append(candidates, host)
+		}
+		if host := strings.TrimSpace(strings.ToLower(parsed.Host)); host != "" {
+			candidates = append(candidates, host)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	patterns := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		patterns = append(patterns, "%"+escapeVulnerabilityLike(candidate)+"%")
+	}
+	return patterns
+}
+
+func escapeVulnerabilityLike(input string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`%`, `\%`,
+		`_`, `\_`,
+	)
+	return replacer.Replace(input)
+}
+
 // VulnerabilityBoard aggregates workspace-level vulnerability closure metrics.
 type VulnerabilityBoard struct {
-	Workspace     string         `json:"workspace"`
-	BySeverity    map[string]int `json:"by_severity"`
-	ByStatus      map[string]int `json:"by_status"`
-	Total         int            `json:"total"`
-	OpenHighRisk  int            `json:"open_high_risk"`
-	Verified      int            `json:"verified"`
-	FalsePositive int            `json:"false_positive"`
-	NeedsRetest   int            `json:"needs_retest"`
-	Closed        int            `json:"closed"`
+	Workspace      string                      `json:"workspace"`
+	BySeverity     map[string]int              `json:"by_severity"`
+	ByStatus       map[string]int              `json:"by_status"`
+	Total          int                         `json:"total"`
+	OpenHighRisk   int                         `json:"open_high_risk"`
+	Verified       int                         `json:"verified"`
+	FalsePositive  int                         `json:"false_positive"`
+	NeedsRetest    int                         `json:"needs_retest"`
+	Closed         int                         `json:"closed"`
+	TopTargets     []VulnerabilityBoardTarget  `json:"top_targets,omitempty"`
+	ReviewCoverage VulnerabilityReviewCoverage `json:"review_coverage"`
+}
+
+type VulnerabilityBoardTarget struct {
+	AssetValue        string `json:"asset_value"`
+	HighestSeverity   string `json:"highest_severity,omitempty"`
+	Findings          int    `json:"findings"`
+	OpenFindings      int    `json:"open_findings"`
+	OpenHighRisk      int    `json:"open_high_risk"`
+	Verified          int    `json:"verified"`
+	NeedsRetest       int    `json:"needs_retest"`
+	AttackChainLinked int    `json:"attack_chain_linked"`
+}
+
+type VulnerabilityReviewCoverage struct {
+	AIVerdicts      map[string]int `json:"ai_verdicts"`
+	AnalystVerdicts map[string]int `json:"analyst_verdicts"`
+	Reviewed        int            `json:"reviewed"`
+	Unreviewed      int            `json:"unreviewed"`
+	Agreement       int            `json:"agreement"`
+	Disagreement    int            `json:"disagreement"`
 }
 
 // GetVulnerabilityBoard returns a vulnerability risk board for a workspace.
 func GetVulnerabilityBoard(ctx context.Context, workspace string) (*VulnerabilityBoard, error) {
+	return GetVulnerabilityBoardWithOptions(ctx, workspace, 10)
+}
+
+// GetVulnerabilityBoardWithOptions returns a vulnerability risk board with enriched top-target and review coverage data.
+func GetVulnerabilityBoardWithOptions(ctx context.Context, workspace string, topTargetLimit int) (*VulnerabilityBoard, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database not connected")
+	}
+	if topTargetLimit <= 0 {
+		topTargetLimit = 10
+	}
+	if topTargetLimit > 100 {
+		topTargetLimit = 100
 	}
 
 	bySeverity, err := GetVulnerabilitySummary(ctx, workspace)
@@ -4816,17 +5160,148 @@ func GetVulnerabilityBoard(ctx context.Context, workspace string) (*Vulnerabilit
 		return nil, fmt.Errorf("failed to build vulnerability board: %w", err)
 	}
 
+	var rows []struct {
+		AssetValue     string `bun:"asset_value"`
+		Severity       string `bun:"severity"`
+		VulnStatus     string `bun:"vuln_status"`
+		RetestStatus   string `bun:"retest_status"`
+		AttackChainRef string `bun:"attack_chain_ref"`
+		AIVerdict      string `bun:"ai_verdict"`
+		AnalystVerdict string `bun:"analyst_verdict"`
+	}
+	rowQuery := db.NewSelect().
+		Model((*Vulnerability)(nil)).
+		Column("asset_value", "severity", "vuln_status", "retest_status", "attack_chain_ref", "ai_verdict", "analyst_verdict")
+	if workspace != "" {
+		rowQuery = rowQuery.Where("workspace = ?", workspace)
+	}
+	if err := rowQuery.Scan(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("failed to collect vulnerability board rows: %w", err)
+	}
+
+	targets := make(map[string]*VulnerabilityBoardTarget)
+	reviewCoverage := VulnerabilityReviewCoverage{
+		AIVerdicts:      make(map[string]int),
+		AnalystVerdicts: make(map[string]int),
+	}
+	for _, row := range rows {
+		if assetValue := strings.TrimSpace(row.AssetValue); assetValue != "" {
+			target := targets[assetValue]
+			if target == nil {
+				target = &VulnerabilityBoardTarget{AssetValue: assetValue}
+				targets[assetValue] = target
+			}
+			target.HighestSeverity = chooseHigherSeverity(target.HighestSeverity, row.Severity)
+			target.Findings++
+			if isOpenVulnerabilityStatus(row.VulnStatus) {
+				target.OpenFindings++
+				if severity := strings.ToLower(strings.TrimSpace(row.Severity)); severity == "critical" || severity == "high" {
+					target.OpenHighRisk++
+				}
+			}
+			if strings.EqualFold(strings.TrimSpace(row.VulnStatus), "verified") {
+				target.Verified++
+			}
+			if vulnerabilityNeedsRetest(row.VulnStatus, row.RetestStatus) {
+				target.NeedsRetest++
+			}
+			if strings.TrimSpace(row.AttackChainRef) != "" {
+				target.AttackChainLinked++
+			}
+		}
+
+		aiVerdict := normalizeBoardVerdict(row.AIVerdict)
+		analystVerdict := normalizeBoardVerdict(row.AnalystVerdict)
+		if aiVerdict != "" {
+			reviewCoverage.AIVerdicts[aiVerdict]++
+		}
+		if analystVerdict != "" {
+			reviewCoverage.AnalystVerdicts[analystVerdict]++
+			reviewCoverage.Reviewed++
+		} else {
+			reviewCoverage.Unreviewed++
+		}
+		if aiVerdict != "" && analystVerdict != "" {
+			if aiVerdict == analystVerdict {
+				reviewCoverage.Agreement++
+			} else {
+				reviewCoverage.Disagreement++
+			}
+		}
+	}
+
+	topTargets := make([]VulnerabilityBoardTarget, 0, len(targets))
+	for _, target := range targets {
+		topTargets = append(topTargets, *target)
+	}
+	sort.Slice(topTargets, func(i, j int) bool {
+		if topTargets[i].OpenHighRisk != topTargets[j].OpenHighRisk {
+			return topTargets[i].OpenHighRisk > topTargets[j].OpenHighRisk
+		}
+		if topTargets[i].Verified != topTargets[j].Verified {
+			return topTargets[i].Verified > topTargets[j].Verified
+		}
+		if topTargets[i].OpenFindings != topTargets[j].OpenFindings {
+			return topTargets[i].OpenFindings > topTargets[j].OpenFindings
+		}
+		if severityCompare(topTargets[i].HighestSeverity, topTargets[j].HighestSeverity) != 0 {
+			return severityCompare(topTargets[i].HighestSeverity, topTargets[j].HighestSeverity) > 0
+		}
+		return topTargets[i].AssetValue < topTargets[j].AssetValue
+	})
+	if len(topTargets) > topTargetLimit {
+		topTargets = topTargets[:topTargetLimit]
+	}
+
 	return &VulnerabilityBoard{
-		Workspace:     workspace,
-		BySeverity:    bySeverity,
-		ByStatus:      byStatus,
-		Total:         result.Total,
-		OpenHighRisk:  result.OpenHighRisk,
-		Verified:      result.Verified,
-		FalsePositive: result.FalsePos,
-		NeedsRetest:   result.NeedsRetest,
-		Closed:        result.Closed,
+		Workspace:      workspace,
+		BySeverity:     bySeverity,
+		ByStatus:       byStatus,
+		Total:          result.Total,
+		OpenHighRisk:   result.OpenHighRisk,
+		Verified:       result.Verified,
+		FalsePositive:  result.FalsePos,
+		NeedsRetest:    result.NeedsRetest,
+		Closed:         result.Closed,
+		TopTargets:     topTargets,
+		ReviewCoverage: reviewCoverage,
 	}, nil
+}
+
+func isOpenVulnerabilityStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "false_positive", "closed":
+		return false
+	default:
+		return true
+	}
+}
+
+func vulnerabilityNeedsRetest(vulnStatus, retestStatus string) bool {
+	if strings.EqualFold(strings.TrimSpace(vulnStatus), "retest") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(retestStatus)) {
+	case "queued", "running":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeBoardVerdict(verdict string) string {
+	return strings.ToLower(strings.TrimSpace(verdict))
+}
+
+func severityCompare(left, right string) int {
+	rank := map[string]int{
+		"info":     1,
+		"low":      2,
+		"medium":   3,
+		"high":     4,
+		"critical": 5,
+	}
+	return rank[strings.ToLower(strings.TrimSpace(left))] - rank[strings.ToLower(strings.TrimSpace(right))]
 }
 
 // RunResult holds paginated run results

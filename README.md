@@ -30,7 +30,7 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
 - **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, workspace risk boards, and evidence/status timelines
 - **Attack Chain Workbench API** - Persist AI attack-chain outputs as queryable reports, expose summary/detail APIs, generate execution checklists, and keep visualization artifacts linked to the same report with execution-ready recommendations
-- **Superdomain AI Workflow Family** - `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
+- **Superdomain AI Workflow Family** - `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` now share a cleaner AI closure: validated findings, attack-chain visualization where enabled, targeted rescan, and post-run knowledge auto-learning
 - **Event-Driven Scheduling** - Cron, file-watch, and event triggers with filtering, deduplication, and delayed task queues
 - **Agentic LLM Steps** - Tool-calling agent loops with sub-agent orchestration, memory management, and structured output; plus ACP subprocess agents (Claude Code, Codex, OpenCode, Gemini)
 - **Cloud Infrastructure** - Provision and run scans across DigitalOcean, AWS, GCP, Linode, and Azure with cost controls and automatic cleanup
@@ -116,10 +116,10 @@ osmedeus kb vector purge -w example.com
 osmedeus kb vector sync -w example.com
 
 # AI-heavy recon workflows
-osmedeus run -f superdomain-extensive-stable -t example.com
-osmedeus run -f superdomain-extensive-hybrid -t example.com
-osmedeus run -f superdomain-extensive -t example.com
-osmedeus run -f superdomain-extensive-lite -t example.com
+osmedeus run -f superdomain-extensive-ai-stable -t example.com
+osmedeus run -f superdomain-extensive-ai-hybrid -t example.com
+osmedeus run -f superdomain-extensive-ai-optimized -t example.com
+osmedeus run -f superdomain-extensive-ai-lite -t example.com
 
 # Worker management
 osmedeus worker status                          # Show workers
@@ -136,7 +136,7 @@ osmedeus --usage-example
 
 ## Knowledge Base and Vector Workflow Usage
 
-You can now extend the local knowledge base with your own documents and have `superdomain-extensive`, `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, and `superdomain-extensive-lite` consume that knowledge during semantic search.
+You can now extend the local knowledge base with your own documents and have `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` consume that knowledge during semantic search.
 
 The practical storage layout is now split into two layers:
 
@@ -231,7 +231,7 @@ osmedeus kb vector rebuild -w example.com
 4. Run an AI workflow that will automatically use the same knowledge workspace during semantic search:
 
 ```bash
-osmedeus run -f superdomain-extensive-hybrid -t example.com
+osmedeus run -f superdomain-extensive-ai-hybrid -t example.com
 ```
 
 ### Using a custom knowledge workspace
@@ -246,7 +246,7 @@ maxKnowledgeChunks: 400
 ```
 
 ```bash
-osmedeus run -f superdomain-extensive-hybrid -t example.com -P params.yaml
+osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
 ```
 
 ### What happens inside the workflow
@@ -301,11 +301,16 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `GET /osm/api/campaigns/:id`
   - `GET /osm/api/campaigns/:id/report`
   - `GET /osm/api/campaigns/:id/export`
+  - `GET /osm/api/campaigns/:id/profiles`
+  - `PUT /osm/api/campaigns/:id/profiles/:name`
+  - `DELETE /osm/api/campaigns/:id/profiles/:name`
   - `POST /osm/api/campaigns/:id/rerun-failed`
   - `POST /osm/api/campaigns/:id/deep-scan`
-  - CLI now includes `osmedeus campaign report <id>` and `osmedeus campaign export <id> --format csv|json`
+  - CLI now includes `osmedeus campaign report <id>`, `osmedeus campaign export <id> --format csv|json`, and `osmedeus campaign profile list|save|delete`
   - report/export now support `risk/status/trigger` target-row filters and `high-risk`, `recovered`, `failed` export presets
   - report/export now support post-filter `offset/limit` pagination with explicit page metadata
+  - report/export now support operator-friendly ordering overrides such as `target`, `latest_run`, and `open_high_risk`
+  - report/export now support reusable saved profiles with `--profile` or `?profile=...`, plus saved default export format
   - campaign target status now includes `attack_chain_summary` beside `vuln_summary`
   - high-risk deep-scan escalation can now be triggered by operational critical/high-impact attack-chain signals, not only raw vulnerability severities
 - **Vulnerability Lifecycle APIs**
@@ -338,7 +343,7 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - focused handler tests now cover vulnerability evidence/timeline enrichment, attack-chain reverse linkage, and campaign attack-chain-aware deep-scan selection
   - focused workflow tests now cover queued `previous_followup_*` recovery across `ai-pre-scan-decision`, `ai-pre-scan-decision-acp`, `ai-apply-decision`, `ai-intelligent-analysis`, and `ai-retest-queue`
   - Local real-API regression passed for campaign, vulnerability, and attack-chain flows on a clean no-auth server instance
-  - `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, `superdomain-extensive`, `superdomain-extensive-lite`, and `ai-knowledge-autolearn` all pass workflow validation
+  - `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-lite`, and `ai-knowledge-autolearn` all pass workflow validation
   - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support
 
 ## Docker

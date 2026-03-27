@@ -1279,6 +1279,61 @@ func TestRunCampaignReport_JSON_AppliesPagination(t *testing.T) {
 	assert.Equal(t, "https://b-page-cli.example.com", payload.Targets[0].Target)
 }
 
+func TestRunCampaignReport_JSON_AppliesSortOverride(t *testing.T) {
+	_ = setupCampaignTestEnv(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-report-sort-cli",
+		Name:         "report-sort-cli",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-sort-cli.example.com",
+		"https://b-sort-cli.example.com",
+		"https://c-sort-cli.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-report-sort-cli-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-report-sort-cli-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	campaignReportStatuses = []string{"completed"}
+	campaignReportSortBy = "target"
+	campaignReportSortOrder = "desc"
+	globalJSON = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCampaignReport(campaignReportCmd, []string{campaign.ID}))
+	})
+
+	var payload campaignReportResponseCLI
+	require.NoError(t, json.Unmarshal([]byte(output), &payload))
+	assert.Equal(t, "target", payload.SortApplied.By)
+	assert.Equal(t, "desc", payload.SortApplied.Order)
+	require.Len(t, payload.Targets, 3)
+	assert.Equal(t, "https://c-sort-cli.example.com", payload.Targets[0].Target)
+	assert.Equal(t, "https://b-sort-cli.example.com", payload.Targets[1].Target)
+	assert.Equal(t, "https://a-sort-cli.example.com", payload.Targets[2].Target)
+}
+
 func TestRunCampaignExport_CSV_AppliesPreset(t *testing.T) {
 	_ = setupCampaignTestEnv(t)
 	ctx := context.Background()
@@ -1393,6 +1448,238 @@ func TestRunCampaignExport_CSV_AppliesPagination(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 2)
 	assert.Equal(t, "https://b-export-cli.example.com", records[1][0])
+}
+
+func TestRunCampaignExport_CSV_AppliesSortOverride(t *testing.T) {
+	_ = setupCampaignTestEnv(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-export-sort-cli",
+		Name:         "export-sort-cli",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-export-sort-cli.example.com",
+		"https://b-export-sort-cli.example.com",
+		"https://c-export-sort-cli.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-export-sort-cli-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-export-sort-cli-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	campaignReportStatuses = []string{"completed"}
+	campaignReportSortBy = "target"
+	campaignReportSortOrder = "desc"
+	campaignExportFormat = "csv"
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCampaignExport(campaignExportCmd, []string{campaign.ID}))
+	})
+
+	reader := csv.NewReader(strings.NewReader(output))
+	records, err := reader.ReadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 4)
+	assert.Equal(t, "https://c-export-sort-cli.example.com", records[1][0])
+	assert.Equal(t, "https://b-export-sort-cli.example.com", records[2][0])
+	assert.Equal(t, "https://a-export-sort-cli.example.com", records[3][0])
+}
+
+func TestRunCampaignProfileSaveListDelete_JSON(t *testing.T) {
+	_ = setupCampaignTestEnv(t)
+	ctx := context.Background()
+
+	campaign := &database.Campaign{
+		ID:           "camp-profile-cli",
+		Name:         "profile-cli",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	campaignReportRiskLevels = []string{"high"}
+	campaignReportSortBy = "target"
+	campaignReportSortOrder = "desc"
+	campaignExportFormat = "json"
+	campaignProfileDescription = "operator handoff"
+	globalJSON = true
+
+	saveOutput := captureStdout(t, func() {
+		require.NoError(t, runCampaignProfileSave(campaignProfileSaveCmd, []string{campaign.ID, "ops-handoff"}))
+	})
+
+	var savePayload struct {
+		Data database.CampaignReportProfile `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(saveOutput), &savePayload))
+	assert.Equal(t, "ops-handoff", savePayload.Data.Name)
+	assert.Equal(t, "json", savePayload.Data.Format)
+	assert.Equal(t, "operator handoff", savePayload.Data.Description)
+
+	listOutput := captureStdout(t, func() {
+		require.NoError(t, runCampaignProfileList(campaignProfileListCmd, []string{campaign.ID}))
+	})
+
+	var listPayload struct {
+		Data []database.CampaignReportProfile `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(listOutput), &listPayload))
+	require.Len(t, listPayload.Data, 1)
+	assert.Equal(t, "ops-handoff", listPayload.Data[0].Name)
+
+	deleteOutput := captureStdout(t, func() {
+		require.NoError(t, runCampaignProfileDelete(campaignProfileDeleteCmd, []string{campaign.ID, "ops-handoff"}))
+	})
+
+	var deletePayload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(deleteOutput), &deletePayload))
+	assert.Equal(t, true, deletePayload["deleted"])
+}
+
+func TestRunCampaignReport_JSON_UsesSavedProfile(t *testing.T) {
+	_ = setupCampaignTestEnv(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-report-profile-cli",
+		Name:         "report-profile-cli",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-profile-cli.example.com",
+		"https://b-profile-cli.example.com",
+		"https://c-profile-cli.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-report-profile-cli-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-report-profile-cli-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	_, err := database.UpsertCampaignReportProfile(ctx, campaign.ID, database.CampaignReportProfile{
+		Name: "ops-desc",
+		Filters: database.CampaignReportProfileFilters{
+			Statuses: []string{"completed"},
+		},
+		Sort: database.CampaignReportProfileSort{
+			By:    "target",
+			Order: "desc",
+		},
+	})
+	require.NoError(t, err)
+
+	campaignReportProfileName = "ops-desc"
+	globalJSON = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCampaignReport(campaignReportCmd, []string{campaign.ID}))
+	})
+
+	var payload campaignReportResponseCLI
+	require.NoError(t, json.Unmarshal([]byte(output), &payload))
+	assert.Equal(t, "ops-desc", payload.ProfileApplied)
+	assert.Equal(t, "target", payload.SortApplied.By)
+	assert.Equal(t, "desc", payload.SortApplied.Order)
+	require.Len(t, payload.Targets, 3)
+	assert.Equal(t, "https://c-profile-cli.example.com", payload.Targets[0].Target)
+}
+
+func TestRunCampaignExport_UsesSavedProfileFormat(t *testing.T) {
+	_ = setupCampaignTestEnv(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-export-profile-cli",
+		Name:         "export-profile-cli",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-export-profile-cli.example.com",
+		"https://b-export-profile-cli.example.com",
+		"https://c-export-profile-cli.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-export-profile-cli-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-export-profile-cli-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	_, err := database.UpsertCampaignReportProfile(ctx, campaign.ID, database.CampaignReportProfile{
+		Name:   "ops-json",
+		Format: "json",
+		Filters: database.CampaignReportProfileFilters{
+			Statuses: []string{"completed"},
+		},
+		Sort: database.CampaignReportProfileSort{
+			By:    "target",
+			Order: "desc",
+		},
+	})
+	require.NoError(t, err)
+
+	campaignReportProfileName = "ops-json"
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCampaignExport(campaignExportCmd, []string{campaign.ID}))
+	})
+
+	var payload campaignReportResponseCLI
+	require.NoError(t, json.Unmarshal([]byte(output), &payload))
+	assert.Equal(t, "ops-json", payload.ProfileApplied)
+	assert.Equal(t, "target", payload.SortApplied.By)
+	assert.Equal(t, "https://c-export-profile-cli.example.com", payload.Targets[0].Target)
 }
 
 func TestRunCampaignRerunFailed_JSON(t *testing.T) {
@@ -1515,6 +1802,10 @@ func resetCampaignCommandStateForTest() {
 	campaignReportPreset = ""
 	campaignReportOffset = 0
 	campaignReportLimit = 0
+	campaignReportSortBy = ""
+	campaignReportSortOrder = ""
+	campaignReportProfileName = ""
+	campaignProfileDescription = ""
 	campaignExportFormat = ""
 	campaignExportOutput = ""
 	globalJSON = false

@@ -1307,6 +1307,64 @@ func TestGetCampaignReport_AppliesPagination(t *testing.T) {
 	assert.Equal(t, "https://b-page-api.example.com", report.Targets[0].Target)
 }
 
+func TestGetCampaignReport_AppliesSortOverride(t *testing.T) {
+	cfg, cleanup := setupCampaignHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-report-sort-api",
+		Name:         "report-sort-api",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-sort-api.example.com",
+		"https://b-sort-api.example.com",
+		"https://c-sort-api.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-report-sort-api-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-report-sort-api-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	app := fiber.New()
+	app.Get("/campaigns/:id/report", GetCampaignReport(cfg))
+
+	req := httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/report?status=completed&sort_by=target&sort_order=desc", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	var report CampaignReportResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&report))
+	assert.Equal(t, "target", report.SortApplied.By)
+	assert.Equal(t, "desc", report.SortApplied.Order)
+	require.Len(t, report.Targets, 3)
+	assert.Equal(t, "https://c-sort-api.example.com", report.Targets[0].Target)
+	assert.Equal(t, "https://b-sort-api.example.com", report.Targets[1].Target)
+	assert.Equal(t, "https://a-sort-api.example.com", report.Targets[2].Target)
+}
+
 func TestExportCampaignReport_CSV_AppliesPreset(t *testing.T) {
 	cfg, cleanup := setupCampaignHandlerDB(t)
 	defer cleanup()
@@ -1429,6 +1487,286 @@ func TestExportCampaignReport_CSV_AppliesPagination(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 2)
 	assert.Equal(t, "https://b-export-api.example.com", records[1][0])
+}
+
+func TestExportCampaignReport_CSV_AppliesSortOverride(t *testing.T) {
+	cfg, cleanup := setupCampaignHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-export-sort-api",
+		Name:         "export-sort-api",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-export-sort-api.example.com",
+		"https://b-export-sort-api.example.com",
+		"https://c-export-sort-api.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-export-sort-api-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-export-sort-api-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	app := fiber.New()
+	app.Get("/campaigns/:id/export", ExportCampaignReport(cfg))
+
+	req := httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/export?status=completed&sort_by=target&sort_order=desc", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	reader := csv.NewReader(resp.Body)
+	records, err := reader.ReadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 4)
+	assert.Equal(t, "https://c-export-sort-api.example.com", records[1][0])
+	assert.Equal(t, "https://b-export-sort-api.example.com", records[2][0])
+	assert.Equal(t, "https://a-export-sort-api.example.com", records[3][0])
+}
+
+func TestCampaignProfileCRUD_API(t *testing.T) {
+	cfg, cleanup := setupCampaignHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-profile-api",
+		Name:         "profile-api",
+		WorkflowName: "general",
+		WorkflowKind: "flow",
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	app := fiber.New()
+	app.Get("/campaigns/:id/profiles", ListCampaignProfiles(cfg))
+	app.Put("/campaigns/:id/profiles/:name", SaveCampaignProfile(cfg))
+	app.Delete("/campaigns/:id/profiles/:name", DeleteCampaignProfile(cfg))
+
+	saveBody := []byte(`{
+		"description":"operator handoff",
+		"filters":{"statuses":["completed"],"trigger_types":["campaign-rerun"]},
+		"sort":{"by":"target","order":"desc"},
+		"format":"json"
+	}`)
+	saveReq := httptest.NewRequest("PUT", "/campaigns/"+campaign.ID+"/profiles/Ops-Handoff", bytes.NewReader(saveBody))
+	saveReq.Header.Set("Content-Type", "application/json")
+	saveResp, err := app.Test(saveReq)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, saveResp.StatusCode)
+
+	var savePayload struct {
+		CampaignID string                         `json:"campaign_id"`
+		Data       database.CampaignReportProfile `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(saveResp.Body).Decode(&savePayload))
+	assert.Equal(t, campaign.ID, savePayload.CampaignID)
+	assert.Equal(t, "ops-handoff", savePayload.Data.Name)
+	assert.Equal(t, "operator handoff", savePayload.Data.Description)
+	assert.Equal(t, "json", savePayload.Data.Format)
+
+	listReq := httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/profiles", nil)
+	listResp, err := app.Test(listReq)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, listResp.StatusCode)
+
+	var listPayload struct {
+		Data []database.CampaignReportProfile `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&listPayload))
+	require.Len(t, listPayload.Data, 1)
+	assert.Equal(t, "ops-handoff", listPayload.Data[0].Name)
+	assert.Equal(t, "target", listPayload.Data[0].Sort.By)
+	assert.Equal(t, "desc", listPayload.Data[0].Sort.Order)
+
+	deleteReq := httptest.NewRequest("DELETE", "/campaigns/"+campaign.ID+"/profiles/Ops-Handoff", nil)
+	deleteResp, err := app.Test(deleteReq)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, deleteResp.StatusCode)
+
+	var deletePayload struct {
+		Deleted bool   `json:"deleted"`
+		Name    string `json:"name"`
+	}
+	require.NoError(t, json.NewDecoder(deleteResp.Body).Decode(&deletePayload))
+	assert.True(t, deletePayload.Deleted)
+	assert.Equal(t, "ops-handoff", deletePayload.Name)
+
+	listReq = httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/profiles", nil)
+	listResp, err = app.Test(listReq)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, listResp.StatusCode)
+	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&listPayload))
+	assert.Empty(t, listPayload.Data)
+}
+
+func TestGetCampaignReport_UsesSavedProfileAndAllowsOverride(t *testing.T) {
+	cfg, cleanup := setupCampaignHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-report-profile-api",
+		Name:         "report-profile-api",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-profile-api.example.com",
+		"https://b-profile-api.example.com",
+		"https://c-profile-api.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-report-profile-api-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-report-profile-api-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	_, err := database.UpsertCampaignReportProfile(ctx, campaign.ID, database.CampaignReportProfile{
+		Name: "ops-desc",
+		Filters: database.CampaignReportProfileFilters{
+			Statuses: []string{"completed"},
+		},
+		Sort: database.CampaignReportProfileSort{
+			By:    "target",
+			Order: "desc",
+		},
+	})
+	require.NoError(t, err)
+
+	app := fiber.New()
+	app.Get("/campaigns/:id/report", GetCampaignReport(cfg))
+
+	req := httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/report?profile=ops-desc&sort_order=asc", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	var report CampaignReportResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&report))
+	assert.Equal(t, "ops-desc", report.ProfileApplied)
+	assert.Equal(t, []string{"completed"}, report.FiltersApplied.Statuses)
+	assert.Equal(t, "target", report.SortApplied.By)
+	assert.Equal(t, "asc", report.SortApplied.Order)
+	require.Len(t, report.Targets, 3)
+	assert.Equal(t, "https://a-profile-api.example.com", report.Targets[0].Target)
+	assert.Equal(t, "https://b-profile-api.example.com", report.Targets[1].Target)
+	assert.Equal(t, "https://c-profile-api.example.com", report.Targets[2].Target)
+}
+
+func TestExportCampaignReport_UsesSavedProfileFormat(t *testing.T) {
+	cfg, cleanup := setupCampaignHandlerDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	campaign := &database.Campaign{
+		ID:           "camp-export-profile-api",
+		Name:         "export-profile-api",
+		WorkflowName: "web-classic",
+		WorkflowKind: "flow",
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, database.CreateCampaign(ctx, campaign))
+
+	for index, target := range []string{
+		"https://a-export-profile-api.example.com",
+		"https://b-export-profile-api.example.com",
+		"https://c-export-profile-api.example.com",
+	} {
+		require.NoError(t, database.CreateRun(ctx, &database.Run{
+			RunUUID:      "run-export-profile-api-" + string(rune('a'+index)),
+			WorkflowName: "web-classic",
+			WorkflowKind: "flow",
+			Target:       target,
+			Status:       "completed",
+			TriggerType:  "campaign",
+			RunGroupID:   campaign.ID,
+			RunPriority:  "high",
+			RunMode:      "queue",
+			IsQueued:     true,
+			Workspace:    "ws-export-profile-api-" + string(rune('a'+index)),
+			CreatedAt:    now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt:    now.Add(time.Duration(index) * time.Minute),
+		}))
+	}
+
+	_, err := database.UpsertCampaignReportProfile(ctx, campaign.ID, database.CampaignReportProfile{
+		Name:   "ops-json",
+		Format: "json",
+		Filters: database.CampaignReportProfileFilters{
+			Statuses: []string{"completed"},
+		},
+		Sort: database.CampaignReportProfileSort{
+			By:    "target",
+			Order: "desc",
+		},
+	})
+	require.NoError(t, err)
+
+	app := fiber.New()
+	app.Get("/campaigns/:id/export", ExportCampaignReport(cfg))
+
+	req := httptest.NewRequest("GET", "/campaigns/"+campaign.ID+"/export?profile=ops-json", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+
+	var report CampaignReportResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&report))
+	assert.Equal(t, "ops-json", report.ProfileApplied)
+	assert.Equal(t, "target", report.SortApplied.By)
+	assert.Equal(t, "desc", report.SortApplied.Order)
+	require.Len(t, report.Targets, 3)
+	assert.Equal(t, "https://c-export-profile-api.example.com", report.Targets[0].Target)
 }
 
 func TestRerunFailedCampaignTargets_OnlyRerunsLatestFailedTargets(t *testing.T) {

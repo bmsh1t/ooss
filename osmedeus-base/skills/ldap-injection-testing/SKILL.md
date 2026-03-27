@@ -1,18 +1,7 @@
 ---
-id: ldap-injection-testing
-name: LDAP Injection Testing
+name: ldap-injection-testing
 description: LDAP注入漏洞测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - ldap-injection
-  - ldap
-tags:
-  - injection
-  - directory-services
-  - auth
-target_types:
-  - web
-  - api
 ---
 
 # LDAP注入漏洞测试

@@ -76,6 +76,11 @@ func init() {
 	kbVectorSearchCmd.Flags().StringVar(&kbVectorProvider, "provider", "", "embedding provider override")
 	kbVectorSearchCmd.Flags().StringVar(&kbVectorModel, "model", "", "embedding model override")
 	kbVectorSearchCmd.Flags().IntVar(&kbLimit, "limit", 10, "maximum number of results")
+	kbVectorSearchCmd.Flags().StringSliceVar(&kbWorkspaceLayers, "workspace-layer", nil, "preferred workspace layers in ranking order")
+	kbVectorSearchCmd.Flags().StringSliceVar(&kbScopeLayers, "scope-layer", nil, "preferred scope layers in ranking order")
+	kbVectorSearchCmd.Flags().Float64Var(&kbMinSourceConfidence, "min-confidence", 0, "skip learned results below this source confidence")
+	kbVectorSearchCmd.Flags().StringSliceVar(&kbSampleTypes, "sample-type", nil, "include only specific learned sample types")
+	kbVectorSearchCmd.Flags().StringSliceVar(&kbExcludeSampleTypes, "exclude-sample-type", nil, "exclude specific learned sample types")
 	_ = kbVectorSearchCmd.MarkFlagRequired("query")
 
 	kbVectorDoctorCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty checks all workspaces)")
@@ -155,10 +160,15 @@ func runKBVectorSearch(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 	results, err := vectorkb.Search(ctx, cfg, vectorkb.SearchOptions{
-		Workspace: strings.TrimSpace(kbWorkspace),
-		Provider:  strings.TrimSpace(kbVectorProvider),
-		Model:     strings.TrimSpace(kbVectorModel),
-		Limit:     kbLimit,
+		Workspace:           strings.TrimSpace(kbWorkspace),
+		WorkspaceLayers:     kbWorkspaceLayers,
+		ScopeLayers:         kbScopeLayers,
+		Provider:            strings.TrimSpace(kbVectorProvider),
+		Model:               strings.TrimSpace(kbVectorModel),
+		Limit:               kbLimit,
+		MinSourceConfidence: kbMinSourceConfidence,
+		SampleTypes:         kbSampleTypes,
+		ExcludeSampleTypes:  kbExcludeSampleTypes,
 	}, kbQuery)
 	if err != nil {
 		return err

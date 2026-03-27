@@ -85,6 +85,7 @@ curl -X POST http://localhost:8002/osm/api/attack-chains/12/queue-retest \
 This queues retest runs for linked vulnerabilities. The selected vulnerability records are also updated with the chosen `attack_chain_ref`.
 
 Chains with at least one `verified` or queued `retest`-eligible linked vulnerability are surfaced as `queue-retest` recommendations in the detail API.
+Campaign and deep-scan aggregation keeps those links in the operational window through `attack_chain_summary.operational_hits`, while `verified_hits` remains the strict reviewed-only count.
 
 ## Queue Deep Scan from an Attack Chain
 

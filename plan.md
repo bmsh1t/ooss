@@ -14,6 +14,8 @@
   - Campaign entity and aggregation
   - Failed target rerun
   - High-risk deep-scan queue hook
+  - Report/export analytics with filters, presets, sorting, and pagination
+  - Saved campaign report/export profiles in API/CLI
 - Vulnerability lifecycle backend v1 is in place.
   - Lifecycle states: `new`, `triaged`, `verified`, `false_positive`, `retest`, `closed`
   - AI verdict and analyst review fields
@@ -40,10 +42,10 @@
   - targeted `go test ./internal/database`
   - targeted `go test ./pkg/server/handlers`
   - targeted `go test ./pkg/cli`
-  - workflow validation for `superdomain-extensive-stable`
-  - workflow validation for `superdomain-extensive-hybrid`
-  - workflow validation for `superdomain-extensive`
-  - workflow validation for `superdomain-extensive-lite`
+  - workflow validation for `superdomain-extensive-ai-stable`
+  - workflow validation for `superdomain-extensive-ai-hybrid`
+  - workflow validation for `superdomain-extensive-ai-optimized`
+  - workflow validation for `superdomain-extensive-ai-lite`
   - workflow validation for `ai-knowledge-autolearn`
 - Targeted tests were added for:
   - vulnerability retest closure
@@ -81,11 +83,11 @@
 
 ### 3. Campaign Batch Operations
 
-- Current campaign layer is backend v2-ish, with API/CLI target aggregation and attack-chain-aware deep-scan selection.
+- Current campaign layer is backend v2-ish, with API/CLI target aggregation, attack-chain-aware deep-scan selection, report/export analytics, and saved operator views.
 - Not done yet:
   - richer campaign risk distribution views
-  - campaign-level report/export
-  - reusable campaign strategy templates
+  - campaign-level trend snapshots across repeated batches
+  - reusable campaign strategy templates beyond report/export views
   - more explicit campaign audit history
 
 ### 4. Vulnerability Lifecycle Center
@@ -139,11 +141,14 @@
   - server-side and CLI filters for `risk/status/trigger` target slices
   - operator handoff presets for `high-risk`, `recovered`, and `failed` exports
   - minimal post-filter pagination for report/export with `offset/limit` and page metadata
+  - operator ordering overrides for `risk`, `target`, `latest_run`, and `open_high_risk`
+  - saved report/export profiles via `GET|PUT|DELETE /campaigns/:id/profiles/:name`
+  - CLI profile management via `osmedeus campaign profile list|save|delete`
   - regression coverage for campaign report/export in handler tests and live API verification
 - Next hardening steps:
   - add campaign-level trend snapshots for repeated batches on the same asset set
-  - add saved report profiles for recurring operator/export views
-  - add report ordering overrides for operators who need latest-activity or target-name views
+  - add compact batch-history summaries for recurring handoff/report commands
+  - add stronger audit/history slices for profile usage and rerun/deep-scan decisions
 
 ### Priority 3: Knowledge Productization
 

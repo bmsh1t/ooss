@@ -83,8 +83,9 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 	}
 
 	for _, group := range groups {
+		vectorMetadata := firstGroupMetadata(group.rows)
 		existing, err := store.getDocument(ctx, group.workspace, group.sourcePath)
-		if err == nil && existing.ContentHash == group.docHash && existing.ChunkCount == len(group.rows) {
+		if err == nil && existing.ContentHash == group.docHash && existing.ChunkCount == len(group.rows) && strings.TrimSpace(existing.Metadata) == strings.TrimSpace(vectorMetadata) {
 			count, countErr := store.countDocumentEmbeddings(ctx, existing.ID, provider, model)
 			if countErr == nil && count == len(group.rows) {
 				summary.DocumentsSkipped++
@@ -132,7 +133,7 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 			ContentHash: group.docHash,
 			Status:      "ready",
 			ChunkCount:  len(chunks),
-			Metadata:    firstVectorChunkMetadata(chunks),
+			Metadata:    vectorMetadata,
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
 		}
@@ -163,10 +164,10 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 	return summary, nil
 }
 
-func firstVectorChunkMetadata(chunks []VectorChunk) string {
-	for _, chunk := range chunks {
-		if strings.TrimSpace(chunk.Metadata) != "" {
-			return chunk.Metadata
+func firstGroupMetadata(rows []database.KnowledgeChunkExportRow) string {
+	for _, row := range rows {
+		if strings.TrimSpace(row.Metadata) != "" {
+			return row.Metadata
 		}
 	}
 	return ""

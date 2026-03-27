@@ -1,18 +1,7 @@
 ---
-id: sql-injection
-name: SQL Injection Testing
+name: sql-injection-testing
 description: SQL注入测试的专业技能和方法论
 version: 1.0.0
-aliases:
-  - sql-injection-testing
-  - sqli
-tags:
-  - injection
-  - database
-  - web
-target_types:
-  - web
-  - api
 ---
 
 # SQL注入测试技能

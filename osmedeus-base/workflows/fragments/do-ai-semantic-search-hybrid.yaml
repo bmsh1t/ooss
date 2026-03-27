@@ -43,6 +43,26 @@ params:
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: httpFile
     default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: subdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: previousFollowupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
+  - name: entryPointsFile
+    default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityTargetsInput
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsInput
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsInput
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsInput
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: maxSearchResults
     type: integer
     default: 10
@@ -76,6 +96,12 @@ params:
   - name: embeddingsModel
     type: string
     default: ""
+  - name: resolvedSearchQueryOutput
+    default: "{{semanticIndexDir}}/resolved-search-query.txt"
+  - name: searchQueryContextOutput
+    default: "{{semanticIndexDir}}/resolved-search-query-context.json"
+  - name: searchStage
+    default: "auto"
 
 steps:
   - name: prepare-hybrid-index
@@ -86,11 +112,179 @@ steps:
       - 'create_folder("{{Output}}/ai-analysis")'
       - 'log_info("Starting hybrid semantic search for {{Target}} via vectorkb")'
 
+  - name: resolve-search-query
+    type: bash
+    pre_condition: "{{enableHybridSearch}}"
+    command: |
+      mkdir -p {{semanticIndexDir}}
+
+      BASE_QUERY="{{searchQuery}}"
+      STAGE="{{searchStage}}"
+      OUTPUT_HINT="{{searchResultsOutput}}"
+      NUCLEI_COUNT=$(wc -l < "{{nucleiFile}}" 2>/dev/null || echo 0)
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      ACTIVE_SEMANTIC_PRIORITY_INPUT="{{semanticPriorityTargetsInput}}"
+      for candidate in "{{semanticPriorityTargetsInput}}" "{{fallbackSemanticPriorityTargetsInput}}" "{{secondFallbackSemanticPriorityTargetsInput}}" "{{thirdFallbackSemanticPriorityTargetsInput}}"; do
+        [ -n "$candidate" ] || continue
+        if text_has_lines "$candidate"; then
+          ACTIVE_SEMANTIC_PRIORITY_INPUT="$candidate"
+          break
+        fi
+      done
+
+      if [ "$STAGE" = "auto" ] || [ -z "$STAGE" ]; then
+        case "$OUTPUT_HINT" in
+          *decision-followup*|*decision*)
+            STAGE="decision-followup"
+            ;;
+          *post-vuln*)
+            STAGE="post-vuln"
+            ;;
+          *early*)
+            STAGE="early"
+            ;;
+          *)
+            if [ "$NUCLEI_COUNT" -gt 20 ] 2>/dev/null; then
+              STAGE="post-vuln"
+            else
+              STAGE="early"
+            fi
+            ;;
+        esac
+      fi
+
+      TECH_HINTS=$(
+        jq -r '(.tech[]?, .technologies[]?, .techs[]?, .webserver?, .server?, .framework?, .title?) // empty' "{{fingerprintFile}}" 2>/dev/null \
+          | awk 'NF {print tolower($0)}' \
+          | sed 's/[^a-z0-9.+#_-]/ /g' \
+          | awk 'NF && !seen[$0]++' \
+          | head -8 \
+          | jq -R -s 'split("\n") | map(select(length > 0)) | join(", ")' -r)
+
+      TARGET_HINTS=$(
+        {
+          [ -f "{{appliedDecisionFile}}" ] && jq -r '.targets.focus_areas[]?, .targets.priority_targets[]?, .targets.rescan_targets[]?' "{{appliedDecisionFile}}" 2>/dev/null || true
+          if [ -f "{{previousFollowupDecisionFile}}" ]; then
+            jq -r '.seed_targets.focus_areas[]?, .seed_targets.priority_targets[]?, .seed_targets.rescan_targets[]?, .seed_targets.manual_first_targets[]?, .seed_targets.high_confidence_targets[]?, .seed_targets.rescan_critical_targets[]?, .seed_targets.rescan_high_targets[]?, .seed_targets.confirmed_targets[]?, .seed_targets.semantic_targets[]?' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.refined_targets.focus_areas[]?, .refined_targets.priority_targets[]?' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+          fi
+          [ -f "{{confirmedUrlsFile}}" ] && head -20 "{{confirmedUrlsFile}}" 2>/dev/null || true
+          [ -f "{{entryPointsFile}}" ] && head -15 "{{entryPointsFile}}" 2>/dev/null || true
+          [ -f "{{bestPathTargetsFile}}" ] && head -15 "{{bestPathTargetsFile}}" 2>/dev/null || true
+          [ -f "$ACTIVE_SEMANTIC_PRIORITY_INPUT" ] && head -15 "$ACTIVE_SEMANTIC_PRIORITY_INPUT" 2>/dev/null || true
+          [ -f "{{httpFile}}" ] && grep -E 'admin|login|signin|auth|oauth|sso|jwt|api|graphql|swagger|openapi|upload|import|export|file|redirect|callback|webhook|ws' "{{httpFile}}" 2>/dev/null | head -20 || true
+          [ -f "{{subdomainFile}}" ] && grep -E 'admin|api|auth|internal|dev|staging|gateway|graphql|vpn|sso' "{{subdomainFile}}" 2>/dev/null | head -15 || true
+        } | awk 'NF && !seen[$0]++' | head -12 | jq -R -s 'split("\n") | map(select(length > 0)) | join(", ")' -r)
+
+      FOCUS_HINTS=$(
+        {
+          [ -f "{{appliedDecisionFile}}" ] && jq -r '.targets.focus_areas[]?, .targets.priority_targets[]?' "{{appliedDecisionFile}}" 2>/dev/null || true
+          if [ -f "{{previousFollowupDecisionFile}}" ]; then
+            jq -r '.seed_targets.focus_areas[]?, .seed_targets.priority_targets[]?, .seed_targets.manual_first_targets[]?, .seed_targets.high_confidence_targets[]?, .seed_targets.semantic_targets[]?' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.refined_targets.focus_areas[]?, .refined_targets.priority_targets[]?' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+          fi
+        } \
+          | awk 'NF && !seen[$0]++' \
+          | head -8 \
+          | jq -R -s 'split("\n") | map(select(length > 0)) | join(", ")' -r)
+
+      DECISION_HINTS=$(
+        {
+          [ -f "{{appliedDecisionFile}}" ] && jq -r '
+            [
+              .scan.profile // empty,
+              .scan.severity // empty,
+              (if .directives.use_ai_guided_nuclei == true then "ai-guided-nuclei" else empty end),
+              (if .directives.use_focus_targets == true then "focus-targets" else empty end),
+              (if .directives.use_rescan_targets == true then "rescan-targets" else empty end),
+              (if .directives.enable_manual_followup == true then "manual-followup" else empty end)
+            ] | .[]
+          ' "{{appliedDecisionFile}}" 2>/dev/null || true
+          if [ -f "{{previousFollowupDecisionFile}}" ]; then
+            jq -r '.seed_focus.scan_profile? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.base_decision.profile? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.seed_focus.severity? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.base_decision.severity? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.seed_focus.next_phase? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.seed_focus.priority_mode? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.seed_focus.confidence_level? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.seed_focus.reuse_sources[]? | select(. != null and . != "") | "reuse-" + .' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '(.seed_focus.signal_scores.escalation_score // 0) | select(. > 0) | "escalation-" + tostring' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r '.execution_feedback.next_phase? | select(. != null and . != "")' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r 'if .seed_focus.manual_followup_needed == true or .execution_feedback.manual_followup_needed == true then "manual-followup" else empty end' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r 'if .seed_focus.campaign_followup_recommended == true or .execution_feedback.campaign_followup_recommended == true then "campaign-followup" else empty end' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+            jq -r 'if .seed_focus.queue_followup_effective == true or .execution_feedback.queue_followup_effective == true then "queue-followup" else empty end' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
+          fi
+        } | awk 'NF && !seen[$0]++' | jq -R -s 'split("\n") | map(select(length > 0)) | join(", ")' -r)
+
+      case "$STAGE" in
+        post-vuln)
+          RESOLVED_QUERY="confirmed findings, exploit chain, auth bypass, privilege escalation, idor, file upload, token/session abuse, manual exploitation, retest payloads, evidence capture, campaign handoff"
+          ;;
+        decision-followup)
+          RESOLVED_QUERY="applied ai decision, prioritized retest targets, operator queue tasks, campaign handoff, targeted rescan guidance, manual exploitation, auth bypass, privilege escalation, idor, file upload, business logic abuse, evidence capture"
+          ;;
+        *)
+          RESOLVED_QUERY="admin panels, authentication flows, high-value endpoints, exposed services, api routes, graphql, swagger, file handling, business logic entry points, tech-specific exploitation ideas"
+          ;;
+      esac
+      if [ -n "$BASE_QUERY" ]; then
+        RESOLVED_QUERY="$BASE_QUERY | $RESOLVED_QUERY"
+      fi
+      if [ -n "$TECH_HINTS" ]; then
+        RESOLVED_QUERY="$RESOLVED_QUERY | technologies: $TECH_HINTS"
+      fi
+      if [ -n "$DECISION_HINTS" ]; then
+        RESOLVED_QUERY="$RESOLVED_QUERY | decision: $DECISION_HINTS"
+      fi
+      if [ -n "$FOCUS_HINTS" ]; then
+        RESOLVED_QUERY="$RESOLVED_QUERY | ai focus: $FOCUS_HINTS"
+      fi
+      if [ -n "$TARGET_HINTS" ]; then
+        RESOLVED_QUERY="$RESOLVED_QUERY | candidate targets: $TARGET_HINTS"
+      fi
+      RESOLVED_QUERY=$(printf '%s' "$RESOLVED_QUERY" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      QUERY_LENGTH=$(printf '%s' "$RESOLVED_QUERY" | wc -c | tr -d ' ')
+      if [ "${QUERY_LENGTH:-0}" -gt 900 ] 2>/dev/null; then
+        RESOLVED_QUERY=$(printf '%s' "$RESOLVED_QUERY" | cut -c1-900)
+      fi
+
+      printf '%s\n' "$RESOLVED_QUERY" > "{{resolvedSearchQueryOutput}}"
+      jq -n \
+        --arg stage "$STAGE" \
+        --arg base_query "$BASE_QUERY" \
+        --arg resolved_query "$RESOLVED_QUERY" \
+        --arg technologies "$TECH_HINTS" \
+        --arg decision_hints "$DECISION_HINTS" \
+        --arg candidate_targets "$TARGET_HINTS" \
+        --arg focus_targets "$FOCUS_HINTS" \
+        --argjson nuclei_count "$NUCLEI_COUNT" \
+        '{
+          stage: $stage,
+          base_query: $base_query,
+          resolved_query: $resolved_query,
+          technologies: (if $technologies == "" then [] else ($technologies | split(", ") | map(select(length > 0))) end),
+          decision_hints: (if $decision_hints == "" then [] else ($decision_hints | split(", ") | map(select(length > 0))) end),
+          candidate_targets: (if $candidate_targets == "" then [] else ($candidate_targets | split(", ") | map(select(length > 0))) end),
+          focus_targets: (if $focus_targets == "" then [] else ($focus_targets | split(", ") | map(select(length > 0))) end),
+          nuclei_count: $nuclei_count
+        }' > "{{searchQueryContextOutput}}"
+
+      echo "[Hybrid] Query stage: $STAGE"
+      echo "[Hybrid] Resolved query: $RESOLVED_QUERY"
+
   - name: export-knowledge-corpus
     type: bash
     pre_condition: "{{enableHybridSearch}} && {{includeKnowledgeBase}}"
     command: |
       mkdir -p {{semanticIndexDir}}
+      mkdir -p "{{semanticIndexDir}}/logs"
       : > "{{knowledgeIndexFile}}"
 
       OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
@@ -109,27 +303,33 @@ steps:
       PRIMARY_TMP="{{semanticIndexDir}}/.hybrid-knowledge-primary.txt"
       SHARED_TMP="{{semanticIndexDir}}/.hybrid-knowledge-shared.txt"
       GLOBAL_TMP="{{semanticIndexDir}}/.hybrid-knowledge-global.txt"
+      PRIMARY_LOG="{{semanticIndexDir}}/logs/hybrid-kb-export-primary.log"
+      SHARED_LOG="{{semanticIndexDir}}/logs/hybrid-kb-export-shared.log"
+      GLOBAL_LOG="{{semanticIndexDir}}/logs/hybrid-kb-export-global.log"
       : > "$PRIMARY_TMP"
       : > "$SHARED_TMP"
       : > "$GLOBAL_TMP"
+      : > "$PRIMARY_LOG"
+      : > "$SHARED_LOG"
+      : > "$GLOBAL_LOG"
 
       "$OSM_BIN" kb export \
         -w "$PRIMARY_WORKSPACE" \
         --limit {{maxKnowledgeChunks}} \
-        --output "$PRIMARY_TMP" >/tmp/osm-kb-export-hybrid.log 2>&1 || true
+        --output "$PRIMARY_TMP" >"$PRIMARY_LOG" 2>&1 || true
 
       if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
         "$OSM_BIN" kb export \
           -w "$SHARED_WORKSPACE" \
           --limit {{maxKnowledgeChunks}} \
-          --output "$SHARED_TMP" >/tmp/osm-kb-export-hybrid-shared.log 2>&1 || true
+          --output "$SHARED_TMP" >"$SHARED_LOG" 2>&1 || true
       fi
 
       if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
         "$OSM_BIN" kb export \
           -w "$GLOBAL_WORKSPACE" \
           --limit {{maxKnowledgeChunks}} \
-          --output "$GLOBAL_TMP" >/tmp/osm-kb-export-hybrid-global.log 2>&1 || true
+          --output "$GLOBAL_TMP" >"$GLOBAL_LOG" 2>&1 || true
       fi
 
       cat "$PRIMARY_TMP" "$SHARED_TMP" "$GLOBAL_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
@@ -165,9 +365,15 @@ steps:
     pre_condition: "{{enableHybridSearch}} && {{includeKnowledgeBase}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      mkdir -p "{{semanticIndexDir}}/logs"
+      QUERY_FILE="{{resolvedSearchQueryOutput}}"
+      RESOLVED_QUERY="{{searchQuery}}"
+      if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
+        RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      fi
       echo '[]' > "{{knowledgeSearchOutput}}"
       echo '[]' > "{{vectorKnowledgeSearchOutput}}"
-      echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
+      jq -n --arg query "$RESOLVED_QUERY" '{status:"success",query:$query,provider:"config-default",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
       OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
@@ -188,11 +394,28 @@ steps:
       PRIMARY_JSON="{{semanticIndexDir}}/.hybrid-keyword-primary.json"
       SHARED_JSON="{{semanticIndexDir}}/.hybrid-keyword-shared.json"
       GLOBAL_JSON="{{semanticIndexDir}}/.hybrid-keyword-global.json"
+      PRIMARY_VECTOR_LOG="{{semanticIndexDir}}/logs/hybrid-kb-vector-search-primary.log"
+      SHARED_VECTOR_LOG="{{semanticIndexDir}}/logs/hybrid-kb-vector-search-shared.log"
+      GLOBAL_VECTOR_LOG="{{semanticIndexDir}}/logs/hybrid-kb-vector-search-global.log"
+      PRIMARY_SEARCH_LOG="{{semanticIndexDir}}/logs/hybrid-kb-search-primary.log"
+      SHARED_SEARCH_LOG="{{semanticIndexDir}}/logs/hybrid-kb-search-shared.log"
+      GLOBAL_SEARCH_LOG="{{semanticIndexDir}}/logs/hybrid-kb-search-global.log"
       VECTOR_PROVIDER="{{embeddingsProvider}}"
       VECTOR_MODEL="{{embeddingsModel}}"
       VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
       if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
         VECTOR_PROVIDER_LABEL="config-default"
+      fi
+      : > "$PRIMARY_VECTOR_LOG"
+      : > "$SHARED_VECTOR_LOG"
+      : > "$GLOBAL_VECTOR_LOG"
+      : > "$PRIMARY_SEARCH_LOG"
+      : > "$SHARED_SEARCH_LOG"
+      : > "$GLOBAL_SEARCH_LOG"
+      KB_MIN_CONFIDENCE="0.60"
+      KB_ALLOW_FALSE_POSITIVE="false"
+      if printf '%s' "$RESOLVED_QUERY" | tr '[:upper:]' '[:lower:]' | grep -Eq 'false[[:space:]-]*positive|误报|noise'; then
+        KB_ALLOW_FALSE_POSITIVE="true"
       fi
 
       run_vector_search() {
@@ -201,8 +424,14 @@ steps:
         log_file="$3"
         set -- "$OSM_BIN" --json kb vector search \
           -w "$workspace" \
-          --query "{{searchQuery}}" \
+          --query "$RESOLVED_QUERY" \
           --limit {{maxSearchResults}}
+        if [ -n "$KB_MIN_CONFIDENCE" ]; then
+          set -- "$@" --min-confidence "$KB_MIN_CONFIDENCE"
+        fi
+        if [ "$KB_ALLOW_FALSE_POSITIVE" != "true" ]; then
+          set -- "$@" --exclude-sample-type false_positive
+        fi
         if [ -n "$VECTOR_PROVIDER" ]; then
           set -- "$@" --provider "$VECTOR_PROVIDER"
         fi
@@ -212,18 +441,35 @@ steps:
         "$@" > "$output_file" 2>"$log_file" || echo '[]' > "$output_file"
       }
 
+      run_keyword_search() {
+        workspace="$1"
+        output_file="$2"
+        log_file="$3"
+        set -- "$OSM_BIN" --json kb search \
+          -w "$workspace" \
+          --query "$RESOLVED_QUERY" \
+          --limit {{maxSearchResults}}
+        if [ -n "$KB_MIN_CONFIDENCE" ]; then
+          set -- "$@" --min-confidence "$KB_MIN_CONFIDENCE"
+        fi
+        if [ "$KB_ALLOW_FALSE_POSITIVE" != "true" ]; then
+          set -- "$@" --exclude-sample-type false_positive
+        fi
+        "$@" > "$output_file" 2>"$log_file" || echo '[]' > "$output_file"
+      }
+
       echo '[]' > "$PRIMARY_VECTOR_JSON"
       echo '[]' > "$SHARED_VECTOR_JSON"
       echo '[]' > "$GLOBAL_VECTOR_JSON"
 
-      run_vector_search "$PRIMARY_WORKSPACE" "$PRIMARY_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid.log
+      run_vector_search "$PRIMARY_WORKSPACE" "$PRIMARY_VECTOR_JSON" "$PRIMARY_VECTOR_LOG"
 
       if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
-        run_vector_search "$SHARED_WORKSPACE" "$SHARED_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid-shared.log
+        run_vector_search "$SHARED_WORKSPACE" "$SHARED_VECTOR_JSON" "$SHARED_VECTOR_LOG"
       fi
 
       if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
-        run_vector_search "$GLOBAL_WORKSPACE" "$GLOBAL_VECTOR_JSON" /tmp/osm-kb-vector-search-hybrid-global.log
+        run_vector_search "$GLOBAL_WORKSPACE" "$GLOBAL_VECTOR_JSON" "$GLOBAL_VECTOR_LOG"
       fi
 
       jq -s --argjson max_results {{maxSearchResults}} '
@@ -236,25 +482,16 @@ steps:
         | .[:$max_results]
       ' "$PRIMARY_VECTOR_JSON" "$SHARED_VECTOR_JSON" "$GLOBAL_VECTOR_JSON" > "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{vectorKnowledgeSearchOutput}}"
 
-      "$OSM_BIN" --json kb search \
-        -w "$PRIMARY_WORKSPACE" \
-        --query "{{searchQuery}}" \
-        --limit {{maxSearchResults}} > "$PRIMARY_JSON" 2>/tmp/osm-kb-search-hybrid.log || echo '[]' > "$PRIMARY_JSON"
+      run_keyword_search "$PRIMARY_WORKSPACE" "$PRIMARY_JSON" "$PRIMARY_SEARCH_LOG"
 
       echo '[]' > "$SHARED_JSON"
       echo '[]' > "$GLOBAL_JSON"
       if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
-        "$OSM_BIN" --json kb search \
-          -w "$SHARED_WORKSPACE" \
-          --query "{{searchQuery}}" \
-          --limit {{maxSearchResults}} > "$SHARED_JSON" 2>/tmp/osm-kb-search-hybrid-shared.log || echo '[]' > "$SHARED_JSON"
+        run_keyword_search "$SHARED_WORKSPACE" "$SHARED_JSON" "$SHARED_SEARCH_LOG"
       fi
 
       if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
-        "$OSM_BIN" --json kb search \
-          -w "$GLOBAL_WORKSPACE" \
-          --query "{{searchQuery}}" \
-          --limit {{maxSearchResults}} > "$GLOBAL_JSON" 2>/tmp/osm-kb-search-hybrid-global.log || echo '[]' > "$GLOBAL_JSON"
+        run_keyword_search "$GLOBAL_WORKSPACE" "$GLOBAL_JSON" "$GLOBAL_SEARCH_LOG"
       fi
 
       jq -s --argjson max_results {{maxSearchResults}} '
@@ -271,8 +508,8 @@ steps:
       ' "$PRIMARY_JSON" "$SHARED_JSON" "$GLOBAL_JSON" > "{{knowledgeSearchOutput}}" 2>/dev/null || echo '[]' > "{{knowledgeSearchOutput}}"
 
       jq -n \
-        --arg query "{{searchQuery}}" \
-        --arg provider "$VECTOR_PROVIDER" \
+        --arg query "$RESOLVED_QUERY" \
+        --arg provider "$VECTOR_PROVIDER_LABEL" \
         --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
         {
           status: "success",
@@ -292,7 +529,7 @@ steps:
                 snippet: (.snippet // .content // "")
               })
           )
-        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || echo '{"status":"success","query":"{{searchQuery}}","provider":"config-default","total_results":0,"results":[]}' > "{{vectorSearchResultsOutput}}"
+        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || jq -n --arg query "$RESOLVED_QUERY" '{status:"success",query:$query,provider:"config-default",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
       echo "[Hybrid] Vector KB hits: $(jq 'length' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo 0)"
       echo "[Hybrid] Knowledge keyword hits: $(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)"
@@ -309,7 +546,13 @@ steps:
         exit 0
       fi
 
-      QUERY_PATTERN=$(printf '%s' "{{searchQuery}}" \
+      QUERY_FILE="{{resolvedSearchQueryOutput}}"
+      RESOLVED_QUERY="{{searchQuery}}"
+      if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
+        RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      fi
+
+      QUERY_PATTERN=$(printf '%s' "$RESOLVED_QUERY" \
         | tr '[:upper:]' '[:lower:]' \
         | tr -cs '[:alnum:]' '\n' \
         | awk 'length($0) >= 4 && !seen[$0]++ { print }' \
@@ -345,8 +588,13 @@ steps:
     type: bash
     pre_condition: "{{enableHybridSearch}}"
     command: |
+      QUERY_FILE="{{resolvedSearchQueryOutput}}"
+      RESOLVED_QUERY="{{searchQuery}}"
+      if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
+        RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      fi
       jq -n \
-        --arg query "{{searchQuery}}" \
+        --arg query "$RESOLVED_QUERY" \
         --arg target "{{Target}}" \
         --arg provider "$VECTOR_PROVIDER_LABEL" \
         --arg ts "$(date -Iseconds)" \
@@ -526,6 +774,11 @@ steps:
     pre_condition: "{{enableHybridSearch}}"
     command: |
       RESULTS_FILE="{{searchResultsOutput}}"
+      QUERY_FILE="{{resolvedSearchQueryOutput}}"
+      RESOLVED_QUERY="{{searchQuery}}"
+      if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
+        RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      fi
 
       if [ -f "$RESULTS_FILE" ] && jq empty "$RESULTS_FILE" >/dev/null 2>&1; then
         TOTAL=$(jq '.total_results // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
@@ -534,7 +787,7 @@ steps:
         SCAN_COUNT=$(jq '.scan_data.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
 
         echo "[Hybrid] ========== Search Summary =========="
-        echo "[Hybrid] Query: {{searchQuery}}"
+        echo "[Hybrid] Query: $RESOLVED_QUERY"
         echo "[Hybrid] Total Results: $TOTAL"
         echo "[Hybrid] Vector Recall Hits: $VECTOR_COUNT"
         echo "[Hybrid] Knowledge Base Hits: $KB_COUNT"

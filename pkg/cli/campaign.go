@@ -47,6 +47,10 @@ var (
 	campaignReportPreset         string
 	campaignReportOffset         int
 	campaignReportLimit          int
+	campaignReportSortBy         string
+	campaignReportSortOrder      string
+	campaignReportProfileName    string
+	campaignProfileDescription   string
 	campaignExportFormat         string
 	campaignExportOutput         string
 )
@@ -90,6 +94,32 @@ var campaignExportCmd = &cobra.Command{
 	RunE:  runCampaignExport,
 }
 
+var campaignProfileCmd = &cobra.Command{
+	Use:   "profile",
+	Short: "Manage saved campaign report/export profiles",
+}
+
+var campaignProfileListCmd = &cobra.Command{
+	Use:   "list <campaign-id>",
+	Short: "List saved campaign report/export profiles",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCampaignProfileList,
+}
+
+var campaignProfileSaveCmd = &cobra.Command{
+	Use:   "save <campaign-id> <profile-name>",
+	Short: "Save a reusable campaign report/export profile",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runCampaignProfileSave,
+}
+
+var campaignProfileDeleteCmd = &cobra.Command{
+	Use:   "delete <campaign-id> <profile-name>",
+	Short: "Delete a saved campaign report/export profile",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runCampaignProfileDelete,
+}
+
 var campaignDeepScanCmd = &cobra.Command{
 	Use:   "deep-scan <campaign-id>",
 	Short: "Queue deep-scan runs for current high-risk campaign targets",
@@ -131,6 +161,9 @@ func init() {
 	campaignReportCmd.Flags().StringVar(&campaignReportPreset, "preset", "", "preset slice (high-risk, recovered, failed)")
 	campaignReportCmd.Flags().IntVar(&campaignReportOffset, "offset", 0, "pagination offset after filters")
 	campaignReportCmd.Flags().IntVar(&campaignReportLimit, "limit", 0, "pagination limit after filters (0 = all)")
+	campaignReportCmd.Flags().StringVar(&campaignReportSortBy, "sort-by", "", "sort target rows by risk, target, latest-run, or open-high-risk")
+	campaignReportCmd.Flags().StringVar(&campaignReportSortOrder, "sort-order", "", "sort order (asc or desc)")
+	campaignReportCmd.Flags().StringVar(&campaignReportProfileName, "profile", "", "saved report/export profile to apply before explicit flags")
 
 	campaignExportCmd.Flags().StringSliceVar(&campaignReportRiskLevels, "risk", nil, "filter target rows by risk level")
 	campaignExportCmd.Flags().StringSliceVar(&campaignReportStatuses, "status", nil, "filter target rows by latest status")
@@ -138,14 +171,30 @@ func init() {
 	campaignExportCmd.Flags().StringVar(&campaignReportPreset, "preset", "", "preset slice (high-risk, recovered, failed)")
 	campaignExportCmd.Flags().IntVar(&campaignReportOffset, "offset", 0, "pagination offset after filters")
 	campaignExportCmd.Flags().IntVar(&campaignReportLimit, "limit", 0, "pagination limit after filters (0 = all)")
+	campaignExportCmd.Flags().StringVar(&campaignReportSortBy, "sort-by", "", "sort target rows by risk, target, latest-run, or open-high-risk")
+	campaignExportCmd.Flags().StringVar(&campaignReportSortOrder, "sort-order", "", "sort order (asc or desc)")
+	campaignExportCmd.Flags().StringVar(&campaignReportProfileName, "profile", "", "saved report/export profile to apply before explicit flags")
 	campaignExportCmd.Flags().StringVar(&campaignExportFormat, "format", "", "export format (csv or json)")
 	campaignExportCmd.Flags().StringVarP(&campaignExportOutput, "output", "o", "", "write export to file instead of stdout")
+
+	campaignProfileSaveCmd.Flags().StringSliceVar(&campaignReportRiskLevels, "risk", nil, "profile risk levels")
+	campaignProfileSaveCmd.Flags().StringSliceVar(&campaignReportStatuses, "status", nil, "profile latest statuses")
+	campaignProfileSaveCmd.Flags().StringSliceVar(&campaignReportTriggerTypes, "trigger", nil, "profile latest trigger types")
+	campaignProfileSaveCmd.Flags().StringVar(&campaignReportPreset, "preset", "", "profile preset (high-risk, recovered, failed)")
+	campaignProfileSaveCmd.Flags().StringVar(&campaignReportSortBy, "sort-by", "", "profile sort by risk, target, latest-run, or open-high-risk")
+	campaignProfileSaveCmd.Flags().StringVar(&campaignReportSortOrder, "sort-order", "", "profile sort order (asc or desc)")
+	campaignProfileSaveCmd.Flags().StringVar(&campaignExportFormat, "format", "", "preferred export format for this profile (csv or json)")
+	campaignProfileSaveCmd.Flags().StringVar(&campaignProfileDescription, "description", "", "optional profile description")
 
 	campaignCmd.AddCommand(campaignCreateCmd)
 	campaignCmd.AddCommand(campaignListCmd)
 	campaignCmd.AddCommand(campaignStatusCmd)
 	campaignCmd.AddCommand(campaignReportCmd)
 	campaignCmd.AddCommand(campaignExportCmd)
+	campaignProfileCmd.AddCommand(campaignProfileListCmd)
+	campaignProfileCmd.AddCommand(campaignProfileSaveCmd)
+	campaignProfileCmd.AddCommand(campaignProfileDeleteCmd)
+	campaignCmd.AddCommand(campaignProfileCmd)
 	campaignCmd.AddCommand(campaignDeepScanCmd)
 	campaignCmd.AddCommand(campaignRerunFailedCmd)
 	rootCmd.AddCommand(campaignCmd)
@@ -420,11 +469,13 @@ func runCampaignReport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	filters, err := normalizeCampaignReportFiltersCLI(campaignReportRiskLevels, campaignReportStatuses, campaignReportTriggerTypes, campaignReportPreset)
+	filters, sortSpec, _, profileApplied, err := resolveCampaignReportSelectionCLI(campaign)
 	if err != nil {
 		return err
 	}
 	report = applyCampaignReportFiltersCLI(report, campaign, filters)
+	report = sortCampaignReportCLI(report, sortSpec)
+	report.ProfileApplied = profileApplied
 	report = paginateCampaignReportCLI(report, campaignReportOffset, campaignReportLimit)
 
 	if globalJSON {
@@ -465,6 +516,12 @@ func runCampaignReport(cmd *cobra.Command, args []string) error {
 			strings.Join(report.FiltersApplied.TriggerTypes, ","),
 			report.FiltersApplied.Preset)
 	}
+	if report.ProfileApplied != "" {
+		fmt.Printf("Profile: %s\n", report.ProfileApplied)
+	}
+	if report.SortApplied.By != "risk" || report.SortApplied.Order != "desc" || strings.TrimSpace(campaignReportSortBy) != "" || strings.TrimSpace(campaignReportSortOrder) != "" {
+		fmt.Printf("Sort:    by=%s order=%s\n", report.SortApplied.By, report.SortApplied.Order)
+	}
 	fmt.Println("")
 
 	for _, target := range report.Targets {
@@ -501,14 +558,16 @@ func runCampaignExport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	filters, err := normalizeCampaignReportFiltersCLI(campaignReportRiskLevels, campaignReportStatuses, campaignReportTriggerTypes, campaignReportPreset)
+	filters, sortSpec, format, profileApplied, err := resolveCampaignReportSelectionCLI(campaign)
 	if err != nil {
 		return err
 	}
 	report = applyCampaignReportFiltersCLI(report, campaign, filters)
+	report = sortCampaignReportCLI(report, sortSpec)
+	report.ProfileApplied = profileApplied
 	report = paginateCampaignReportCLI(report, campaignReportOffset, campaignReportLimit)
 
-	format := strings.TrimSpace(strings.ToLower(campaignExportFormat))
+	format = strings.TrimSpace(strings.ToLower(format))
 	if format == "" {
 		if globalJSON {
 			format = "json"
@@ -547,6 +606,152 @@ func runCampaignExport(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	fmt.Print(string(data))
+	return nil
+}
+
+func runCampaignProfileList(cmd *cobra.Command, args []string) error {
+	if disableDB {
+		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
+	}
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	campaign, err := database.GetCampaignByID(context.Background(), args[0])
+	if err != nil {
+		return err
+	}
+	profiles, err := database.ListCampaignReportProfiles(campaign)
+	if err != nil {
+		return err
+	}
+
+	if globalJSON {
+		payload := map[string]interface{}{
+			"campaign_id": campaign.ID,
+			"data":        profiles,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("Campaign ID: %s\n", campaign.ID)
+	if len(profiles) == 0 {
+		fmt.Println("No saved profiles")
+		return nil
+	}
+	for _, profile := range profiles {
+		fmt.Printf("- %s\n", profile.Name)
+		if profile.Description != "" {
+			fmt.Printf("  Description: %s\n", profile.Description)
+		}
+		fmt.Printf("  Filters: risk=%s status=%s trigger=%s preset=%s\n",
+			strings.Join(profile.Filters.RiskLevels, ","),
+			strings.Join(profile.Filters.Statuses, ","),
+			strings.Join(profile.Filters.TriggerTypes, ","),
+			profile.Filters.Preset)
+		fmt.Printf("  Sort: by=%s order=%s\n", profile.Sort.By, profile.Sort.Order)
+		if profile.Format != "" {
+			fmt.Printf("  Format: %s\n", profile.Format)
+		}
+		if !profile.UpdatedAt.IsZero() {
+			fmt.Printf("  Updated: %s\n", profile.UpdatedAt.Format(time.RFC3339))
+		}
+	}
+	return nil
+}
+
+func runCampaignProfileSave(cmd *cobra.Command, args []string) error {
+	if disableDB {
+		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
+	}
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	sortSpec, err := normalizeCampaignReportSortCLI(campaignReportSortBy, campaignReportSortOrder)
+	if err != nil {
+		return err
+	}
+	filters, err := normalizeCampaignReportFiltersCLI(campaignReportRiskLevels, campaignReportStatuses, campaignReportTriggerTypes, campaignReportPreset)
+	if err != nil {
+		return err
+	}
+	profile, err := database.UpsertCampaignReportProfile(context.Background(), args[0], database.CampaignReportProfile{
+		Name:        args[1],
+		Description: campaignProfileDescription,
+		Filters: database.CampaignReportProfileFilters{
+			RiskLevels:   filters.RiskLevels,
+			Statuses:     filters.Statuses,
+			TriggerTypes: filters.TriggerTypes,
+			Preset:       filters.Preset,
+		},
+		Sort: database.CampaignReportProfileSort{
+			By:    sortSpec.By,
+			Order: sortSpec.Order,
+		},
+		Format: strings.ToLower(strings.TrimSpace(campaignExportFormat)),
+	})
+	if err != nil {
+		return err
+	}
+
+	if globalJSON {
+		payload := map[string]interface{}{
+			"message":     "Campaign profile saved",
+			"campaign_id": args[0],
+			"data":        profile,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("Campaign ID: %s\n", args[0])
+	fmt.Printf("Saved profile: %s\n", profile.Name)
+	return nil
+}
+
+func runCampaignProfileDelete(cmd *cobra.Command, args []string) error {
+	if disableDB {
+		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
+	}
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	deleted, err := database.DeleteCampaignReportProfile(context.Background(), args[0], args[1])
+	if err != nil {
+		return err
+	}
+
+	if globalJSON {
+		payload := map[string]interface{}{
+			"message":     "Campaign profile deleted",
+			"campaign_id": args[0],
+			"name":        strings.ToLower(strings.TrimSpace(args[1])),
+			"deleted":     deleted,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("Campaign ID: %s\n", args[0])
+	fmt.Printf("Deleted profile: %s\n", strings.ToLower(strings.TrimSpace(args[1])))
 	return nil
 }
 
@@ -766,6 +971,8 @@ type campaignReportResponseCLI struct {
 	DeepScan                    campaignDeepScanReportCLI    `json:"deep_scan"`
 	RerunHistory                campaignRerunHistoryCLI      `json:"rerun_history"`
 	FiltersApplied              campaignReportFiltersCLI     `json:"filters_applied"`
+	SortApplied                 campaignReportSortCLI        `json:"sort_applied"`
+	ProfileApplied              string                       `json:"profile_applied,omitempty"`
 	TotalTargets                int                          `json:"total_targets"`
 	ResultCount                 int                          `json:"result_count"`
 	Pagination                  campaignReportPaginationCLI  `json:"pagination"`
@@ -777,6 +984,11 @@ type campaignReportFiltersCLI struct {
 	Statuses     []string `json:"statuses,omitempty"`
 	TriggerTypes []string `json:"trigger_types,omitempty"`
 	Preset       string   `json:"preset,omitempty"`
+}
+
+type campaignReportSortCLI struct {
+	By    string `json:"by"`
+	Order string `json:"order"`
 }
 
 type campaignReportPaginationCLI struct {
@@ -1061,6 +1273,55 @@ func normalizeCampaignReportPresetCLI(value string) string {
 	return value
 }
 
+func normalizeCampaignReportSortCLI(by, order string) (campaignReportSortCLI, error) {
+	sortSpec := campaignReportSortCLI{
+		By:    normalizeCampaignReportSortByCLI(by),
+		Order: normalizeCampaignReportSortOrderCLI(by, order),
+	}
+	switch sortSpec.By {
+	case "risk", "target", "latest_run", "open_high_risk":
+	default:
+		return campaignReportSortCLI{}, fmt.Errorf("unsupported campaign report sort-by: %s", by)
+	}
+	if sortSpec.Order != "asc" && sortSpec.Order != "desc" {
+		return campaignReportSortCLI{}, fmt.Errorf("unsupported campaign report sort-order: %s", order)
+	}
+	return sortSpec, nil
+}
+
+func normalizeCampaignReportSortByCLI(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	switch value {
+	case "", "risk", "target", "latest_run", "latest_run_at", "open_high_risk", "open_high_risk_findings":
+	default:
+		return value
+	}
+	switch value {
+	case "", "risk":
+		return "risk"
+	case "latest_run_at":
+		return "latest_run"
+	case "open_high_risk_findings":
+		return "open_high_risk"
+	default:
+		return value
+	}
+}
+
+func normalizeCampaignReportSortOrderCLI(by, order string) string {
+	order = strings.ToLower(strings.TrimSpace(order))
+	if order == "asc" || order == "desc" {
+		return order
+	}
+	switch normalizeCampaignReportSortByCLI(by) {
+	case "target":
+		return "asc"
+	default:
+		return "desc"
+	}
+}
+
 func applyCampaignReportFiltersCLI(report *campaignReportResponseCLI, campaign *database.Campaign, filters campaignReportFiltersCLI) *campaignReportResponseCLI {
 	if report == nil {
 		return nil
@@ -1084,6 +1345,20 @@ func applyCampaignReportFiltersCLI(report *campaignReportResponseCLI, campaign *
 	}
 	filtered.ResultCount = len(filtered.Targets)
 	return &filtered
+}
+
+func sortCampaignReportCLI(report *campaignReportResponseCLI, sortSpec campaignReportSortCLI) *campaignReportResponseCLI {
+	if report == nil {
+		return nil
+	}
+
+	sorted := *report
+	sorted.SortApplied = sortSpec
+	sorted.Targets = append([]campaignReportTargetRowCLI(nil), report.Targets...)
+	sort.SliceStable(sorted.Targets, func(i, j int) bool {
+		return campaignReportLessCLI(sorted.Targets[i], sorted.Targets[j], sortSpec)
+	})
+	return &sorted
 }
 
 func paginateCampaignReportCLI(report *campaignReportResponseCLI, offset, limit int) *campaignReportResponseCLI {
@@ -1119,6 +1394,136 @@ func paginateCampaignReportCLI(report *campaignReportResponseCLI, offset, limit 
 		HasMore:       end < totalMatched,
 	}
 	return &paginated
+}
+
+func resolveCampaignReportSelectionCLI(campaign *database.Campaign) (campaignReportFiltersCLI, campaignReportSortCLI, string, string, error) {
+	profileApplied := strings.TrimSpace(campaignReportProfileName)
+	profileFilters := campaignReportFiltersCLI{}
+	profileSort := campaignReportSortCLI{}
+	profileFormat := ""
+	if profileApplied != "" {
+		profile, err := database.GetCampaignReportProfile(campaign, profileApplied)
+		if err != nil {
+			return campaignReportFiltersCLI{}, campaignReportSortCLI{}, "", "", err
+		}
+		profileApplied = profile.Name
+		profileFilters = campaignReportFiltersCLI{
+			RiskLevels:   append([]string(nil), profile.Filters.RiskLevels...),
+			Statuses:     append([]string(nil), profile.Filters.Statuses...),
+			TriggerTypes: append([]string(nil), profile.Filters.TriggerTypes...),
+			Preset:       profile.Filters.Preset,
+		}
+		profileSort = campaignReportSortCLI{
+			By:    profile.Sort.By,
+			Order: profile.Sort.Order,
+		}
+		profileFormat = profile.Format
+	}
+
+	if len(campaignReportRiskLevels) > 0 {
+		profileFilters.RiskLevels = campaignReportRiskLevels
+	}
+	if len(campaignReportStatuses) > 0 {
+		profileFilters.Statuses = campaignReportStatuses
+	}
+	if len(campaignReportTriggerTypes) > 0 {
+		profileFilters.TriggerTypes = campaignReportTriggerTypes
+	}
+	if strings.TrimSpace(campaignReportPreset) != "" {
+		profileFilters.Preset = campaignReportPreset
+	}
+	filters, err := normalizeCampaignReportFiltersCLI(profileFilters.RiskLevels, profileFilters.Statuses, profileFilters.TriggerTypes, profileFilters.Preset)
+	if err != nil {
+		return campaignReportFiltersCLI{}, campaignReportSortCLI{}, "", "", err
+	}
+
+	sortBy := profileSort.By
+	sortOrder := profileSort.Order
+	if strings.TrimSpace(campaignReportSortBy) != "" {
+		sortBy = campaignReportSortBy
+	}
+	if strings.TrimSpace(campaignReportSortOrder) != "" {
+		sortOrder = campaignReportSortOrder
+	}
+	sortSpec, err := normalizeCampaignReportSortCLI(sortBy, sortOrder)
+	if err != nil {
+		return campaignReportFiltersCLI{}, campaignReportSortCLI{}, "", "", err
+	}
+
+	format := strings.TrimSpace(profileFormat)
+	if strings.TrimSpace(campaignExportFormat) != "" {
+		format = campaignExportFormat
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "" && format != "csv" && format != "json" {
+		return campaignReportFiltersCLI{}, campaignReportSortCLI{}, "", "", fmt.Errorf("unsupported export format: %s", format)
+	}
+	return filters, sortSpec, format, profileApplied, nil
+}
+
+func campaignReportLessCLI(left, right campaignReportTargetRowCLI, sortSpec campaignReportSortCLI) bool {
+	desc := sortSpec.Order == "desc"
+	switch sortSpec.By {
+	case "target":
+		if left.Target == right.Target {
+			return campaignReportDefaultLessCLI(left, right)
+		}
+		return campaignCompareStringCLI(left.Target, right.Target, desc)
+	case "latest_run":
+		if left.LatestRunAt.Equal(right.LatestRunAt) {
+			return campaignReportDefaultLessCLI(left, right)
+		}
+		return campaignCompareTimeCLI(left.LatestRunAt, right.LatestRunAt, desc)
+	case "open_high_risk":
+		if left.OpenHighRiskFindings == right.OpenHighRiskFindings {
+			return campaignReportDefaultLessCLI(left, right)
+		}
+		return campaignCompareIntCLI(left.OpenHighRiskFindings, right.OpenHighRiskFindings, desc)
+	case "risk":
+		fallthrough
+	default:
+		return campaignReportDefaultLessWithOrderCLI(left, right, desc)
+	}
+}
+
+func campaignReportDefaultLessCLI(left, right campaignReportTargetRowCLI) bool {
+	return campaignReportDefaultLessWithOrderCLI(left, right, true)
+}
+
+func campaignReportDefaultLessWithOrderCLI(left, right campaignReportTargetRowCLI, desc bool) bool {
+	leftRisk := campaignRiskRankCLI(left.RiskLevel)
+	rightRisk := campaignRiskRankCLI(right.RiskLevel)
+	if leftRisk != rightRisk {
+		return campaignCompareIntCLI(leftRisk, rightRisk, desc)
+	}
+	if left.OpenHighRiskFindings != right.OpenHighRiskFindings {
+		return campaignCompareIntCLI(left.OpenHighRiskFindings, right.OpenHighRiskFindings, desc)
+	}
+	if !left.LatestRunAt.Equal(right.LatestRunAt) {
+		return campaignCompareTimeCLI(left.LatestRunAt, right.LatestRunAt, desc)
+	}
+	return left.Target < right.Target
+}
+
+func campaignCompareStringCLI(left, right string, desc bool) bool {
+	if desc {
+		return left > right
+	}
+	return left < right
+}
+
+func campaignCompareIntCLI(left, right int, desc bool) bool {
+	if desc {
+		return left > right
+	}
+	return left < right
+}
+
+func campaignCompareTimeCLI(left, right time.Time, desc bool) bool {
+	if desc {
+		return left.After(right)
+	}
+	return left.Before(right)
 }
 
 func campaignReportRowMatchesFiltersCLI(campaign *database.Campaign, row campaignReportTargetRowCLI, filters campaignReportFiltersCLI) bool {
