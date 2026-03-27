@@ -24,13 +24,43 @@ params:
     default: "{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json"
   - name: vulnValidationFile
     default: "{{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json"
+  - name: confirmedUrlsFile
+    default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
   - name: entryPointsFile
     default: "{{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt"
+  - name: bestPathTargetsFile
+    default: "{{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt"
   - name: semanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: fallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: knowledgeSearchFile
     default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: fallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
   - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: fallbackVectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackVectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
 
   # 配置
@@ -53,59 +83,192 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/.input
 
+      INPUT_DIR="{{Output}}/ai-analysis/.input"
+      : > "$INPUT_DIR/chains.json"
+      : > "$INPUT_DIR/vuln-validation.json"
+      : > "$INPUT_DIR/priority-targets.txt"
+      : > "$INPUT_DIR/semantic-priority.txt"
+      : > "$INPUT_DIR/knowledge-priority.txt"
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      list_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r 'length // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      pick_semantic_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if semantic_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_list_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if list_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_text_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if text_has_lines "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_SEMANTIC_FILE=$(pick_semantic_file "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}")
+      ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
+      ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
+      ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}" "{{thirdFallbackVectorKnowledgeSearchFile}}")
+
       # 提取关键数据
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
         echo "[Path Planning] Using attack chain data"
         
         # 提取攻击链摘要
-        jq -r '.attack_chains[0:3]' "{{attackChainFile}}" > {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || true
-        
-        # 提取入口点
-        jq -r '.attack_chain_summary.most_likely_entry_points[]' "{{attackChainFile}}" 2>/dev/null > {{Output}}/ai-analysis/.input/entry-points.txt || true
+        jq '{
+          attack_chain_summary: (.attack_chain_summary // {}),
+          attack_chains: ((.attack_chains // [])[0:3])
+        }' "{{attackChainFile}}" > "$INPUT_DIR/chains.json" 2>/dev/null || true
+      else
+        echo '{}' > "$INPUT_DIR/chains.json"
       fi
 
-      if [ -f "{{semanticSearchFile}}" ] && jq empty "{{semanticSearchFile}}" 2>/dev/null; then
+      if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
+        jq '{
+          confirmed_real: (.confirmed_real // .validation_summary.confirmed_real // 0),
+          false_positives: (.false_positives // .validation_summary.false_positives // 0),
+          risk_level: (.risk_level // .validation_summary.risk_level // "unknown"),
+          findings: ((.findings // [])[0:10])
+        }' "{{vulnValidationFile}}" > "$INPUT_DIR/vuln-validation.json" 2>/dev/null || true
+      else
+        echo '{}' > "$INPUT_DIR/vuln-validation.json"
+      fi
+
+      {
+        jq -r '.attack_chain_summary.most_likely_entry_points[]? // empty' "{{attackChainFile}}" 2>/dev/null || true
+        cat "{{entryPointsFile}}" 2>/dev/null || true
+        cat "{{confirmedUrlsFile}}" 2>/dev/null || true
+        cat "{{bestPathTargetsFile}}" 2>/dev/null || true
+        cat "$ACTIVE_SEMANTIC_PRIORITY_FILE" 2>/dev/null || true
+      } | awk 'NF && !seen[$0]++' | head -20 > "$INPUT_DIR/priority-targets.txt" || true
+
+      if [ -f "$ACTIVE_SEMANTIC_FILE" ] && jq empty "$ACTIVE_SEMANTIC_FILE" 2>/dev/null; then
         jq -r '.results[0:8][]? | [
           (.target // .title // "unknown"),
           (.category // "general"),
           ("severity=" + ((.severity_hint // "info") | tostring)),
           (.content // .snippet // "")
-        ] | @tsv' "{{semanticSearchFile}}" > {{Output}}/ai-analysis/.input/semantic-priority.txt 2>/dev/null || true
+        ] | @tsv' "$ACTIVE_SEMANTIC_FILE" > "$INPUT_DIR/semantic-priority.txt" 2>/dev/null || true
+      fi
+
+      if [ ! -s "$INPUT_DIR/semantic-priority.txt" ] && text_has_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE"; then
+        awk 'NF { print $0 "\tsemantic-priority\tpriority-target\tscore=manual\t" }' "$ACTIVE_SEMANTIC_PRIORITY_FILE" | head -12 > "$INPUT_DIR/semantic-priority.txt" || true
       fi
 
       {
-        if [ -f "{{vectorKnowledgeSearchFile}}" ] && jq empty "{{vectorKnowledgeSearchFile}}" 2>/dev/null; then
+        if [ -f "$ACTIVE_VECTOR_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null; then
           jq -r '.[]? | [
             "vector-kb",
             (.title // .source_path // "unknown"),
             (.section // "general"),
             ("score=" + (((.relevance_score // .score) // 0) | tostring)),
             (.snippet // .content // "")
-          ] | @tsv' "{{vectorKnowledgeSearchFile}}" 2>/dev/null || true
+          ] | @tsv' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || true
         fi
-        if [ -f "{{knowledgeSearchFile}}" ] && jq empty "{{knowledgeSearchFile}}" 2>/dev/null; then
+        if [ -f "$ACTIVE_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null; then
           jq -r '.[]? | [
             (.source // "knowledge"),
             (.title // .source_path // "unknown"),
             (.section // "general"),
             ("score=" + (((.relevance_score // .score) // 0) | tostring)),
             (.snippet // .content // "")
-          ] | @tsv' "{{knowledgeSearchFile}}" 2>/dev/null || true
+          ] | @tsv' "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null || true
         fi
-      } | awk 'NF && !seen[$0]++' | head -12 > {{Output}}/ai-analysis/.input/knowledge-priority.txt || true
+      } | awk 'NF && !seen[$0]++' | head -12 > "$INPUT_DIR/knowledge-priority.txt" || true
       
-      CHAIN_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || echo 0)
-      SEMANTIC_SIZE=$(wc -l < {{Output}}/ai-analysis/.input/semantic-priority.txt 2>/dev/null || echo 0)
-      KNOWLEDGE_SIZE=$(wc -l < {{Output}}/ai-analysis/.input/knowledge-priority.txt 2>/dev/null || echo 0)
-      echo "[Path Planning] Input prepared: chains=$CHAIN_SIZE semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      CHAIN_SIZE=$(count_bytes "$INPUT_DIR/chains.json")
+      TARGET_COUNT=$(count_lines "$INPUT_DIR/priority-targets.txt")
+      SEMANTIC_SIZE=$(count_lines "$INPUT_DIR/semantic-priority.txt")
+      KNOWLEDGE_SIZE=$(count_lines "$INPUT_DIR/knowledge-priority.txt")
+      echo "[Path Planning] Input prepared: chains=$CHAIN_SIZE priority_targets=$TARGET_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      echo "[Path Planning] Active inputs: semantic=$ACTIVE_SEMANTIC_FILE semantic_targets=$ACTIVE_SEMANTIC_PRIORITY_FILE knowledge=$ACTIVE_KNOWLEDGE_FILE vector=$ACTIVE_VECTOR_KNOWLEDGE_FILE"
 
   - name: check-path-planning-data
     type: bash
     pre_condition: "{{enablePathPlanning}}"
     command: |
-      CHAIN_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/chains.json 2>/dev/null || echo 0)
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      CHAIN_SIZE=$(count_bytes "{{Output}}/ai-analysis/.input/chains.json")
+      PRIORITY_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/priority-targets.txt")
+      SEMANTIC_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/semantic-priority.txt")
+      KNOWLEDGE_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/knowledge-priority.txt")
       
-      if [ "$CHAIN_SIZE" -lt 50 ]; then
+      if [ "$CHAIN_SIZE" -lt 50 ] && [ "$PRIORITY_COUNT" -eq 0 ] && [ "$SEMANTIC_COUNT" -eq 0 ] && [ "$KNOWLEDGE_COUNT" -eq 0 ]; then
         echo "[WARN] Insufficient data for path planning"
         echo '{"error": "no_data", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.path-planning-skip
@@ -113,7 +276,7 @@ steps:
       fi
       
       rm -f {{Output}}/ai-analysis/.path-planning-skip 2>/dev/null || true
-      echo "[Path Planning] Proceeding with planning"
+      echo "[Path Planning] Proceeding with planning (chains=$CHAIN_SIZE priority_targets=$PRIORITY_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT)"
 
   - name: ai-generate-attack-plan
     type: agent
@@ -192,13 +355,16 @@ steps:
       基于攻击链为 {{Target}} 生成详细执行计划。
       
       攻击链数据：{{Output}}/ai-analysis/.input/chains.json
+      已验证漏洞摘要：{{Output}}/ai-analysis/.input/vuln-validation.json
+      优先目标与确认入口：{{Output}}/ai-analysis/.input/priority-targets.txt
       语义优先目标：{{Output}}/ai-analysis/.input/semantic-priority.txt
       知识库利用经验：{{Output}}/ai-analysis/.input/knowledge-priority.txt
       
       请读取数据，生成执行计划。
 
       额外要求：
-      - 优先围绕“攻击链入口 + 语义优先目标 + 知识库命中经验”的交集来规划执行顺序
+      - 优先围绕“攻击链入口 + confirmed URLs / best-path / semantic priority + 知识库命中经验”的交集来规划执行顺序
+      - 如果攻击链不完整，也要根据已验证漏洞、确认 URL 和高价值入口生成可执行计划
       - 如果知识库提示某类入口通常伴随认证、权限、文件处理或业务逻辑问题，要把对应验证动作前移
       - 每个阶段优先选择真实可执行、可验证、低噪音的动作
       
@@ -215,7 +381,7 @@ steps:
 
   - name: save-path-planning-results
     type: bash
-    pre_condition: "{{enablePathPlanning}}"
+    pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
     command: |
       mkdir -p {{Output}}/ai-analysis
 
@@ -255,9 +421,12 @@ steps:
         echo "[OK] Valid JSON extracted"
       else
         {
+          cat "{{Output}}/ai-analysis/.input/priority-targets.txt" 2>/dev/null || true
           jq -r '.attack_chain_summary.most_likely_entry_points[]? // empty' "{{attackChainFile}}" 2>/dev/null || true
           cat "{{entryPointsFile}}" 2>/dev/null || true
-        } | awk 'NF && !seen[$0]++' | head -5 > "$FALLBACK_TARGETS" || true
+          cat "{{confirmedUrlsFile}}" 2>/dev/null || true
+          cat "{{bestPathTargetsFile}}" 2>/dev/null || true
+        } | awk 'NF && !seen[$0]++' | head -8 > "$FALLBACK_TARGETS" || true
 
         FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
         jq -n \

@@ -54,9 +54,35 @@ params:
     default: "{{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt"
   - name: semanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: fallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
+  - name: semanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-{{TargetSpace}}.txt"
+  - name: fallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
+  - name: secondFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt"
+  - name: thirdFallbackSemanticPriorityTargetsFile
+    default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: knowledgeSearchFile
     default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
+  - name: fallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json"
   - name: vectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: fallbackVectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json"
+  - name: secondFallbackVectorKnowledgeSearchFile
+    default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
+  - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
   - name: osintFile
     default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
@@ -86,38 +112,194 @@ steps:
     pre_condition: "{{enableAttackChain}}"
     command: |
       echo "[INFO] [Attack Chain] Checking input data..."
-      
-      # 检查必要的输入文件
-      REQUIRED_FILES="{{vulnValidationFile}} {{nucleiCriticalFile}} {{nucleiHighFile}}"
-      MISSING_FILES=""
-      
-      for f in $REQUIRED_FILES; do
-        if [ ! -f "$f" ] || [ ! -s "$f" ]; then
-          MISSING_FILES="$MISSING_FILES $f"
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      list_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r 'length // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      pick_semantic_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if semantic_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_list_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if list_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_text_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if text_has_lines "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
         fi
-      done
-      
-      if [ -n "$MISSING_FILES" ]; then
-        echo "[WARN] Missing/empty input files:$MISSING_FILES"
-      else
-        echo "[INFO] [Attack Chain] All required input files available"
-      fi
-      
-      # 检查验证后的漏洞数据
+      }
+
+      ACTIVE_SEMANTIC_FILE=$(pick_semantic_file "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}")
+      ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
+      ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
+      ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}" "{{thirdFallbackVectorKnowledgeSearchFile}}")
+
+      CONFIRMED=0
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
-        CONFIRMED=$(jq -r '.validation_summary.confirmed_real // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
-        echo "[INFO] [Attack Chain] Confirmed vulns from validation: $CONFIRMED"
+        CONFIRMED=$(jq -r '.validation_summary.confirmed_real // .confirmed_real // ([((.findings // []) + (.validated_findings // []))[]? | select(((.status // .verification_status // "") | ascii_downcase) == "confirmed" or ((.status // .verification_status // "") | ascii_downcase) == "verified")] | length) // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
       fi
-      
+      CRITICAL_COUNT=$(count_lines "{{nucleiCriticalFile}}")
+      HIGH_COUNT=$(count_lines "{{nucleiHighFile}}")
+      CONFIRMED_URL_COUNT=$(count_lines "{{confirmedUrlsFile}}")
+      SEMANTIC_COUNT=0
+      KNOWLEDGE_COUNT=0
+      VECTOR_KNOWLEDGE_COUNT=0
+      if [ -f "$ACTIVE_SEMANTIC_FILE" ] && jq empty "$ACTIVE_SEMANTIC_FILE" 2>/dev/null; then
+        SEMANTIC_COUNT=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$ACTIVE_SEMANTIC_FILE" 2>/dev/null || echo 0)
+      fi
+      if [ -f "$ACTIVE_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null; then
+        KNOWLEDGE_COUNT=$(jq -r 'length // 0' "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null || echo 0)
+      fi
+      if [ -f "$ACTIVE_VECTOR_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null; then
+        VECTOR_KNOWLEDGE_COUNT=$(jq -r 'length // 0' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || echo 0)
+      fi
+
+      echo "[INFO] [Attack Chain] Confirmed=$CONFIRMED critical=$CRITICAL_COUNT high=$HIGH_COUNT confirmed_urls=$CONFIRMED_URL_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT vector=$VECTOR_KNOWLEDGE_COUNT"
+      echo "[INFO] [Attack Chain] Active inputs: semantic=$ACTIVE_SEMANTIC_FILE semantic_targets=$ACTIVE_SEMANTIC_PRIORITY_FILE knowledge=$ACTIVE_KNOWLEDGE_FILE vector=$ACTIVE_VECTOR_KNOWLEDGE_FILE"
       echo "[INFO] [Attack Chain] Input data check complete"
 
   - name: collect-vuln-data
     type: bash
     pre_condition: "{{enableAttackChain}}"
     command: |
-      mkdir -p {{Output}}/ai-analysis
+      mkdir -p {{Output}}/ai-analysis/.input
 
       ATTACK_INPUT="{{attackChainPreparedInput}}"
+      INPUT_DIR="{{Output}}/ai-analysis/.input"
+      : > "$INPUT_DIR/confirmed-vulns.txt"
+      : > "$INPUT_DIR/tech-stack.txt"
+      : > "$INPUT_DIR/semantic-context.txt"
+      : > "$INPUT_DIR/knowledge-context.txt"
+      CONFIRMED_FINDINGS_TMP="$INPUT_DIR/.confirmed-findings.tsv"
+      VALIDATED_FINDINGS_TMP="$INPUT_DIR/.validated-findings.tsv"
+      : > "$CONFIRMED_FINDINGS_TMP"
+      : > "$VALIDATED_FINDINGS_TMP"
+
+      text_has_lines() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
+      }
+
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      list_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r 'length // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      pick_semantic_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if semantic_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_list_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if list_hits "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      pick_text_file() {
+        for candidate in "$@"; do
+          [ -n "$candidate" ] || continue
+          if text_has_lines "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+        done
+        printf '%s\n' "$1"
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_SEMANTIC_FILE=$(pick_semantic_file "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}")
+      ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
+      ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
+      ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}" "{{thirdFallbackVectorKnowledgeSearchFile}}")
 
       # 优先整理已验证/已确认的漏洞数据，避免 agent 直接从原始噪声中建链
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
@@ -146,27 +328,108 @@ steps:
               validation_summary: ($root.validation_summary // {}),
               high_priority_items: ($root.high_priority_items // [])
             }
-        ' "{{vulnValidationFile}}" > "$ATTACK_INPUT"
+        ' "{{vulnValidationFile}}" > "$ATTACK_INPUT" || true
+
+        if [ ! -s "$ATTACK_INPUT" ] || ! jq empty "$ATTACK_INPUT" >/dev/null 2>&1; then
+          jq -n \
+            --arg target "{{Target}}" \
+            --arg workspace "{{TargetSpace}}" \
+            --argjson verified_preferred {{attackChainVerifiedPreferred}} \
+            '{
+              source: "validated-prepared-fallback",
+              target: $target,
+              workspace: $workspace,
+              verified_preferred: $verified_preferred,
+              summary: {
+                total_findings: 0,
+                verified_findings: 0,
+                candidate_findings: 0,
+                false_positive_findings: 0
+              },
+              verified_findings: [],
+              candidate_findings: [],
+              false_positive_samples: [],
+              validation_summary: {}
+            }' > "$ATTACK_INPUT" 2>/dev/null || printf '%s\n' '{}' > "$ATTACK_INPUT"
+        fi
+
+        jq -r '.findings[]? | select((.status // .verification_status // "" | ascii_downcase) as $status | $status == "confirmed" or $status == "verified") | [(.type // .finding // "unknown"), (.url // "unknown"), ("severity=" + (.severity // "unknown"))] | @tsv' "{{vulnValidationFile}}" 2>/dev/null > "$CONFIRMED_FINDINGS_TMP" || true
+        jq -r '.validated_findings[]? | select((.verification_status // .status // "" | ascii_downcase) as $status | $status == "confirmed" or $status == "verified") | [(.finding // .type // "unknown"), (.url // "unknown"), ("severity=" + (.severity // "unknown"))] | @tsv' "{{vulnValidationFile}}" 2>/dev/null > "$VALIDATED_FINDINGS_TMP" || true
+        cat "$CONFIRMED_FINDINGS_TMP" "$VALIDATED_FINDINGS_TMP" 2>/dev/null | awk -F '\t' 'NF >= 3 { print $1 " | " $2 " | " $3 }' | awk 'NF && !seen[$0]++' > "$INPUT_DIR/confirmed-vulns.txt" || true
       else
         # 否则使用原始扫描数据构建输入
-        cat > "$ATTACK_INPUT" << 'EOF'
-        {
-          "source": "direct_scan",
-          "target": "{{Target}}",
-          "workspace": "{{TargetSpace}}",
-          "verified_preferred": {{attackChainVerifiedPreferred}},
-          "summary": {
-            "total_findings": 0,
-            "verified_findings": 0,
-            "candidate_findings": 0,
-            "false_positive_findings": 0
-          },
-          "verified_findings": [],
-          "candidate_findings": [],
-          "false_positive_samples": []
-        }
-        EOF
+        jq -n \
+          --arg target "{{Target}}" \
+          --arg workspace "{{TargetSpace}}" \
+          --argjson verified_preferred {{attackChainVerifiedPreferred}} \
+          '{
+            source: "direct_scan",
+            target: $target,
+            workspace: $workspace,
+            verified_preferred: $verified_preferred,
+            summary: {
+              total_findings: 0,
+              verified_findings: 0,
+              candidate_findings: 0,
+              false_positive_findings: 0
+            },
+            verified_findings: [],
+            candidate_findings: [],
+            false_positive_samples: []
+          }' > "$ATTACK_INPUT" 2>/dev/null || printf '%s\n' '{}' > "$ATTACK_INPUT"
       fi
+
+      if [ ! -s "$INPUT_DIR/confirmed-vulns.txt" ]; then
+        if [ -f "{{nucleiCriticalFile}}" ]; then
+          head -10 "{{nucleiCriticalFile}}" >> "$INPUT_DIR/confirmed-vulns.txt" 2>/dev/null || true
+        fi
+        if [ -f "{{nucleiHighFile}}" ]; then
+          head -5 "{{nucleiHighFile}}" >> "$INPUT_DIR/confirmed-vulns.txt" 2>/dev/null || true
+        fi
+      fi
+
+      if [ ! -s "$INPUT_DIR/confirmed-vulns.txt" ] && [ -f "{{confirmedUrlsFile}}" ]; then
+        awk 'NF { print "confirmed-url | " $0 " | severity=high" }' "{{confirmedUrlsFile}}" 2>/dev/null | awk 'NF && !seen[$0]++' > "$INPUT_DIR/confirmed-vulns.txt" || true
+      fi
+
+      if [ -f "{{fingerprintFile}}" ]; then
+        head -5 "{{fingerprintFile}}" | jq -r 'if (.tech // []) | length > 0 then "Tech: " + (.tech | join(", ")) else empty end' 2>/dev/null > "$INPUT_DIR/tech-stack.txt" || true
+      fi
+
+      if [ -f "$ACTIVE_SEMANTIC_FILE" ] && jq empty "$ACTIVE_SEMANTIC_FILE" 2>/dev/null; then
+        jq -r '.results[0:8][]? | [
+          (.source_type // .source // "semantic"),
+          (.target // .title // "unknown"),
+          (.category // "general"),
+          ("severity=" + ((.severity_hint // "info") | tostring)),
+          (.content // .snippet // "")
+        ] | @tsv' "$ACTIVE_SEMANTIC_FILE" > "$INPUT_DIR/semantic-context.txt" 2>/dev/null || true
+      fi
+
+      if [ ! -s "$INPUT_DIR/semantic-context.txt" ] && text_has_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE"; then
+        awk 'NF { print "semantic-priority\t" $0 "\tpriority-target\tseverity=unknown\t" }' "$ACTIVE_SEMANTIC_PRIORITY_FILE" | head -12 > "$INPUT_DIR/semantic-context.txt" || true
+      fi
+
+      {
+        if [ -f "$ACTIVE_VECTOR_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null; then
+          jq -r '.[]? | [
+            "vector-kb",
+            (.title // .source_path // "unknown"),
+            (.section // "general"),
+            ("score=" + (((.relevance_score // .score) // 0) | tostring)),
+            (.snippet // .content // "")
+          ] | @tsv' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || true
+        fi
+        if [ -f "$ACTIVE_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null; then
+          jq -r '.[]? | [
+            (.source // "knowledge"),
+            (.title // .source_path // "unknown"),
+            (.section // "general"),
+            ("score=" + (((.relevance_score // .score) // 0) | tostring)),
+            (.snippet // .content // "")
+          ] | @tsv' "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null || true
+        fi
+      } | awk 'NF && !seen[$0]++' | head -12 > "$INPUT_DIR/knowledge-context.txt" || true
 
       for file in "{{nucleiCriticalFile}}" "{{nucleiHighFile}}" "{{sqliFile}}" "{{takeoverFile}}" "{{secretsFile}}" "{{confirmedUrlsFile}}"; do
         if [ ! -f "$file" ]; then
@@ -174,6 +437,40 @@ steps:
           : > "$file"
         fi
       done
+
+      CONFIRMED_VULN_COUNT=$(count_lines "$INPUT_DIR/confirmed-vulns.txt")
+      SEMANTIC_CONTEXT_COUNT=$(count_lines "$INPUT_DIR/semantic-context.txt")
+      KNOWLEDGE_CONTEXT_COUNT=$(count_lines "$INPUT_DIR/knowledge-context.txt")
+
+      jq -n \
+        --arg semantic_file "$ACTIVE_SEMANTIC_FILE" \
+        --arg semantic_priority_file "$ACTIVE_SEMANTIC_PRIORITY_FILE" \
+        --arg knowledge_file "$ACTIVE_KNOWLEDGE_FILE" \
+        --arg vector_knowledge_file "$ACTIVE_VECTOR_KNOWLEDGE_FILE" \
+        '{
+          semantic_search: $semantic_file,
+          semantic_priority_targets: $semantic_priority_file,
+          knowledge_search: $knowledge_file,
+          vector_knowledge_search: $vector_knowledge_file
+        }' > "$INPUT_DIR/active-inputs.json" 2>/dev/null || printf '%s\n' '{}' > "$INPUT_DIR/active-inputs.json"
+
+      jq -n \
+        --arg confirmed_vulns_file "$INPUT_DIR/confirmed-vulns.txt" \
+        --arg tech_stack_file "$INPUT_DIR/tech-stack.txt" \
+        --arg semantic_context_file "$INPUT_DIR/semantic-context.txt" \
+        --arg knowledge_context_file "$INPUT_DIR/knowledge-context.txt" \
+        --argjson confirmed_vuln_count "$CONFIRMED_VULN_COUNT" \
+        --argjson semantic_context_count "$SEMANTIC_CONTEXT_COUNT" \
+        --argjson knowledge_context_count "$KNOWLEDGE_CONTEXT_COUNT" \
+        '{
+          confirmed_vulns_file: $confirmed_vulns_file,
+          tech_stack_file: $tech_stack_file,
+          semantic_context_file: $semantic_context_file,
+          knowledge_context_file: $knowledge_context_file,
+          confirmed_vuln_count: $confirmed_vuln_count,
+          semantic_context_count: $semantic_context_count,
+          knowledge_context_count: $knowledge_context_count
+        }' > "$INPUT_DIR/prepared-context.json" 2>/dev/null || printf '%s\n' '{}' > "$INPUT_DIR/prepared-context.json"
 
       # 追加原始高危输入，作为 verified 不足时的回退上下文
       jq \
@@ -184,7 +481,7 @@ steps:
         --rawfile secrets "{{secretsFile}}" \
         --rawfile confirmed "{{confirmedUrlsFile}}" \
         '
-          .raw_inputs = {
+          {
             critical_lines: ($critical | split("\n") | map(select(length > 0))),
             high_lines: ($high | split("\n") | map(select(length > 0))),
             sqli_lines: ($sqli | split("\n") | map(select(length > 0))),
@@ -192,17 +489,62 @@ steps:
             secrets_lines: ($secrets | split("\n") | map(select(length > 0))),
             confirmed_urls: ($confirmed | split("\n") | map(select(length > 0)))
           }
-        ' "$ATTACK_INPUT" > "$ATTACK_INPUT.tmp" && mv "$ATTACK_INPUT.tmp" "$ATTACK_INPUT"
+        ' > "$INPUT_DIR/raw-inputs.json" 2>/dev/null || printf '%s\n' '{}' > "$INPUT_DIR/raw-inputs.json"
+
+      if jq -s '
+        (.[0] // {})
+        * {
+          active_inputs: (.[1] // {}),
+          prepared_context: (.[2] // {}),
+          raw_inputs: (.[3] // {})
+        }
+      ' "$ATTACK_INPUT" "$INPUT_DIR/active-inputs.json" "$INPUT_DIR/prepared-context.json" "$INPUT_DIR/raw-inputs.json" > "$ATTACK_INPUT.tmp"; then
+        mv "$ATTACK_INPUT.tmp" "$ATTACK_INPUT"
+      else
+        cp "$ATTACK_INPUT" "$ATTACK_INPUT.tmp" 2>/dev/null || true
+        mv "$ATTACK_INPUT.tmp" "$ATTACK_INPUT" 2>/dev/null || true
+      fi
 
       # 统计可用的漏洞数据
-      CHAIN_INPUT_SIZE=$(wc -c < "$ATTACK_INPUT" 2>/dev/null || echo 0)
-      echo "[INFO] [Attack Chain] Input data size: $CHAIN_INPUT_SIZE bytes"
+      CHAIN_INPUT_SIZE=$(count_bytes "$ATTACK_INPUT")
+      CONFIRMED_COUNT=$(count_lines "$INPUT_DIR/confirmed-vulns.txt")
+      SEMANTIC_SIZE=$(count_lines "$INPUT_DIR/semantic-context.txt")
+      KNOWLEDGE_SIZE=$(count_lines "$INPUT_DIR/knowledge-context.txt")
+      echo "[INFO] [Attack Chain] Input prepared: bytes=$CHAIN_INPUT_SIZE confirmed=$CONFIRMED_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      rm -f "$CONFIRMED_FINDINGS_TMP" "$VALIDATED_FINDINGS_TMP" "$INPUT_DIR/active-inputs.json" "$INPUT_DIR/prepared-context.json" "$INPUT_DIR/raw-inputs.json" 2>/dev/null || true
+
+  - name: check-attack-chain-data
+    type: bash
+    pre_condition: "{{enableAttackChain}}"
+    command: |
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      echo "[INFO] [Attack Chain] Checking prepared attack-chain data..."
+
+      CONFIRMED_SIZE=$(count_lines "{{Output}}/ai-analysis/.input/confirmed-vulns.txt")
+
+      if [ "$CONFIRMED_SIZE" -eq 0 ]; then
+        echo "[WARN] [Attack Chain] Insufficient data for attack chain analysis"
+        echo '{"error": "no_data", "attack_chain_summary": {"total_chains": 0}, "attack_chains": [], "critical_paths": []}' > {{attackChainOutput}}
+        echo "SKIP_AI=true" > {{Output}}/ai-analysis/.attack-chain-skip
+        exit 0
+      fi
+
+      rm -f {{Output}}/ai-analysis/.attack-chain-skip 2>/dev/null || true
+      echo "[INFO] [Attack Chain] Proceeding with attack chain analysis"
 
   - name: ai-analyze-attack-chains
     type: agent-acp
     agent: claude-code
     timeout: "{{agentTimeout}}"
-    pre_condition: "{{enableAttackChain}}"
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
     on_error:
       - action: continue
         log: "Attack chain analysis failed, continuing with empty results"
@@ -227,41 +569,23 @@ steps:
         content: |
           请分析目标 {{Target}} 的漏洞数据，识别可串联的攻击链。
 
-          ## 技术栈
-          请使用 read_lines 工具读取 {{fingerprintFile}}
-
-          ## 预处理后的攻击链输入（主输入）
+          ## 标准化攻击链上下文（主输入）
           请使用 read_lines 工具读取 {{attackChainPreparedInput}}
 
-          ## 已验证漏洞（优先使用）
-          请使用 read_lines 工具读取 {{vulnValidationFile}}
+          ## 已验证/已确认漏洞摘要
+          请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/confirmed-vulns.txt
 
-          ## Critical 漏洞
-          请使用 read_lines 工具读取 {{nucleiCriticalFile}}
+          ## 技术栈摘要
+          请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/tech-stack.txt
 
-          ## High 漏洞
-          请使用 read_lines 工具读取 {{nucleiHighFile}}
+          ## 语义关联上下文
+          请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/semantic-context.txt
 
-          ## Secrets
-          请使用 read_lines 工具读取 {{secretsFile}}
-
-          ## SQLi
-          请使用 read_lines 工具读取 {{sqliFile}}
-
-          ## Takeover
-          请使用 read_lines 工具读取 {{takeoverFile}}
+          ## 知识库利用上下文
+          请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/knowledge-context.txt
 
           ## 已确认可利用的 URL
           请使用 read_lines 工具读取 {{confirmedUrlsFile}}
-
-          ## 早期语义搜索结果
-          请使用 read_lines 工具读取 {{semanticSearchFile}}
-
-          ## 知识库命中
-          请使用 read_lines 工具读取 {{knowledgeSearchFile}}
-
-          ## 直接 vector-kb 命中
-          请使用 read_lines 工具读取 {{vectorKnowledgeSearchFile}}
 
           请输出 JSON 格式的攻击链分析保存到 {{attackChainOutput}}：
           ```json
@@ -324,37 +648,156 @@ steps:
 
   - name: log-progress
     type: function
-    pre_condition: "{{enableAttackChain}}"
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
     functions:
       - 'log_info("[Progress] AI attack chain analysis step completed")'
 
   - name: save-attack-chain-results
     type: bash
-    pre_condition: "{{enableAttackChain}}"
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
     command: |
       echo "[INFO] [Attack Chain] Saving analysis results..."
       mkdir -p {{Output}}/ai-analysis
 
-      # 容错：处理可能的空输出
-      if [ -n "{{attack_chain_json}}" ] && [ "{{attack_chain_json}}" != "null" ] && [ "{{attack_chain_json}}" != "{}" ]; then
-        # 使用 heredoc 避免引号破坏 JSON 内容
-        cat > /tmp/ai_attack_chain_raw_$$.txt << 'AIEOF'
-        {{attack_chain_json}}
-        AIEOF
-        sed 's/```json//g; s/```//g' /tmp/ai_attack_chain_raw_$$.txt | jq '.' > {{attackChainOutput}} 2>/dev/null || cp /tmp/ai_attack_chain_raw_$$.txt {{attackChainOutput}}
-        rm -f /tmp/ai_attack_chain_raw_$$.txt
-        
-        if jq empty {{attackChainOutput}} 2>/dev/null; then
-          CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
-          CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
-          echo "[INFO] [Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
-        else
-          echo "[INFO] [Attack Chain] Warning: Invalid JSON output"
-        fi
-      else
-        echo "[INFO] [Attack Chain] No analysis data, creating empty structure"
-        echo '{"attack_chain_summary":{"total_chains":0,"critical_chains":0,"high_impact_chains":0,"most_likely_entry_points":[]},"attack_chains":[]}' > {{attackChainOutput}}
+      RAW_FILE="{{Output}}/ai-analysis/.attack-chain-acp-raw-{{TargetSpace}}.txt"
+      JSON_FILE="{{Output}}/ai-analysis/.attack-chain-acp-json-{{TargetSpace}}.json"
+      FALLBACK_LINES="{{Output}}/ai-analysis/.attack-chain-acp-fallback-lines-{{TargetSpace}}.txt"
+      FALLBACK_URLS="{{Output}}/ai-analysis/.attack-chain-acp-fallback-urls-{{TargetSpace}}.txt"
+
+      cat > "$RAW_FILE" << 'AIEOF'
+      {{attack_chain_json}}
+      AIEOF
+
+      awk '
+        BEGIN { capture = 0 }
+        /^[[:space:]]*```json[[:space:]]*$/ { capture = 1; next }
+        capture && /^[[:space:]]*```[[:space:]]*$/ { exit }
+        capture { print }
+      ' "$RAW_FILE" > "$JSON_FILE"
+
+      if [ ! -s "$JSON_FILE" ]; then
+        sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
       fi
+
+      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
+        jq '
+          .attack_chain_summary = ((.attack_chain_summary // {}) + {
+            total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+            critical_chains: (.attack_chain_summary.critical_chains // 0),
+            high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+            most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
+          })
+          | .attack_chains = (.attack_chains // [])
+          | .critical_paths = (.critical_paths // [])
+          | .defense_recommendations = (.defense_recommendations // [])
+        ' "$JSON_FILE" > {{attackChainOutput}}
+        echo "[INFO] [Attack Chain] Valid JSON extracted"
+      else
+        if [ -s "{{Output}}/ai-analysis/.input/confirmed-vulns.txt" ]; then
+          cat "{{Output}}/ai-analysis/.input/confirmed-vulns.txt" 2>/dev/null | awk 'NF && !seen[$0]++' | head -10 > "$FALLBACK_LINES" || true
+        else
+          awk 'NF { print "confirmed-url | " $0 " | severity=high" }' "{{confirmedUrlsFile}}" 2>/dev/null | awk 'NF && !seen[$0]++' | head -10 > "$FALLBACK_LINES" || true
+        fi
+
+        awk -F'|' '
+          NF >= 2 {
+            url=$2
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", url)
+            if (url ~ /^https?:\/\// && !seen[url]++) print url
+          }
+        ' "$FALLBACK_LINES" > "$FALLBACK_URLS" || true
+
+        FALLBACK_URLS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_URLS" 2>/dev/null || echo '[]')
+        jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(
+              capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
+              | select(. != null and (.url | test("^https?://")))
+              | {
+                  chain_name: ((.finding // "validated finding") + " -> manual exploitation"),
+                  url: .url,
+                  vulnerability: (.finding // "validated finding"),
+                  severity: (.severity // "high")
+                }
+            )
+        ' "$FALLBACK_LINES" > "$JSON_FILE"
+
+        jq -n \
+          --slurpfile chains "$JSON_FILE" \
+          --argjson fallback_urls "$FALLBACK_URLS_JSON" \
+          '{
+            error: "parse_failed_fallback_generated",
+            attack_chain_summary: {
+              total_chains: ($chains[0] | length),
+              critical_chains: ([$chains[0][] | select(.severity == "critical")] | length),
+              high_impact_chains: ([$chains[0][] | select(.severity == "critical" or .severity == "high")] | length),
+              most_likely_entry_points: $fallback_urls
+            },
+            attack_chains: [
+              $chains[0][] | {
+                chain_id: ("fallback-chain-" + ((.url | @base64) | gsub("[/=+]"; "") | .[0:10])),
+                chain_name: .chain_name,
+                entry_point: {
+                  vulnerability: .vulnerability,
+                  url: .url,
+                  severity: .severity,
+                  prerequisites: ["manual verification required"]
+                },
+                chain_steps: [
+                  {
+                    step: 1,
+                    action: "Validate exploitability on prioritized entry point",
+                    vulnerability: .vulnerability,
+                    result: "Confirm whether the finding is exploitable and reproducible",
+                    command: ("curl -sk \"" + .url + "\"")
+                  },
+                  {
+                    step: 2,
+                    action: "Check privilege boundary and chaining potential",
+                    vulnerability: .vulnerability,
+                    result: "Determine whether the target can lead to auth bypass, data exposure, or pivoting"
+                  }
+                ],
+                final_objective: "Confirm exploit chain feasibility for operator follow-up",
+                difficulty: "中",
+                impact: "Potential exploitation path requiring operator confirmation",
+                estimated_time: "20分钟",
+                success_probability: (if .severity == "critical" then 0.8 else 0.65 end),
+                mitigation: "Patch vulnerable surface and verify authorization boundaries"
+              }
+            ],
+            critical_paths: [
+              $chains[0][] | {
+                path: [(.vulnerability // "finding"), (.url // "target"), "manual-validation"],
+                total_risk: (if .severity == "critical" then "高" else "中" end),
+                weakness: "validated or prioritized entry point still needs operator confirmation"
+              }
+            ],
+            defense_recommendations: [
+              "Prioritize confirmed and critical entry points for retest and evidence capture",
+              "Review authorization boundaries and high-value endpoints around each entry point"
+            ]
+          }' > {{attackChainOutput}}
+        echo "[WARN] [Attack Chain] Using fallback attack chain generation"
+      fi
+
+      jq '
+        .attack_chain_summary = ((.attack_chain_summary // {}) + {
+          total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+          critical_chains: (.attack_chain_summary.critical_chains // 0),
+          high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+          most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
+        })
+        | .attack_chains = (.attack_chains // [])
+        | .critical_paths = (.critical_paths // [])
+        | .defense_recommendations = (.defense_recommendations // [])
+      ' {{attackChainOutput}} > {{attackChainOutput}}.tmp 2>/dev/null && mv {{attackChainOutput}}.tmp {{attackChainOutput}} || true
+
+      CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
+      CRITICAL=$(jq -r '.attack_chain_summary.critical_chains // 0' {{attackChainOutput}} 2>/dev/null || echo 0)
+      echo "[INFO] [Attack Chain] Total chains: $CHAIN_COUNT, Critical: $CRITICAL"
+      rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_LINES" "$FALLBACK_URLS" 2>/dev/null || true
 
   - name: extract-attack-chain-data
     type: bash
@@ -362,60 +805,59 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # 容错：检查文件是否存在
-      if [ -f "{{attackChainOutput}}" ] && jq empty {{attackChainOutput}} 2>/dev/null; then
-        jq -r '
-          .attack_chains[]? |
-          [
-            (.chain_name // .final_objective // "attack-chain"),
-            (.entry_point.url // "unknown"),
-            (.entry_point.vulnerability // "unknown"),
-            (.impact // "unknown"),
-            ("success=" + ((.success_probability // "unknown") | tostring))
-          ] | @tsv
-        ' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
 
-        jq -r '
-          .critical_paths[]? |
-          if type == "object" then
-            ((.path // []) | join(" -> ")) +
-            (if (.total_risk // "") != "" then " | risk=" + (.total_risk | tostring) else "" end) +
-            (if (.weakness // "") != "" then " | weakness=" + (.weakness | tostring) else "" end)
-          else
-            tostring
-          end
-        ' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
+      jq -r '.attack_chains[]?.entry_point.url // empty' {{attackChainOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{entryPointsFile}} || true
 
-        jq -r '
-          [
-            .attack_chain_summary.most_likely_entry_points[]?,
-            .attack_chains[]?.entry_point.url
-          ] | map(select(. != null and . != "")) | .[]
-        ' {{attackChainOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{entryPointsFile}} || true
+      jq -r '
+        .attack_chains[]? |
+        [
+          (.chain_name // .final_objective // "attack-chain"),
+          (.entry_point.url // "unknown"),
+          (.entry_point.vulnerability // "unknown"),
+          (.impact // "unknown"),
+          ("success=" + ((.success_probability // "unknown") | tostring))
+        ] | @tsv
+      ' {{attackChainOutput}} 2>/dev/null > {{attackChainsFile}} || true
 
-        cp {{entryPointsFile}} {{bestPathTargetsFile}} 2>/dev/null || touch {{bestPathTargetsFile}}
+      jq -r '
+        .critical_paths[]? |
+        if type == "object" then
+          ((.path // []) | join(" -> ")) +
+          (if (.total_risk // "") != "" then " | risk=" + (.total_risk | tostring) else "" end)
+        else
+          tostring
+        end
+      ' {{attackChainOutput}} 2>/dev/null > {{criticalPathsFile}} || true
 
-        jq -r '
-          .attack_chains[]? |
-          [
-            (.entry_point.vulnerability // "unknown"),
-            (.entry_point.url // "unknown"),
-            ("severity=" + (.entry_point.severity // "unknown")),
-            ("objective=" + (.final_objective // "unknown"))
-          ] | join(" | ")
-        ' {{attackChainOutput}} 2>/dev/null > {{mustVerifyVulnsFile}} || true
+      {
+        jq -r '.attack_chain_summary.most_likely_entry_points[]? // empty' {{attackChainOutput}} 2>/dev/null
+        cat {{entryPointsFile}} 2>/dev/null
+      } | awk 'NF && !seen[$0]++' > {{bestPathTargetsFile}} || true
 
-        awk -F/ 'NF >= 3 { print $3 }' {{bestPathTargetsFile}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{pivotAssetsFile}} || true
-      else
-        echo "# No attack chain data" > {{attackChainsFile}}
-        echo "# No critical paths" > {{criticalPathsFile}}
-        touch {{entryPointsFile}}
-        touch {{bestPathTargetsFile}}
-        touch {{mustVerifyVulnsFile}}
-        touch {{pivotAssetsFile}}
-      fi
+      jq -r '
+        .attack_chains[]? |
+        [
+          (.entry_point.vulnerability // "unknown"),
+          (.entry_point.url // "unknown"),
+          ("severity=" + (.entry_point.severity // "unknown")),
+          ("objective=" + (.final_objective // "unknown"))
+        ] | join(" | ")
+      ' {{attackChainOutput}} 2>/dev/null > {{mustVerifyVulnsFile}} || true
 
-      echo "[INFO] [Attack Chain] Extraction complete"
+      awk -F/ 'NF >= 3 { print $3 }' {{bestPathTargetsFile}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{pivotAssetsFile}} || true
+
+      ENTRY_COUNT=$(count_lines "{{entryPointsFile}}")
+      BEST_COUNT=$(count_lines "{{bestPathTargetsFile}}")
+      MUST_VERIFY_COUNT=$(count_lines "{{mustVerifyVulnsFile}}")
+      echo "[INFO] [Attack Chain] Extracted entry_points=$ENTRY_COUNT best_targets=$BEST_COUNT must_verify=$MUST_VERIFY_COUNT"
 
   - name: import-attack-chain-report
     type: function

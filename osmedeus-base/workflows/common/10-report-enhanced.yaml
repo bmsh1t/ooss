@@ -169,6 +169,20 @@ steps:
         awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
       }
 
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      valid_json_file() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1
+      }
+
       count_lines() {
         file="$1"
         if [ -f "$file" ]; then
@@ -187,14 +201,26 @@ steps:
         fi
       done
 
-      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      ACTIVE_SEMANTIC_SEARCH_FILE=""
       for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
         [ -n "$candidate" ] || continue
-        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+        if semantic_hits "$candidate"; then
           ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
           break
         fi
       done
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+          [ -n "$candidate" ] || continue
+          if valid_json_file "$candidate"; then
+            ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+            break
+          fi
+        done
+      fi
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      fi
 
       TOTAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns;" 2>/dev/null || echo 0)
       CRITICAL=$(sqlite3 {{vulnDbFile}} "SELECT COUNT(*) FROM vulns WHERE severity='critical';" 2>/dev/null || echo 0)
@@ -219,7 +245,7 @@ steps:
       CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' "{{campaignCreateFile}}" 2>/dev/null || echo 0)
       RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummaryFile}}" 2>/dev/null || echo not_requested)
       RETEST_QUEUED_TARGETS=$(jq -r '.queued_targets // 0' "{{retestQueueSummaryFile}}" 2>/dev/null || echo 0)
-      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
+      SEMANTIC_RESULTS=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
       SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
 
       {
