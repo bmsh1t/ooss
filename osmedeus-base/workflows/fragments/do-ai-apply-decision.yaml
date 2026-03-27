@@ -16,6 +16,52 @@ params:
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: preDecisionOutput
     default: "{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
+  - name: previousFollowupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_targets
+    default: ""
+  - name: previous_followup_focus_areas
+    default: ""
+  - name: previous_followup_manual_first_targets
+    default: ""
+  - name: previous_followup_high_confidence_targets
+    default: ""
+  - name: previous_followup_reasoning
+    default: ""
+  - name: previous_followup_scan_profile
+    default: ""
+  - name: previous_followup_severity
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_next_phase
+    default: ""
+  - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_manual_followup_needed
+    default: ""
+  - name: previous_followup_campaign_followup_recommended
+    default: ""
+  - name: previous_followup_queue_followup_effective
+    default: ""
+  - name: previous_followup_escalation_score
+    default: ""
+  - name: previous_followup_campaign_create_status
+    default: ""
+  - name: previous_followup_campaign_create_id
+    default: ""
+  - name: previous_followup_campaign_create_queued_runs
+    default: ""
+  - name: previous_followup_manual_first_targets_list
+    default: ""
+  - name: previous_followup_high_confidence_targets_list
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
   - name: appliedDecisionOutput
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
   - name: dynamicConfigOutput
@@ -45,6 +91,41 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
 
+      normalize_int() {
+        value="$1"
+        case "$value" in
+          ''|*[!0-9]*)
+            echo 0
+            ;;
+          *)
+            echo "$value"
+            ;;
+        esac
+      }
+
+      normalize_bool() {
+        value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+        case "$value" in
+          1|true|yes|y|on)
+            echo true
+            ;;
+          *)
+            echo false
+            ;;
+        esac
+      }
+
+      csv_or_json_to_array() {
+        value="$1"
+        if [ -z "$value" ]; then
+          echo '[]'
+        elif printf '%s' "$value" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          printf '%s' "$value"
+        else
+          printf '%s' "$value" | jq -R 'split(",") | reduce .[] as $item ([]; ($item | gsub("^\\s+|\\s+$"; "")) as $normalized | if ($normalized != "" and (index($normalized) == null)) then . + [$normalized] else . end)'
+        fi
+      }
+
       DECISION_FILE=""
       DECISION_SOURCE="defaults"
       if [ -f "{{decisionOutput}}" ] && jq empty "{{decisionOutput}}" 2>/dev/null; then
@@ -68,6 +149,34 @@ steps:
       FOCUS_JSON='[]'
       PRIORITY_JSON='[]'
       RESCAN_JSON='[]'
+      FOLLOWUP_AVAILABLE="false"
+      FOLLOWUP_SOURCE_KIND="none"
+      FOLLOWUP_SOURCE_FILE="{{previousFollowupDecisionFile}}"
+      FOLLOWUP_TARGET_COUNT=0
+      FOLLOWUP_REASONING=""
+      FOLLOWUP_SCAN_PROFILE=""
+      FOLLOWUP_SEVERITY=""
+      FOLLOWUP_NEXT_PHASE=""
+      FOLLOWUP_PRIORITY_MODE=""
+      FOLLOWUP_CONFIDENCE_LEVEL=""
+      FOLLOWUP_ESCALATION_SCORE=0
+      FOLLOWUP_CAMPAIGN_CREATE_STATUS=""
+      FOLLOWUP_CAMPAIGN_CREATE_ID=""
+      FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS=0
+      FOLLOWUP_REUSE_SOURCES_JSON='[]'
+      FOLLOWUP_MANUAL_FOLLOWUP_NEEDED=false
+      FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED=false
+      FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE=false
+      FOLLOWUP_FOCUS_JSON='[]'
+      FOLLOWUP_PRIORITY_JSON='[]'
+      FOLLOWUP_RESCAN_JSON='[]'
+      FOLLOWUP_MANUAL_JSON='[]'
+      FOLLOWUP_HIGH_CONFIDENCE_JSON='[]'
+      FOLLOWUP_COMBINED_JSON='[]'
+      FOLLOWUP_FOCUS_COUNT=0
+      FOLLOWUP_PRIORITY_COUNT=0
+      FOLLOWUP_MANUAL_COUNT=0
+      FOLLOWUP_HIGH_CONFIDENCE_COUNT=0
 
       if [ -n "$DECISION_FILE" ]; then
         SEVERITY=$(jq -r '.nuclei_severity // "critical,high"' "$DECISION_FILE" 2>/dev/null || echo "critical,high")
@@ -82,6 +191,275 @@ steps:
         FOCUS_JSON=$(jq -c '.focus_areas // []' "$DECISION_FILE" 2>/dev/null || echo '[]')
         PRIORITY_JSON=$(jq -c '.priority_targets // []' "$DECISION_FILE" 2>/dev/null || echo '[]')
         RESCAN_JSON=$(jq -c '.rescan_targets // []' "$DECISION_FILE" 2>/dev/null || echo '[]')
+      fi
+
+      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        FOLLOWUP_AVAILABLE="true"
+        FOLLOWUP_SOURCE_KIND="decision-file"
+        FOLLOWUP_REASONING=$(jq -r '.seed_focus.reasoning // .base_decision.reasoning // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_SCAN_PROFILE=$(jq -r '.seed_focus.scan_profile // .base_decision.profile // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_SEVERITY=$(jq -r '.seed_focus.severity // .base_decision.severity // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_NEXT_PHASE=$(jq -r '.seed_focus.next_phase // .execution_feedback.next_phase // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_CAMPAIGN_CREATE_STATUS=$(jq -r '.followup_summary.campaign_create_status // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_CAMPAIGN_CREATE_ID=$(jq -r '.followup_summary.campaign_create_id // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.followup_summary.campaign_create_queued_runs // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_REUSE_SOURCES_JSON=$(jq -c '.seed_focus.reuse_sources // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        FOLLOWUP_FOCUS_JSON=$(jq -c '((.seed_targets.focus_areas // .refined_targets.focus_areas // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_MANUAL_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.rescan_critical_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_HIGH_CONFIDENCE_JSON=$(jq -c '((.seed_targets.high_confidence_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_high_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_PRIORITY_JSON=$(jq -c '((.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_RESCAN_JSON=$(jq -c '((.seed_targets.rescan_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.refined_targets.focus_areas // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_COMBINED_JSON="$FOLLOWUP_RESCAN_JSON"
+        FOLLOWUP_TARGET_COUNT=$(jq -r '[((.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]?] | map(select(. != null and . != "")) | unique | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_FOCUS_COUNT=$(jq -r '[((.seed_targets.focus_areas // .refined_targets.focus_areas // []))[]?] | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_PRIORITY_COUNT=$(jq -r '[((.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]?] | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_MANUAL_COUNT=$(printf '%s\n' "$FOLLOWUP_MANUAL_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        FOLLOWUP_HIGH_CONFIDENCE_COUNT=$(printf '%s\n' "$FOLLOWUP_HIGH_CONFIDENCE_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+
+        if [ -z "$DECISION_FILE" ]; then
+          DECISION_SOURCE="previous-followup"
+          DECISION_FILE="{{previousFollowupDecisionFile}}"
+          SEVERITY=$(jq -r '.seed_focus.severity // .base_decision.severity // "critical,high"' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "critical,high")
+          FOLLOWUP_SCAN_PROFILE=$(jq -r '.seed_focus.scan_profile // .base_decision.profile // "focused"' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "focused")
+          case "$FOLLOWUP_SCAN_PROFILE" in
+            aggressive)
+              THREADS=15
+              RATE_LIMIT=50
+              TIMEOUT="8h"
+              ;;
+            balanced)
+              THREADS=12
+              RATE_LIMIT=40
+              TIMEOUT="6h"
+              ;;
+            *)
+              THREADS=10
+              RATE_LIMIT=30
+              TIMEOUT="6h"
+              ;;
+          esac
+          if [ "$FOLLOWUP_PRIORITY_MODE" = "manual-first" ] || [ "$FOLLOWUP_CONFIDENCE_LEVEL" = "high" ] || [ "${FOLLOWUP_ESCALATION_SCORE:-0}" -ge 12 ] 2>/dev/null; then
+            [ "$THREADS" -lt 15 ] 2>/dev/null && THREADS=15
+            [ "$RATE_LIMIT" -lt 50 ] 2>/dev/null && RATE_LIMIT=50
+            TIMEOUT="8h"
+          elif [ "$FOLLOWUP_PRIORITY_MODE" = "campaign-first" ] || [ "$FOLLOWUP_PRIORITY_MODE" = "retest-first" ] || [ "$FOLLOWUP_CONFIDENCE_LEVEL" = "medium" ] || [ "${FOLLOWUP_ESCALATION_SCORE:-0}" -ge 6 ] 2>/dev/null; then
+            [ "$THREADS" -lt 12 ] 2>/dev/null && THREADS=12
+            [ "$RATE_LIMIT" -lt 40 ] 2>/dev/null && RATE_LIMIT=40
+          fi
+          REASONING=$(jq -r '.seed_focus.reasoning // .base_decision.reasoning // "Applied previous followup decision"' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "Applied previous followup decision")
+          DECISION_INPUTS=$(jq -c '{
+            previous_followup_priority_count: ([((.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]?] | length),
+            previous_followup_focus_count: ([((.seed_targets.focus_areas // .refined_targets.focus_areas // []))[]?] | length),
+            previous_followup_targets: ([((.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]?] | map(select(. != null and . != "")) | unique | length),
+            previous_followup_source_kind: "decision-file",
+            previous_followup_next_phase: (.seed_focus.next_phase // .execution_feedback.next_phase // ""),
+            previous_followup_reasoning: (.seed_focus.reasoning // .base_decision.reasoning // ""),
+            previous_followup_scan_profile: (.seed_focus.scan_profile // .base_decision.profile // ""),
+            previous_followup_severity: (.seed_focus.severity // .base_decision.severity // ""),
+            previous_followup_priority_mode: (.seed_focus.priority_mode // ""),
+            previous_followup_confidence_level: (.seed_focus.confidence_level // ""),
+            previous_followup_escalation_score: (.seed_focus.signal_scores.escalation_score // 0),
+            previous_followup_campaign_create_status: (.followup_summary.campaign_create_status // ""),
+            previous_followup_campaign_create_id: (.followup_summary.campaign_create_id // ""),
+            previous_followup_campaign_create_queued_runs: (.followup_summary.campaign_create_queued_runs // 0),
+            previous_followup_reuse_sources: (.seed_focus.reuse_sources // []),
+            previous_followup_manual_followup_needed: (.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false),
+            previous_followup_campaign_followup_recommended: (.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false),
+            previous_followup_queue_followup_effective: (.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false),
+            previous_followup_manual_first_count: ([((.seed_targets.manual_first_targets // []))[]?] | length),
+            previous_followup_high_confidence_count: ([((.seed_targets.high_confidence_targets // []))[]?] | length)
+          }' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '{}')
+          FOCUS_JSON="$FOLLOWUP_FOCUS_JSON"
+          PRIORITY_JSON="$FOLLOWUP_PRIORITY_JSON"
+          RESCAN_JSON="$FOLLOWUP_RESCAN_JSON"
+        fi
+      else
+        FOLLOWUP_PARAM_TARGET_COUNT=$(normalize_int "{{previous_followup_targets}}")
+        FOLLOWUP_PARAM_PRIORITY_COUNT=$(normalize_int "{{previous_followup_priority_targets}}")
+        FOLLOWUP_PARAM_FOCUS_COUNT=$(normalize_int "{{previous_followup_focus_areas}}")
+        FOLLOWUP_PARAM_MANUAL_COUNT=$(normalize_int "{{previous_followup_manual_first_targets}}")
+        FOLLOWUP_PARAM_HIGH_CONFIDENCE_COUNT=$(normalize_int "{{previous_followup_high_confidence_targets}}")
+        FOLLOWUP_PARAM_REASONING="{{previous_followup_reasoning}}"
+        FOLLOWUP_PARAM_SCAN_PROFILE="{{previous_followup_scan_profile}}"
+        FOLLOWUP_PARAM_SEVERITY="{{previous_followup_severity}}"
+        FOLLOWUP_PARAM_PRIORITY_MODE="{{previous_followup_priority_mode}}"
+        FOLLOWUP_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
+        FOLLOWUP_PARAM_NEXT_PHASE="{{previous_followup_next_phase}}"
+        FOLLOWUP_PARAM_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
+        FOLLOWUP_PARAM_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "{{previous_followup_manual_followup_needed}}")
+        FOLLOWUP_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "{{previous_followup_campaign_followup_recommended}}")
+        FOLLOWUP_PARAM_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "{{previous_followup_queue_followup_effective}}")
+        FOLLOWUP_PARAM_ESCALATION_SCORE=$(normalize_int "{{previous_followup_escalation_score}}")
+        FOLLOWUP_PARAM_CAMPAIGN_CREATE_STATUS="{{previous_followup_campaign_create_status}}"
+        FOLLOWUP_PARAM_CAMPAIGN_CREATE_ID="{{previous_followup_campaign_create_id}}"
+        FOLLOWUP_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS=$(normalize_int "{{previous_followup_campaign_create_queued_runs}}")
+        FOLLOWUP_PARAM_MANUAL_JSON=$(csv_or_json_to_array "{{previous_followup_manual_first_targets_list}}")
+        FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON=$(csv_or_json_to_array "{{previous_followup_high_confidence_targets_list}}")
+        FOLLOWUP_PARAM_COMBINED_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
+        FOLLOWUP_PARAM_MANUAL_JSON_COUNT=$(printf '%s\n' "$FOLLOWUP_PARAM_MANUAL_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON_COUNT=$(printf '%s\n' "$FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        FOLLOWUP_PARAM_COMBINED_JSON_COUNT=$(printf '%s\n' "$FOLLOWUP_PARAM_COMBINED_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+
+        if [ "$FOLLOWUP_PARAM_TARGET_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_PRIORITY_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_FOCUS_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_MANUAL_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_HIGH_CONFIDENCE_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_MANUAL_JSON_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$FOLLOWUP_PARAM_COMBINED_JSON_COUNT" -gt 0 ] 2>/dev/null \
+          || [ -n "$FOLLOWUP_PARAM_REASONING" ] \
+          || [ -n "$FOLLOWUP_PARAM_SCAN_PROFILE" ] \
+          || [ -n "$FOLLOWUP_PARAM_SEVERITY" ] \
+          || [ -n "$FOLLOWUP_PARAM_PRIORITY_MODE" ] \
+          || [ -n "$FOLLOWUP_PARAM_CONFIDENCE_LEVEL" ] \
+          || [ -n "$FOLLOWUP_PARAM_NEXT_PHASE" ] \
+          || [ "$FOLLOWUP_PARAM_MANUAL_FOLLOWUP_NEEDED" = "true" ] \
+          || [ "$FOLLOWUP_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED" = "true" ] \
+          || [ "$FOLLOWUP_PARAM_QUEUE_FOLLOWUP_EFFECTIVE" = "true" ] \
+          || [ "$FOLLOWUP_PARAM_ESCALATION_SCORE" -gt 0 ] 2>/dev/null \
+          || [ -n "$FOLLOWUP_PARAM_CAMPAIGN_CREATE_STATUS" ] \
+          || [ -n "$FOLLOWUP_PARAM_CAMPAIGN_CREATE_ID" ] \
+          || [ "$FOLLOWUP_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
+          FOLLOWUP_AVAILABLE="true"
+          FOLLOWUP_SOURCE_KIND="queue-params"
+          FOLLOWUP_SOURCE_FILE="queue:previous_followup_*"
+          FOLLOWUP_TARGET_COUNT="$FOLLOWUP_PARAM_TARGET_COUNT"
+          FOLLOWUP_REASONING="$FOLLOWUP_PARAM_REASONING"
+          FOLLOWUP_SCAN_PROFILE="$FOLLOWUP_PARAM_SCAN_PROFILE"
+          FOLLOWUP_SEVERITY="$FOLLOWUP_PARAM_SEVERITY"
+          FOLLOWUP_NEXT_PHASE="$FOLLOWUP_PARAM_NEXT_PHASE"
+          FOLLOWUP_PRIORITY_MODE="$FOLLOWUP_PARAM_PRIORITY_MODE"
+          FOLLOWUP_CONFIDENCE_LEVEL="$FOLLOWUP_PARAM_CONFIDENCE_LEVEL"
+          FOLLOWUP_ESCALATION_SCORE="$FOLLOWUP_PARAM_ESCALATION_SCORE"
+          FOLLOWUP_CAMPAIGN_CREATE_STATUS="$FOLLOWUP_PARAM_CAMPAIGN_CREATE_STATUS"
+          FOLLOWUP_CAMPAIGN_CREATE_ID="$FOLLOWUP_PARAM_CAMPAIGN_CREATE_ID"
+          FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS="$FOLLOWUP_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS"
+          FOLLOWUP_REUSE_SOURCES_JSON="$FOLLOWUP_PARAM_REUSE_SOURCES_JSON"
+          FOLLOWUP_MANUAL_FOLLOWUP_NEEDED="$FOLLOWUP_PARAM_MANUAL_FOLLOWUP_NEEDED"
+          FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED="$FOLLOWUP_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+          FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE="$FOLLOWUP_PARAM_QUEUE_FOLLOWUP_EFFECTIVE"
+          FOLLOWUP_FOCUS_COUNT="$FOLLOWUP_PARAM_FOCUS_COUNT"
+          FOLLOWUP_PRIORITY_COUNT="$FOLLOWUP_PARAM_PRIORITY_COUNT"
+          FOLLOWUP_MANUAL_COUNT="$FOLLOWUP_PARAM_MANUAL_COUNT"
+          FOLLOWUP_HIGH_CONFIDENCE_COUNT="$FOLLOWUP_PARAM_HIGH_CONFIDENCE_COUNT"
+          FOLLOWUP_MANUAL_JSON="$FOLLOWUP_PARAM_MANUAL_JSON"
+          FOLLOWUP_HIGH_CONFIDENCE_JSON="$FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON"
+          FOLLOWUP_COMBINED_JSON="$FOLLOWUP_PARAM_COMBINED_JSON"
+          if [ "$FOLLOWUP_MANUAL_COUNT" -eq 0 ] 2>/dev/null; then
+            FOLLOWUP_MANUAL_COUNT="$FOLLOWUP_PARAM_MANUAL_JSON_COUNT"
+          fi
+          if [ "$FOLLOWUP_HIGH_CONFIDENCE_COUNT" -eq 0 ] 2>/dev/null; then
+            FOLLOWUP_HIGH_CONFIDENCE_COUNT="$FOLLOWUP_PARAM_HIGH_CONFIDENCE_JSON_COUNT"
+          fi
+          if [ "$FOLLOWUP_TARGET_COUNT" -eq 0 ] 2>/dev/null; then
+            FOLLOWUP_TARGET_COUNT="$FOLLOWUP_PARAM_COMBINED_JSON_COUNT"
+          fi
+          if [ -z "$FOLLOWUP_COMBINED_JSON" ] || [ "$FOLLOWUP_COMBINED_JSON" = "[]" ]; then
+            FOLLOWUP_COMBINED_JSON=$(jq -n \
+              --argjson manual "$FOLLOWUP_MANUAL_JSON" \
+              --argjson high "$FOLLOWUP_HIGH_CONFIDENCE_JSON" \
+              '($manual + $high)
+                | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)')
+          fi
+          FOLLOWUP_FOCUS_JSON="$FOLLOWUP_COMBINED_JSON"
+          FOLLOWUP_PRIORITY_JSON="$FOLLOWUP_COMBINED_JSON"
+          FOLLOWUP_RESCAN_JSON="$FOLLOWUP_COMBINED_JSON"
+          if [ "$FOLLOWUP_FOCUS_COUNT" -eq 0 ] 2>/dev/null; then
+            FOLLOWUP_FOCUS_COUNT=$(printf '%s\n' "$FOLLOWUP_FOCUS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+          fi
+          if [ "$FOLLOWUP_PRIORITY_COUNT" -eq 0 ] 2>/dev/null; then
+            FOLLOWUP_PRIORITY_COUNT=$(printf '%s\n' "$FOLLOWUP_PRIORITY_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+          fi
+        fi
+
+        if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -z "$DECISION_FILE" ]; then
+          DECISION_SOURCE="previous-followup-params"
+          DECISION_FILE="queue:previous_followup_*"
+          [ -n "$FOLLOWUP_SEVERITY" ] && SEVERITY="$FOLLOWUP_SEVERITY"
+          [ -z "$SEVERITY" ] && SEVERITY="critical,high"
+          case "${FOLLOWUP_SCAN_PROFILE:-focused}" in
+            aggressive)
+              THREADS=15
+              RATE_LIMIT=50
+              TIMEOUT="8h"
+              ;;
+            balanced)
+              THREADS=12
+              RATE_LIMIT=40
+              TIMEOUT="6h"
+              ;;
+            *)
+              THREADS=10
+              RATE_LIMIT=30
+              TIMEOUT="6h"
+              ;;
+          esac
+          if [ "$FOLLOWUP_PRIORITY_MODE" = "manual-first" ] || [ "$FOLLOWUP_CONFIDENCE_LEVEL" = "high" ] || [ "${FOLLOWUP_ESCALATION_SCORE:-0}" -ge 12 ] 2>/dev/null; then
+            [ "$THREADS" -lt 15 ] 2>/dev/null && THREADS=15
+            [ "$RATE_LIMIT" -lt 50 ] 2>/dev/null && RATE_LIMIT=50
+            TIMEOUT="8h"
+          elif [ "$FOLLOWUP_PRIORITY_MODE" = "campaign-first" ] || [ "$FOLLOWUP_PRIORITY_MODE" = "retest-first" ] || [ "$FOLLOWUP_CONFIDENCE_LEVEL" = "medium" ] || [ "${FOLLOWUP_ESCALATION_SCORE:-0}" -ge 6 ] 2>/dev/null; then
+            [ "$THREADS" -lt 12 ] 2>/dev/null && THREADS=12
+            [ "$RATE_LIMIT" -lt 40 ] 2>/dev/null && RATE_LIMIT=40
+          fi
+          REASONING="${FOLLOWUP_REASONING:-Applied previous followup queue params}"
+          DECISION_INPUTS=$(jq -n \
+            --argjson previous_followup_priority_count "$FOLLOWUP_PRIORITY_COUNT" \
+            --argjson previous_followup_focus_count "$FOLLOWUP_FOCUS_COUNT" \
+            --argjson previous_followup_targets "$FOLLOWUP_TARGET_COUNT" \
+            --arg previous_followup_source_kind "$FOLLOWUP_SOURCE_KIND" \
+            --arg previous_followup_next_phase "$FOLLOWUP_NEXT_PHASE" \
+            --arg previous_followup_reasoning "$FOLLOWUP_REASONING" \
+            --arg previous_followup_scan_profile "$FOLLOWUP_SCAN_PROFILE" \
+            --arg previous_followup_severity "$FOLLOWUP_SEVERITY" \
+            --arg previous_followup_priority_mode "$FOLLOWUP_PRIORITY_MODE" \
+            --arg previous_followup_confidence_level "$FOLLOWUP_CONFIDENCE_LEVEL" \
+            --argjson previous_followup_escalation_score "$FOLLOWUP_ESCALATION_SCORE" \
+            --arg previous_followup_campaign_create_status "$FOLLOWUP_CAMPAIGN_CREATE_STATUS" \
+            --arg previous_followup_campaign_create_id "$FOLLOWUP_CAMPAIGN_CREATE_ID" \
+            --argjson previous_followup_campaign_create_queued_runs "$FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS" \
+            --argjson previous_followup_reuse_sources "$FOLLOWUP_REUSE_SOURCES_JSON" \
+            --argjson previous_followup_manual_followup_needed "$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED" \
+            --argjson previous_followup_campaign_followup_recommended "$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+            --argjson previous_followup_queue_followup_effective "$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE" \
+            --argjson previous_followup_manual_first_count "$FOLLOWUP_MANUAL_COUNT" \
+            --argjson previous_followup_high_confidence_count "$FOLLOWUP_HIGH_CONFIDENCE_COUNT" \
+            --argjson previous_followup_manual_first_targets_list "$FOLLOWUP_MANUAL_JSON" \
+            --argjson previous_followup_high_confidence_targets_list "$FOLLOWUP_HIGH_CONFIDENCE_JSON" \
+            --argjson previous_followup_combined_targets_list "$FOLLOWUP_COMBINED_JSON" \
+            '{
+              previous_followup_priority_count: $previous_followup_priority_count,
+              previous_followup_focus_count: $previous_followup_focus_count,
+              previous_followup_targets: $previous_followup_targets,
+              previous_followup_source_kind: $previous_followup_source_kind,
+              previous_followup_next_phase: $previous_followup_next_phase,
+              previous_followup_reasoning: $previous_followup_reasoning,
+              previous_followup_scan_profile: $previous_followup_scan_profile,
+              previous_followup_severity: $previous_followup_severity,
+              previous_followup_priority_mode: $previous_followup_priority_mode,
+              previous_followup_confidence_level: $previous_followup_confidence_level,
+              previous_followup_escalation_score: $previous_followup_escalation_score,
+              previous_followup_campaign_create_status: $previous_followup_campaign_create_status,
+              previous_followup_campaign_create_id: $previous_followup_campaign_create_id,
+              previous_followup_campaign_create_queued_runs: $previous_followup_campaign_create_queued_runs,
+              previous_followup_reuse_sources: $previous_followup_reuse_sources,
+              previous_followup_manual_followup_needed: $previous_followup_manual_followup_needed,
+              previous_followup_campaign_followup_recommended: $previous_followup_campaign_followup_recommended,
+              previous_followup_queue_followup_effective: $previous_followup_queue_followup_effective,
+              previous_followup_manual_first_count: $previous_followup_manual_first_count,
+              previous_followup_high_confidence_count: $previous_followup_high_confidence_count,
+              previous_followup_manual_first_targets_list: $previous_followup_manual_first_targets_list,
+              previous_followup_high_confidence_targets_list: $previous_followup_high_confidence_targets_list,
+              previous_followup_combined_targets_list: $previous_followup_combined_targets_list
+            }')
+        fi
       fi
 
       case "$TIMEOUT" in
@@ -107,20 +485,25 @@ steps:
         --argjson focus "$FOCUS_JSON" \
         --argjson priority "$PRIORITY_JSON" \
         --argjson rescan "$RESCAN_JSON" \
+        --argjson followup_focus "$FOLLOWUP_FOCUS_JSON" \
+        --argjson followup_priority "$FOLLOWUP_PRIORITY_JSON" \
+        --argjson followup_rescan "$FOLLOWUP_RESCAN_JSON" \
+        --argjson followup_manual "$FOLLOWUP_MANUAL_JSON" \
+        --argjson followup_high_confidence "$FOLLOWUP_HIGH_CONFIDENCE_JSON" \
         '
           def clean:
-            map(select(. != null and . != "")) | unique;
+            reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end);
           {
-            focus_areas: ($focus | clean),
-            priority_targets: ($priority + $focus | clean),
-            rescan_targets: ($rescan + $priority + $focus | clean)
+            focus_areas: ($focus + $followup_focus + $followup_manual + $followup_high_confidence | clean),
+            priority_targets: ($priority + $focus + $followup_priority + $followup_focus + $followup_manual + $followup_high_confidence | clean),
+            rescan_targets: ($rescan + $priority + $focus + $followup_rescan + $followup_priority + $followup_focus + $followup_manual + $followup_high_confidence | clean)
           }
         ' > "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json"
 
       FOCUS_NORMALIZED=$(jq -c '.focus_areas' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo '[]')
       PRIORITY_NORMALIZED=$(jq -c '.priority_targets' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo '[]')
       RESCAN_NORMALIZED=$(jq -c '.rescan_targets' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo '[]')
-      FOCUS_COUNT=$(jq -r 'length' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo 0)
+      FOCUS_COUNT=$(jq -r '.focus_areas | length' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo 0)
       PRIORITY_COUNT=$(jq -r '.priority_targets | length' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo 0)
       RESCAN_COUNT=$(jq -r '.rescan_targets | length' "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || echo 0)
 
@@ -136,6 +519,88 @@ steps:
       if [ "$THREADS" -ge 15 ] 2>/dev/null || [ "$RATE_LIMIT" -ge 50 ] 2>/dev/null; then
         SCAN_PROFILE="aggressive"
       fi
+
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && { [ "$FOLLOWUP_TARGET_COUNT" -gt 0 ] 2>/dev/null || [ "$FOLLOWUP_FOCUS_COUNT" -gt 0 ] 2>/dev/null || [ "$FOLLOWUP_PRIORITY_COUNT" -gt 0 ] 2>/dev/null; }; then
+        REASONING="$REASONING + previous followup targets=$FOLLOWUP_TARGET_COUNT focus=$FOLLOWUP_FOCUS_COUNT priority=$FOLLOWUP_PRIORITY_COUNT"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_REASONING" ]; then
+        REASONING="$REASONING + followup_reasoning=$FOLLOWUP_REASONING"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_SCAN_PROFILE" ]; then
+        REASONING="$REASONING + followup_scan_profile=$FOLLOWUP_SCAN_PROFILE"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_SEVERITY" ]; then
+        REASONING="$REASONING + followup_severity=$FOLLOWUP_SEVERITY"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_NEXT_PHASE" ]; then
+        REASONING="$REASONING + previous followup next_phase=$FOLLOWUP_NEXT_PHASE"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && { [ -n "$FOLLOWUP_PRIORITY_MODE" ] || [ -n "$FOLLOWUP_CONFIDENCE_LEVEL" ]; }; then
+        REASONING="$REASONING + followup priority_mode=$FOLLOWUP_PRIORITY_MODE confidence=$FOLLOWUP_CONFIDENCE_LEVEL escalation=$FOLLOWUP_ESCALATION_SCORE"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_CAMPAIGN_CREATE_STATUS" ]; then
+        REASONING="$REASONING + campaign_create=$FOLLOWUP_CAMPAIGN_CREATE_STATUS campaign_id=$FOLLOWUP_CAMPAIGN_CREATE_ID queued_runs=$FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS"
+      fi
+      FOLLOWUP_REUSE_SOURCES=$(printf '%s\n' "$FOLLOWUP_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && [ -n "$FOLLOWUP_REUSE_SOURCES" ]; then
+        REASONING="$REASONING + reuse_sources=$FOLLOWUP_REUSE_SOURCES"
+      fi
+      if [ "$FOLLOWUP_AVAILABLE" = "true" ] && { [ "$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED" = "true" ] || [ "$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED" = "true" ] || [ "$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE" = "true" ]; }; then
+        REASONING="$REASONING + manual_followup=$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED campaign_followup=$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED queue_effective=$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE"
+      fi
+
+      DECISION_INPUTS_MERGED=$(jq -n \
+        --argjson current "$DECISION_INPUTS" \
+        --argjson followup_available "$FOLLOWUP_AVAILABLE" \
+        --arg followup_source_kind "$FOLLOWUP_SOURCE_KIND" \
+        --argjson followup_target_count "$FOLLOWUP_TARGET_COUNT" \
+        --argjson followup_focus_count "$FOLLOWUP_FOCUS_COUNT" \
+        --argjson followup_priority_count "$FOLLOWUP_PRIORITY_COUNT" \
+        --argjson followup_manual_count "$FOLLOWUP_MANUAL_COUNT" \
+        --argjson followup_high_confidence_count "$FOLLOWUP_HIGH_CONFIDENCE_COUNT" \
+        --arg followup_next_phase "$FOLLOWUP_NEXT_PHASE" \
+        --arg followup_reasoning "$FOLLOWUP_REASONING" \
+        --arg followup_scan_profile "$FOLLOWUP_SCAN_PROFILE" \
+        --arg followup_severity "$FOLLOWUP_SEVERITY" \
+        --arg followup_priority_mode "$FOLLOWUP_PRIORITY_MODE" \
+        --arg followup_confidence_level "$FOLLOWUP_CONFIDENCE_LEVEL" \
+        --argjson followup_escalation_score "$FOLLOWUP_ESCALATION_SCORE" \
+        --arg followup_campaign_create_status "$FOLLOWUP_CAMPAIGN_CREATE_STATUS" \
+        --arg followup_campaign_create_id "$FOLLOWUP_CAMPAIGN_CREATE_ID" \
+        --argjson followup_campaign_create_queued_runs "$FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS" \
+        --argjson followup_reuse_sources "$FOLLOWUP_REUSE_SOURCES_JSON" \
+        --argjson followup_manual_followup_needed "$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED" \
+        --argjson followup_campaign_followup_recommended "$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+        --argjson followup_queue_followup_effective "$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE" \
+        --argjson followup_manual_first_targets_list "$FOLLOWUP_MANUAL_JSON" \
+        --argjson followup_high_confidence_targets_list "$FOLLOWUP_HIGH_CONFIDENCE_JSON" \
+        --argjson followup_combined_targets_list "$FOLLOWUP_COMBINED_JSON" \
+        '($current // {}) + {
+          followup_available: $followup_available,
+          followup_source_kind: $followup_source_kind,
+          followup_target_count: $followup_target_count,
+          followup_focus_count: $followup_focus_count,
+          followup_priority_count: $followup_priority_count,
+          followup_manual_count: $followup_manual_count,
+          followup_high_confidence_count: $followup_high_confidence_count,
+          followup_next_phase: $followup_next_phase,
+          followup_reasoning: $followup_reasoning,
+          followup_scan_profile: $followup_scan_profile,
+          followup_severity: $followup_severity,
+          followup_priority_mode: $followup_priority_mode,
+          followup_confidence_level: $followup_confidence_level,
+          followup_escalation_score: $followup_escalation_score,
+          followup_campaign_create_status: $followup_campaign_create_status,
+          followup_campaign_create_id: $followup_campaign_create_id,
+          followup_campaign_create_queued_runs: $followup_campaign_create_queued_runs,
+          followup_reuse_sources: $followup_reuse_sources,
+          followup_manual_followup_needed: $followup_manual_followup_needed,
+          followup_campaign_followup_recommended: $followup_campaign_followup_recommended,
+          followup_queue_followup_effective: $followup_queue_followup_effective,
+          followup_manual_first_targets_list: $followup_manual_first_targets_list,
+          followup_high_confidence_targets_list: $followup_high_confidence_targets_list,
+          followup_combined_targets_list: $followup_combined_targets_list
+        }')
 
       jq -n \
         --arg generated_at "$(date -Iseconds)" \
@@ -153,13 +618,19 @@ steps:
         --argjson focus_areas "$FOCUS_NORMALIZED" \
         --argjson priority_targets "$PRIORITY_NORMALIZED" \
         --argjson rescan_targets "$RESCAN_NORMALIZED" \
-        --argjson decision_inputs "$DECISION_INPUTS" \
+        --argjson decision_inputs "$DECISION_INPUTS_MERGED" \
+        --argjson followup_available "$FOLLOWUP_AVAILABLE" \
+        --arg followup_file "$FOLLOWUP_SOURCE_FILE" \
+        --arg followup_source_kind "$FOLLOWUP_SOURCE_KIND" \
         --arg reasoning "$REASONING" \
         '{
           generated_at: $generated_at,
           source: {
             file: $source_file,
-            kind: $source_kind
+            kind: $source_kind,
+            followup_file: $followup_file,
+            followup_source_kind: $followup_source_kind,
+            followup_used: $followup_available
           },
           scan: {
             profile: $scan_profile,
@@ -207,6 +678,21 @@ steps:
         printf 'focus_area_count: %s\n' "$(wc -l < "{{focusAreasOutput}}" 2>/dev/null || echo 0)"
         printf 'priority_target_count: %s\n' "$PRIORITY_COUNT"
         printf 'rescan_target_count: %s\n' "$(wc -l < "{{rescanTargetsOutput}}" 2>/dev/null || echo 0)"
+        printf 'followup_used: %s\n' "$FOLLOWUP_AVAILABLE"
+        printf 'followup_source_kind: %s\n' "$(printf '%s' "$FOLLOWUP_SOURCE_KIND" | sed 's/["\\]/\\&/g')"
+        printf 'followup_target_count: %s\n' "$FOLLOWUP_TARGET_COUNT"
+        printf 'followup_next_phase: %s\n' "$(printf '%s' "$FOLLOWUP_NEXT_PHASE" | sed 's/["\\]/\\&/g')"
+        printf 'followup_scan_profile: %s\n' "$(printf '%s' "$FOLLOWUP_SCAN_PROFILE" | sed 's/["\\]/\\&/g')"
+        printf 'followup_severity: %s\n' "$(printf '%s' "$FOLLOWUP_SEVERITY" | sed 's/["\\]/\\&/g')"
+        printf 'followup_priority_mode: %s\n' "$(printf '%s' "$FOLLOWUP_PRIORITY_MODE" | sed 's/["\\]/\\&/g')"
+        printf 'followup_confidence_level: %s\n' "$(printf '%s' "$FOLLOWUP_CONFIDENCE_LEVEL" | sed 's/["\\]/\\&/g')"
+        printf 'followup_campaign_create_status: %s\n' "$(printf '%s' "$FOLLOWUP_CAMPAIGN_CREATE_STATUS" | sed 's/["\\]/\\&/g')"
+        printf 'followup_campaign_create_id: %s\n' "$(printf '%s' "$FOLLOWUP_CAMPAIGN_CREATE_ID" | sed 's/["\\]/\\&/g')"
+        printf 'followup_campaign_create_queued_runs: %s\n' "$FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS"
+        printf 'followup_reuse_sources: %s\n' "$(printf '%s' "$FOLLOWUP_REUSE_SOURCES" | sed 's/["\\]/\\&/g')"
+        printf 'followup_manual_followup_needed: %s\n' "$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED"
+        printf 'followup_campaign_followup_recommended: %s\n' "$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+        printf 'followup_queue_followup_effective: %s\n' "$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE"
       } > "{{dynamicConfigOutput}}"
 
       {
@@ -221,6 +707,19 @@ steps:
         printf 'export AI_DECISION_SOURCE=%s\n' "$(printf '%s' "$DECISION_SOURCE" | sed 's/["\\]/\\&/g')"
         printf 'export AI_FOCUS_AREAS_FILE=%s\n' "$(printf '%s' "{{focusAreasOutput}}" | sed 's/["\\]/\\&/g')"
         printf 'export AI_RESCAN_TARGETS_FILE=%s\n' "$(printf '%s' "{{rescanTargetsOutput}}" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_SOURCE_KIND=%s\n' "$(printf '%s' "$FOLLOWUP_SOURCE_KIND" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_TARGET_COUNT=%s\n' "$FOLLOWUP_TARGET_COUNT"
+        printf 'export AI_FOLLOWUP_SCAN_PROFILE=%s\n' "$(printf '%s' "$FOLLOWUP_SCAN_PROFILE" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_SEVERITY=%s\n' "$(printf '%s' "$FOLLOWUP_SEVERITY" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_PRIORITY_MODE=%s\n' "$(printf '%s' "$FOLLOWUP_PRIORITY_MODE" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_CONFIDENCE_LEVEL=%s\n' "$(printf '%s' "$FOLLOWUP_CONFIDENCE_LEVEL" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_CAMPAIGN_CREATE_STATUS=%s\n' "$(printf '%s' "$FOLLOWUP_CAMPAIGN_CREATE_STATUS" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_CAMPAIGN_ID=%s\n' "$(printf '%s' "$FOLLOWUP_CAMPAIGN_CREATE_ID" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_CAMPAIGN_QUEUED_RUNS=%s\n' "$FOLLOWUP_CAMPAIGN_CREATE_QUEUED_RUNS"
+        printf 'export AI_FOLLOWUP_REUSE_SOURCES=%s\n' "$(printf '%s' "$FOLLOWUP_REUSE_SOURCES" | sed 's/["\\]/\\&/g')"
+        printf 'export AI_FOLLOWUP_MANUAL_NEEDED=%s\n' "$FOLLOWUP_MANUAL_FOLLOWUP_NEEDED"
+        printf 'export AI_FOLLOWUP_CAMPAIGN_RECOMMENDED=%s\n' "$FOLLOWUP_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+        printf 'export AI_FOLLOWUP_QUEUE_EFFECTIVE=%s\n' "$FOLLOWUP_QUEUE_FOLLOWUP_EFFECTIVE"
       } > "{{scanEnvOutput}}"
 
       rm -f "{{Output}}/ai-analysis/.applied-decision-lists-{{TargetSpace}}.json" 2>/dev/null || true

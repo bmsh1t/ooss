@@ -16,10 +16,60 @@ params:
     default: "{{TargetSpace}}"
   - name: retestTargetsFile
     default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
+  - name: retestPlanOutput
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: previousFollowupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_targets
+    default: ""
+  - name: previous_followup_focus_areas
+    default: ""
+  - name: previous_followup_manual_first_targets
+    default: ""
+  - name: previous_followup_high_confidence_targets
+    default: ""
+  - name: previous_followup_manual_first_targets_list
+    default: ""
+  - name: previous_followup_high_confidence_targets_list
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
+  - name: previous_followup_reasoning
+    default: ""
+  - name: previous_followup_scan_profile
+    default: ""
+  - name: previous_followup_severity
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_next_phase
+    default: ""
+  - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_manual_followup_needed
+    default: ""
+  - name: previous_followup_campaign_followup_recommended
+    default: ""
+  - name: previous_followup_queue_followup_effective
+    default: ""
+  - name: previous_followup_escalation_score
+    default: ""
+  - name: previous_followup_campaign_create_status
+    default: ""
+  - name: previous_followup_campaign_create_id
+    default: ""
+  - name: previous_followup_campaign_create_queued_runs
+    default: ""
   - name: retestQueueSummary
     default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
   - name: retestQueueLog
     default: "{{Output}}/ai-analysis/retest-queue-{{TargetSpace}}.log"
+  - name: retestQueueFallbackTargetsFile
+    default: "{{Output}}/ai-analysis/.retest-queue-fallback-targets-{{TargetSpace}}.txt"
 
 steps:
   - name: prepare-retest-queue
@@ -35,18 +85,296 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
+      normalize_int() {
+        value="$1"
+        case "$value" in
+          ''|*[!0-9]*)
+            echo 0
+            ;;
+          *)
+            echo "$value"
+            ;;
+        esac
+      }
+
+      normalize_bool() {
+        value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+        case "$value" in
+          1|true|yes|y|on)
+            echo true
+            ;;
+          *)
+            echo false
+            ;;
+        esac
+      }
+
+      csv_or_json_to_array() {
+        value="$1"
+        if [ -z "$value" ]; then
+          echo '[]'
+        elif printf '%s' "$value" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          printf '%s' "$value"
+        else
+          printf '%s' "$value" | jq -R 'split(",") | reduce .[] as $item ([]; ($item | gsub("^\\s+|\\s+$"; "")) as $normalized | if ($normalized != "" and (index($normalized) == null)) then . + [$normalized] else . end)'
+        fi
+      }
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_TARGET_FILE="{{retestTargetsFile}}"
+      TARGET_SOURCE="retest-plan"
+      PREVIOUS_FOLLOWUP_TARGETS=0
+      PREVIOUS_PRIORITY_TARGETS=0
+      PREVIOUS_FOCUS_AREAS=0
+      PREVIOUS_MANUAL_FIRST_TARGETS=0
+      PREVIOUS_HIGH_CONFIDENCE_TARGETS=0
+      PREVIOUS_PRIORITY_MODE=""
+      PREVIOUS_CONFIDENCE_LEVEL=""
+      PREVIOUS_NEXT_PHASE=""
+      PREVIOUS_REASONING=""
+      PREVIOUS_SCAN_PROFILE=""
+      PREVIOUS_SEVERITY=""
+      PREVIOUS_REUSE_SOURCES_JSON='[]'
+      PREVIOUS_REUSE_SOURCES=""
+      PREVIOUS_MANUAL_TARGETS_JSON='[]'
+      PREVIOUS_MANUAL_TARGETS_LIST=""
+      PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON='[]'
+      PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST=""
+      PREVIOUS_COMBINED_TARGETS_JSON='[]'
+      PREVIOUS_COMBINED_TARGETS_LIST=""
+      PREVIOUS_MANUAL_FOLLOWUP_NEEDED=false
+      PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED=false
+      PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE=false
+      PREVIOUS_ESCALATION_SCORE=0
+      PREVIOUS_CAMPAIGN_CREATE_STATUS=""
+      PREVIOUS_CAMPAIGN_CREATE_ID=""
+      PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=0
+
+      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREVIOUS_PRIORITY_TARGETS=$(jq -r '[((.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_FOCUS_AREAS=$(jq -r '[((.seed_targets.focus_areas // .refined_targets.focus_areas // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_MANUAL_FIRST_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS=$(jq -r '[((.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_NEXT_PHASE=$(jq -r '.seed_focus.next_phase // .execution_feedback.next_phase // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_REASONING=$(jq -r '.seed_focus.reasoning // .base_decision.reasoning // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_SCAN_PROFILE=$(jq -r '.seed_focus.scan_profile // .base_decision.profile // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_SEVERITY=$(jq -r '.seed_focus.severity // .base_decision.severity // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_MANUAL_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_MANUAL_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_COMBINED_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_REUSE_SOURCES_JSON=$(jq -c '.seed_focus.reuse_sources // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_REUSE_SOURCES=$(printf '%s\n' "$PREVIOUS_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        PREVIOUS_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.followup_summary.campaign_create_status // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.followup_summary.campaign_create_id // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.followup_summary.campaign_create_queued_runs // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+      else
+        PREV_PARAM_MANUAL_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_manual_first_targets_list}}")
+        PREV_PARAM_HIGH_CONFIDENCE_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_high_confidence_targets_list}}")
+        PREV_PARAM_COMBINED_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
+        PREV_PARAM_MANUAL_JSON_COUNT=$(printf '%s\n' "$PREV_PARAM_MANUAL_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        PREV_PARAM_HIGH_JSON_COUNT=$(printf '%s\n' "$PREV_PARAM_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        PREV_PARAM_COMBINED_COUNT=$(printf '%s\n' "$PREV_PARAM_COMBINED_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+
+        if [ "$PREV_PARAM_COMBINED_COUNT" -eq 0 ] 2>/dev/null && { [ "$PREV_PARAM_MANUAL_JSON_COUNT" -gt 0 ] 2>/dev/null || [ "$PREV_PARAM_HIGH_JSON_COUNT" -gt 0 ] 2>/dev/null; }; then
+          PREV_PARAM_COMBINED_TARGETS_JSON=$(jq -n \
+            --argjson manual "$PREV_PARAM_MANUAL_TARGETS_JSON" \
+            --argjson high "$PREV_PARAM_HIGH_CONFIDENCE_TARGETS_JSON" \
+            '($manual + $high) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' 2>/dev/null || echo '[]')
+          PREV_PARAM_COMBINED_COUNT=$(printf '%s\n' "$PREV_PARAM_COMBINED_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        fi
+
+        PREV_PARAM_TARGET_COUNT=$(normalize_int "{{previous_followup_targets}}")
+        PREV_PARAM_PRIORITY_COUNT=$(normalize_int "{{previous_followup_priority_targets}}")
+        PREV_PARAM_FOCUS_COUNT=$(normalize_int "{{previous_followup_focus_areas}}")
+        PREV_PARAM_MANUAL_COUNT=$(normalize_int "{{previous_followup_manual_first_targets}}")
+        PREV_PARAM_HIGH_CONFIDENCE_COUNT=$(normalize_int "{{previous_followup_high_confidence_targets}}")
+        PREV_PARAM_REASONING="{{previous_followup_reasoning}}"
+        PREV_PARAM_SCAN_PROFILE="{{previous_followup_scan_profile}}"
+        PREV_PARAM_SEVERITY="{{previous_followup_severity}}"
+        PREV_PARAM_PRIORITY_MODE="{{previous_followup_priority_mode}}"
+        PREV_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
+        PREV_PARAM_NEXT_PHASE="{{previous_followup_next_phase}}"
+        PREV_PARAM_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
+        PREV_PARAM_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "{{previous_followup_manual_followup_needed}}")
+        PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "{{previous_followup_campaign_followup_recommended}}")
+        PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "{{previous_followup_queue_followup_effective}}")
+        PREV_PARAM_ESCALATION_SCORE=$(normalize_int "{{previous_followup_escalation_score}}")
+        PREV_PARAM_CAMPAIGN_CREATE_STATUS="{{previous_followup_campaign_create_status}}"
+        PREV_PARAM_CAMPAIGN_CREATE_ID="{{previous_followup_campaign_create_id}}"
+        PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS=$(normalize_int "{{previous_followup_campaign_create_queued_runs}}")
+
+        if [ "$PREV_PARAM_TARGET_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_PRIORITY_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_FOCUS_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_MANUAL_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_HIGH_CONFIDENCE_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_MANUAL_JSON_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_HIGH_JSON_COUNT" -gt 0 ] 2>/dev/null \
+          || [ "$PREV_PARAM_COMBINED_COUNT" -gt 0 ] 2>/dev/null \
+          || [ -n "$PREV_PARAM_REASONING" ] \
+          || [ -n "$PREV_PARAM_SCAN_PROFILE" ] \
+          || [ -n "$PREV_PARAM_SEVERITY" ] \
+          || [ -n "$PREV_PARAM_PRIORITY_MODE" ] \
+          || [ -n "$PREV_PARAM_CONFIDENCE_LEVEL" ] \
+          || [ -n "$PREV_PARAM_NEXT_PHASE" ] \
+          || [ "$PREV_PARAM_MANUAL_FOLLOWUP_NEEDED" = "true" ] \
+          || [ "$PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED" = "true" ] \
+          || [ "$PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE" = "true" ] \
+          || [ "$PREV_PARAM_ESCALATION_SCORE" -gt 0 ] 2>/dev/null \
+          || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_STATUS" ] \
+          || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_ID" ] \
+          || [ "$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
+          PREVIOUS_PRIORITY_TARGETS="$PREV_PARAM_PRIORITY_COUNT"
+          PREVIOUS_FOCUS_AREAS="$PREV_PARAM_FOCUS_COUNT"
+          PREVIOUS_MANUAL_FIRST_TARGETS="$PREV_PARAM_MANUAL_COUNT"
+          if [ "$PREVIOUS_MANUAL_FIRST_TARGETS" -eq 0 ] 2>/dev/null; then
+            PREVIOUS_MANUAL_FIRST_TARGETS="$PREV_PARAM_MANUAL_JSON_COUNT"
+          fi
+          PREVIOUS_HIGH_CONFIDENCE_TARGETS="$PREV_PARAM_HIGH_CONFIDENCE_COUNT"
+          if [ "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" -eq 0 ] 2>/dev/null; then
+            PREVIOUS_HIGH_CONFIDENCE_TARGETS="$PREV_PARAM_HIGH_JSON_COUNT"
+          fi
+          PREVIOUS_FOLLOWUP_TARGETS="$PREV_PARAM_TARGET_COUNT"
+          if [ "$PREVIOUS_FOLLOWUP_TARGETS" -eq 0 ] 2>/dev/null; then
+            PREVIOUS_FOLLOWUP_TARGETS="$PREV_PARAM_COMBINED_COUNT"
+          fi
+          PREVIOUS_PRIORITY_MODE="$PREV_PARAM_PRIORITY_MODE"
+          PREVIOUS_CONFIDENCE_LEVEL="$PREV_PARAM_CONFIDENCE_LEVEL"
+          PREVIOUS_NEXT_PHASE="$PREV_PARAM_NEXT_PHASE"
+          PREVIOUS_REASONING="$PREV_PARAM_REASONING"
+          PREVIOUS_SCAN_PROFILE="$PREV_PARAM_SCAN_PROFILE"
+          PREVIOUS_SEVERITY="$PREV_PARAM_SEVERITY"
+          PREVIOUS_MANUAL_TARGETS_JSON="$PREV_PARAM_MANUAL_TARGETS_JSON"
+          PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON="$PREV_PARAM_HIGH_CONFIDENCE_TARGETS_JSON"
+          PREVIOUS_COMBINED_TARGETS_JSON="$PREV_PARAM_COMBINED_TARGETS_JSON"
+          PREVIOUS_MANUAL_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_MANUAL_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+          PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+          PREVIOUS_COMBINED_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+          PREVIOUS_REUSE_SOURCES_JSON="$PREV_PARAM_REUSE_SOURCES_JSON"
+          PREVIOUS_REUSE_SOURCES=$(printf '%s\n' "$PREVIOUS_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+          PREVIOUS_MANUAL_FOLLOWUP_NEEDED="$PREV_PARAM_MANUAL_FOLLOWUP_NEEDED"
+          PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED="$PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+          PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE="$PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE"
+          PREVIOUS_ESCALATION_SCORE="$PREV_PARAM_ESCALATION_SCORE"
+          PREVIOUS_CAMPAIGN_CREATE_STATUS="$PREV_PARAM_CAMPAIGN_CREATE_STATUS"
+          PREVIOUS_CAMPAIGN_CREATE_ID="$PREV_PARAM_CAMPAIGN_CREATE_ID"
+          PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS="$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS"
+        fi
+      fi
+
       if [ ! -f "{{retestTargetsFile}}" ] || [ ! -s "{{retestTargetsFile}}" ]; then
+        : > "{{retestQueueFallbackTargetsFile}}"
+        if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
+          jq -r '[((.targets[]? | if type == "object" then .target else . end)), ((.automation_queue[]? | if type == "object" then .target else . end))] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | .[]' "{{retestPlanOutput}}" 2>/dev/null > "{{retestQueueFallbackTargetsFile}}" || true
+          PLAN_TARGETS=$(count_lines "{{retestQueueFallbackTargetsFile}}")
+          if [ "$PLAN_TARGETS" -gt 0 ]; then
+            ACTIVE_TARGET_FILE="{{retestQueueFallbackTargetsFile}}"
+            TARGET_SOURCE="retest-plan-json"
+          fi
+        fi
+
+        if [ ! -f "$ACTIVE_TARGET_FILE" ] || [ ! -s "$ACTIVE_TARGET_FILE" ]; then
+          : > "{{retestQueueFallbackTargetsFile}}"
+        fi
+
+        if [ ! -f "$ACTIVE_TARGET_FILE" ] || [ ! -s "$ACTIVE_TARGET_FILE" ]; then
+          if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+            jq -r '((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null \
+              | awk 'NF && !seen[$0]++' > "{{retestQueueFallbackTargetsFile}}" || true
+            PREVIOUS_FOLLOWUP_TARGETS=$(count_lines "{{retestQueueFallbackTargetsFile}}")
+            if [ "$PREVIOUS_FOLLOWUP_TARGETS" -gt 0 ]; then
+              ACTIVE_TARGET_FILE="{{retestQueueFallbackTargetsFile}}"
+              TARGET_SOURCE="previous_followup_seed"
+            fi
+          elif [ -n "$PREVIOUS_COMBINED_TARGETS_LIST" ]; then
+            printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null > "{{retestQueueFallbackTargetsFile}}" || true
+            PREVIOUS_FOLLOWUP_TARGETS=$(count_lines "{{retestQueueFallbackTargetsFile}}")
+            if [ "$PREVIOUS_FOLLOWUP_TARGETS" -gt 0 ]; then
+              ACTIVE_TARGET_FILE="{{retestQueueFallbackTargetsFile}}"
+              TARGET_SOURCE="queue-params"
+            fi
+          fi
+        fi
+      fi
+
+      if [ ! -f "$ACTIVE_TARGET_FILE" ] || [ ! -s "$ACTIVE_TARGET_FILE" ]; then
         jq -n \
           --arg workflow "{{retestFlow}}" \
           --arg kind "{{retestWorkflowKind}}" \
           --arg priority "{{retestPriority}}" \
+          --arg target_file "$ACTIVE_TARGET_FILE" \
+          --arg target_source "$TARGET_SOURCE" \
+          --arg previous_reasoning "$PREVIOUS_REASONING" \
+          --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+          --arg previous_severity "$PREVIOUS_SEVERITY" \
+          --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+          --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+          --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+          --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+          --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+          --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+          --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+          --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+          --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+          --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+          --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+          --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+          --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+          --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+          --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+          --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           '{
             status: "skipped",
-            reason: "no_retest_targets",
+            reason: "no_retest_targets_or_followup_seed",
             workflow: $workflow,
             workflow_kind: $kind,
             priority: $priority,
-            queued_targets: 0
+            queued_targets: 0,
+            target_file: $target_file,
+            target_source: $target_source,
+            previous_followup_targets: $previous_followup_targets,
+            previous_priority_targets: $previous_priority_targets,
+            previous_focus_areas: $previous_focus_areas,
+            previous_manual_first_targets: $previous_manual_first_targets,
+            previous_high_confidence_targets: $previous_high_confidence_targets,
+            previous_manual_first_targets_list: $previous_manual_first_targets_list,
+            previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+            previous_combined_targets_list: $previous_combined_targets_list,
+            previous_reasoning: $previous_reasoning,
+            previous_scan_profile: $previous_scan_profile,
+            previous_severity: $previous_severity,
+            previous_priority_mode: $previous_priority_mode,
+            previous_confidence_level: $previous_confidence_level,
+            previous_next_phase: $previous_next_phase,
+            previous_reuse_sources: $previous_reuse_sources,
+            previous_manual_followup_needed: $previous_manual_followup_needed,
+            previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+            previous_queue_followup_effective: $previous_queue_followup_effective,
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
           }' > "{{retestQueueSummary}}"
         exit 0
       fi
@@ -60,12 +388,60 @@ steps:
         jq -n \
           --arg workflow "{{retestFlow}}" \
           --arg kind "{{retestWorkflowKind}}" \
+          --arg target_file "$ACTIVE_TARGET_FILE" \
+          --arg target_source "$TARGET_SOURCE" \
+          --arg previous_reasoning "$PREVIOUS_REASONING" \
+          --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+          --arg previous_severity "$PREVIOUS_SEVERITY" \
+          --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+          --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+          --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+          --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+          --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+          --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+          --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+          --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+          --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+          --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+          --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+          --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+          --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+          --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+          --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+          --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           '{
             status: "skipped",
             reason: "osmedeus_binary_not_found",
             workflow: $workflow,
             workflow_kind: $kind,
-            queued_targets: 0
+            queued_targets: 0,
+            target_file: $target_file,
+            target_source: $target_source,
+            previous_followup_targets: $previous_followup_targets,
+            previous_priority_targets: $previous_priority_targets,
+            previous_focus_areas: $previous_focus_areas,
+            previous_manual_first_targets: $previous_manual_first_targets,
+            previous_high_confidence_targets: $previous_high_confidence_targets,
+            previous_manual_first_targets_list: $previous_manual_first_targets_list,
+            previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+            previous_combined_targets_list: $previous_combined_targets_list,
+            previous_reasoning: $previous_reasoning,
+            previous_scan_profile: $previous_scan_profile,
+            previous_severity: $previous_severity,
+            previous_priority_mode: $previous_priority_mode,
+            previous_confidence_level: $previous_confidence_level,
+            previous_next_phase: $previous_next_phase,
+            previous_reuse_sources: $previous_reuse_sources,
+            previous_manual_followup_needed: $previous_manual_followup_needed,
+            previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+            previous_queue_followup_effective: $previous_queue_followup_effective,
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
           }' > "{{retestQueueSummary}}"
         exit 0
       fi
@@ -75,20 +451,105 @@ steps:
         WORKFLOW_FLAG="-m"
       fi
 
-      TARGET_COUNT=$(wc -l < "{{retestTargetsFile}}" 2>/dev/null || echo 0)
+      TARGET_COUNT=$(count_lines "$ACTIVE_TARGET_FILE")
       {
         echo "[Retest Queue] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "[Retest Queue] Binary: $OSM_BIN"
         echo "[Retest Queue] Workflow: {{retestFlow}} (kind={{retestWorkflowKind}})"
         echo "[Retest Queue] Priority: {{retestPriority}}"
+        echo "[Retest Queue] Source: $TARGET_SOURCE"
         echo "[Retest Queue] Targets: $TARGET_COUNT"
+        echo "[Retest Queue] Previous followup targets: $PREVIOUS_FOLLOWUP_TARGETS"
+        echo "[Retest Queue] Previous priority targets: $PREVIOUS_PRIORITY_TARGETS"
+        echo "[Retest Queue] Previous focus areas: $PREVIOUS_FOCUS_AREAS"
+        echo "[Retest Queue] Previous manual-first targets: $PREVIOUS_MANUAL_FIRST_TARGETS"
+        echo "[Retest Queue] Previous high-confidence targets: $PREVIOUS_HIGH_CONFIDENCE_TARGETS"
+        [ -n "$PREVIOUS_MANUAL_TARGETS_LIST" ] && echo "[Retest Queue] Previous manual-first target list: $PREVIOUS_MANUAL_TARGETS_LIST"
+        [ -n "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST" ] && echo "[Retest Queue] Previous high-confidence target list: $PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST"
+        [ -n "$PREVIOUS_COMBINED_TARGETS_LIST" ] && echo "[Retest Queue] Previous combined target list: $PREVIOUS_COMBINED_TARGETS_LIST"
+        [ -n "$PREVIOUS_REASONING" ] && echo "[Retest Queue] Previous reasoning: $PREVIOUS_REASONING"
+        [ -n "$PREVIOUS_SCAN_PROFILE" ] && echo "[Retest Queue] Previous scan profile: $PREVIOUS_SCAN_PROFILE"
+        [ -n "$PREVIOUS_SEVERITY" ] && echo "[Retest Queue] Previous severity: $PREVIOUS_SEVERITY"
+        [ -n "$PREVIOUS_PRIORITY_MODE" ] && echo "[Retest Queue] Previous priority mode: $PREVIOUS_PRIORITY_MODE"
+        [ -n "$PREVIOUS_CONFIDENCE_LEVEL" ] && echo "[Retest Queue] Previous confidence level: $PREVIOUS_CONFIDENCE_LEVEL"
+        [ -n "$PREVIOUS_NEXT_PHASE" ] && echo "[Retest Queue] Previous next phase: $PREVIOUS_NEXT_PHASE"
+        [ -n "$PREVIOUS_REUSE_SOURCES" ] && echo "[Retest Queue] Previous reuse sources: $PREVIOUS_REUSE_SOURCES"
+        echo "[Retest Queue] Previous manual followup needed: $PREVIOUS_MANUAL_FOLLOWUP_NEEDED"
+        echo "[Retest Queue] Previous campaign followup recommended: $PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+        echo "[Retest Queue] Previous queue followup effective: $PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE"
+        echo "[Retest Queue] Previous escalation score: $PREVIOUS_ESCALATION_SCORE"
+        [ -n "$PREVIOUS_CAMPAIGN_CREATE_STATUS" ] && echo "[Retest Queue] Previous campaign create status: $PREVIOUS_CAMPAIGN_CREATE_STATUS"
+        [ -n "$PREVIOUS_CAMPAIGN_CREATE_ID" ] && echo "[Retest Queue] Previous campaign create id: $PREVIOUS_CAMPAIGN_CREATE_ID"
+        [ "${PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS:-0}" -gt 0 ] 2>/dev/null && echo "[Retest Queue] Previous campaign create queued runs: $PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS"
         echo ""
-        "$OSM_BIN" worker queue new "$WORKFLOW_FLAG" "{{retestFlow}}" \
-          -T "{{retestTargetsFile}}" \
+        set -- \
+          "$OSM_BIN" worker queue new "$WORKFLOW_FLAG" "{{retestFlow}}" \
+          -T "$ACTIVE_TARGET_FILE" \
           -p "knowledgeWorkspace={{knowledgeWorkspace}}" \
           -p "campaign_stage=retest" \
           -p "campaign_source_target={{Target}}" \
           -p "retest_priority={{retestPriority}}"
+        if [ "$PREVIOUS_FOLLOWUP_TARGETS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_targets=$PREVIOUS_FOLLOWUP_TARGETS"
+        fi
+        if [ "$PREVIOUS_PRIORITY_TARGETS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_priority_targets=$PREVIOUS_PRIORITY_TARGETS"
+        fi
+        if [ "$PREVIOUS_FOCUS_AREAS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_focus_areas=$PREVIOUS_FOCUS_AREAS"
+        fi
+        if [ "$PREVIOUS_MANUAL_FIRST_TARGETS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_manual_first_targets=$PREVIOUS_MANUAL_FIRST_TARGETS"
+        fi
+        if [ "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_high_confidence_targets=$PREVIOUS_HIGH_CONFIDENCE_TARGETS"
+        fi
+        if [ -n "$PREVIOUS_MANUAL_TARGETS_LIST" ]; then
+          set -- "$@" -p "previous_followup_manual_first_targets_list=$PREVIOUS_MANUAL_TARGETS_LIST"
+        fi
+        if [ -n "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST" ]; then
+          set -- "$@" -p "previous_followup_high_confidence_targets_list=$PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST"
+        fi
+        if [ -n "$PREVIOUS_COMBINED_TARGETS_LIST" ]; then
+          set -- "$@" -p "previous_followup_combined_targets_list=$PREVIOUS_COMBINED_TARGETS_LIST"
+        fi
+        if [ -n "$PREVIOUS_REASONING" ]; then
+          set -- "$@" -p "previous_followup_reasoning=$PREVIOUS_REASONING"
+        fi
+        if [ -n "$PREVIOUS_SCAN_PROFILE" ]; then
+          set -- "$@" -p "previous_followup_scan_profile=$PREVIOUS_SCAN_PROFILE"
+        fi
+        if [ -n "$PREVIOUS_SEVERITY" ]; then
+          set -- "$@" -p "previous_followup_severity=$PREVIOUS_SEVERITY"
+        fi
+        if [ -n "$PREVIOUS_PRIORITY_MODE" ]; then
+          set -- "$@" -p "previous_followup_priority_mode=$PREVIOUS_PRIORITY_MODE"
+        fi
+        if [ -n "$PREVIOUS_CONFIDENCE_LEVEL" ]; then
+          set -- "$@" -p "previous_followup_confidence_level=$PREVIOUS_CONFIDENCE_LEVEL"
+        fi
+        if [ -n "$PREVIOUS_NEXT_PHASE" ]; then
+          set -- "$@" -p "previous_followup_next_phase=$PREVIOUS_NEXT_PHASE"
+        fi
+        if [ -n "$PREVIOUS_REUSE_SOURCES" ]; then
+          set -- "$@" -p "previous_followup_reuse_sources=$PREVIOUS_REUSE_SOURCES"
+        fi
+        set -- "$@" -p "previous_followup_manual_followup_needed=$PREVIOUS_MANUAL_FOLLOWUP_NEEDED"
+        set -- "$@" -p "previous_followup_campaign_followup_recommended=$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED"
+        set -- "$@" -p "previous_followup_queue_followup_effective=$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE"
+        if [ "$PREVIOUS_ESCALATION_SCORE" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_escalation_score=$PREVIOUS_ESCALATION_SCORE"
+        fi
+        if [ -n "$PREVIOUS_CAMPAIGN_CREATE_STATUS" ]; then
+          set -- "$@" -p "previous_followup_campaign_create_status=$PREVIOUS_CAMPAIGN_CREATE_STATUS"
+        fi
+        if [ -n "$PREVIOUS_CAMPAIGN_CREATE_ID" ]; then
+          set -- "$@" -p "previous_followup_campaign_create_id=$PREVIOUS_CAMPAIGN_CREATE_ID"
+        fi
+        if [ "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
+          set -- "$@" -p "previous_followup_campaign_create_queued_runs=$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS"
+        fi
+        "$@"
       } > "{{retestQueueLog}}" 2>&1
       STATUS=$?
 
@@ -97,30 +558,124 @@ steps:
           --arg workflow "{{retestFlow}}" \
           --arg kind "{{retestWorkflowKind}}" \
           --arg priority "{{retestPriority}}" \
-          --arg target_file "{{retestTargetsFile}}" \
+          --arg target_file "$ACTIVE_TARGET_FILE" \
+          --arg target_source "$TARGET_SOURCE" \
+          --arg previous_reasoning "$PREVIOUS_REASONING" \
+          --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+          --arg previous_severity "$PREVIOUS_SEVERITY" \
+          --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+          --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+          --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+          --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+          --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+          --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+          --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+          --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+          --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+          --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+          --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+          --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+          --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+          --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+          --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+          --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
           --arg log_file "{{retestQueueLog}}" \
           --argjson queued_targets "$TARGET_COUNT" \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           '{
             status: "queued",
             workflow: $workflow,
             workflow_kind: $kind,
             priority: $priority,
             target_file: $target_file,
+            target_source: $target_source,
             log_file: $log_file,
-            queued_targets: $queued_targets
+            queued_targets: $queued_targets,
+            previous_followup_targets: $previous_followup_targets,
+            previous_priority_targets: $previous_priority_targets,
+            previous_focus_areas: $previous_focus_areas,
+            previous_manual_first_targets: $previous_manual_first_targets,
+            previous_high_confidence_targets: $previous_high_confidence_targets,
+            previous_manual_first_targets_list: $previous_manual_first_targets_list,
+            previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+            previous_combined_targets_list: $previous_combined_targets_list,
+            previous_reasoning: $previous_reasoning,
+            previous_scan_profile: $previous_scan_profile,
+            previous_severity: $previous_severity,
+            previous_priority_mode: $previous_priority_mode,
+            previous_confidence_level: $previous_confidence_level,
+            previous_next_phase: $previous_next_phase,
+            previous_reuse_sources: $previous_reuse_sources,
+            previous_manual_followup_needed: $previous_manual_followup_needed,
+            previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+            previous_queue_followup_effective: $previous_queue_followup_effective,
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
           }' > "{{retestQueueSummary}}"
       else
         jq -n \
           --arg workflow "{{retestFlow}}" \
           --arg kind "{{retestWorkflowKind}}" \
+          --arg target_file "$ACTIVE_TARGET_FILE" \
+          --arg target_source "$TARGET_SOURCE" \
+          --arg previous_reasoning "$PREVIOUS_REASONING" \
+          --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+          --arg previous_severity "$PREVIOUS_SEVERITY" \
+          --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+          --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+          --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+          --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+          --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+          --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+          --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+          --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+          --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+          --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+          --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+          --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+          --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+          --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+          --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+          --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
           --arg log_file "{{retestQueueLog}}" \
           --argjson queued_targets 0 \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           '{
             status: "failed",
             workflow: $workflow,
             workflow_kind: $kind,
+            target_file: $target_file,
+            target_source: $target_source,
             log_file: $log_file,
-            queued_targets: $queued_targets
+            queued_targets: $queued_targets,
+            previous_followup_targets: $previous_followup_targets,
+            previous_priority_targets: $previous_priority_targets,
+            previous_focus_areas: $previous_focus_areas,
+            previous_manual_first_targets: $previous_manual_first_targets,
+            previous_high_confidence_targets: $previous_high_confidence_targets,
+            previous_manual_first_targets_list: $previous_manual_first_targets_list,
+            previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+            previous_combined_targets_list: $previous_combined_targets_list,
+            previous_reasoning: $previous_reasoning,
+            previous_scan_profile: $previous_scan_profile,
+            previous_severity: $previous_severity,
+            previous_priority_mode: $previous_priority_mode,
+            previous_confidence_level: $previous_confidence_level,
+            previous_next_phase: $previous_next_phase,
+            previous_reuse_sources: $previous_reuse_sources,
+            previous_manual_followup_needed: $previous_manual_followup_needed,
+            previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+            previous_queue_followup_effective: $previous_queue_followup_effective,
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
           }' > "{{retestQueueSummary}}"
       fi
 
