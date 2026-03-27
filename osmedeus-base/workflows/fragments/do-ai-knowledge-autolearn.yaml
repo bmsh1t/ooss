@@ -19,6 +19,24 @@ params:
     default: "{{TargetSpace}}"
   - name: knowledgeScope
     default: "workspace"
+  - name: appliedDecisionFile
+    default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: followupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: retestPlanFile
+    default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
+  - name: operatorQueueFile
+    default: "{{Output}}/ai-analysis/operator-queue-{{TargetSpace}}.json"
+  - name: campaignHandoffFile
+    default: "{{Output}}/ai-analysis/campaign-handoff-{{TargetSpace}}.json"
+  - name: campaignCreateFile
+    default: "{{Output}}/ai-analysis/campaign-create-{{TargetSpace}}.json"
+  - name: retestQueueSummaryFile
+    default: "{{Output}}/ai-analysis/retest-queue-summary-{{TargetSpace}}.json"
+  - name: rescanSummaryFile
+    default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+  - name: knowledgeLearnContextFile
+    default: "{{Output}}/ai-analysis/unified-analysis-knowledge-{{TargetSpace}}.json"
   - name: knowledgeLearnSummary
     default: "{{Output}}/ai-analysis/knowledge-learning-{{TargetSpace}}.log"
 
@@ -29,6 +47,208 @@ steps:
     functions:
       - 'create_folder("{{Output}}/ai-analysis")'
       - 'log_info("Preparing knowledge auto-learning for {{knowledgeWorkspace}}")'
+
+  - name: build-knowledge-learning-context
+    type: bash
+    pre_condition: "{{enableKnowledgeLearning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      count_retest_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("targets") or has("automation_queue") then [((.targets[]? | if type == "object" then .target else . end)), ((.automation_queue[]? | if type == "object" then .target else . end))] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length else (.summary.total_targets // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_operator_tasks() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("tasks") then ([.tasks[]?] | length) else (.summary.total_tasks // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      APPLIED_PROFILE="focused"
+      APPLIED_SEVERITY="critical,high"
+      FOLLOWUP_PRIORITY_MODE="not_generated"
+      FOLLOWUP_CONFIDENCE_LEVEL="not_generated"
+      FOLLOWUP_NEXT_PHASE="knowledge-consolidation"
+      FOLLOWUP_ESCALATION_SCORE=0
+      FOLLOWUP_MANUAL_FIRST=0
+      FOLLOWUP_HIGH_CONFIDENCE=0
+      FOLLOWUP_REUSE_SOURCES='[]'
+      FOLLOWUP_NEXT_ACTIONS='[]'
+      FOLLOWUP_MANUAL_NEEDED=false
+      FOLLOWUP_CAMPAIGN_RECOMMENDED=false
+      FOLLOWUP_QUEUE_EFFECTIVE=false
+      RETEST_TARGETS=0
+      OPERATOR_TASKS=0
+      CAMPAIGN_TARGETS=0
+      CAMPAIGN_READY=false
+      CAMPAIGN_CREATE_STATUS="not_requested"
+      CAMPAIGN_CREATE_ID=""
+      CAMPAIGN_CREATE_QUEUED_RUNS=0
+      RETEST_QUEUED=0
+      HAS_APPLIED_DECISION=false
+      HAS_FOLLOWUP_DECISION=false
+      HAS_RETEST_PLAN=false
+      HAS_OPERATOR_QUEUE=false
+      HAS_CAMPAIGN_HANDOFF=false
+      HAS_CAMPAIGN_CREATE=false
+      HAS_RETEST_QUEUE_SUMMARY=false
+      HAS_RESCAN_SUMMARY=false
+
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        HAS_APPLIED_DECISION=true
+        APPLIED_PROFILE=$(jq -r '.scan.profile // "focused"' "{{appliedDecisionFile}}" 2>/dev/null || echo focused)
+        APPLIED_SEVERITY=$(jq -r '.scan.severity // "critical,high"' "{{appliedDecisionFile}}" 2>/dev/null || echo critical,high)
+      fi
+
+      if [ -f "{{followupDecisionFile}}" ] && jq empty "{{followupDecisionFile}}" 2>/dev/null; then
+        HAS_FOLLOWUP_DECISION=true
+        FOLLOWUP_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+        FOLLOWUP_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // "not_generated"' "{{followupDecisionFile}}" 2>/dev/null || echo not_generated)
+        FOLLOWUP_NEXT_PHASE=$(jq -r '.execution_feedback.next_phase // .seed_focus.next_phase // "knowledge-consolidation"' "{{followupDecisionFile}}" 2>/dev/null || echo knowledge-consolidation)
+        FOLLOWUP_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_MANUAL_FIRST=$(jq -r '[.seed_targets.manual_first_targets[]?] | length' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_HIGH_CONFIDENCE=$(jq -r '[.seed_targets.high_confidence_targets[]?] | length' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
+        FOLLOWUP_REUSE_SOURCES=$(jq -c '.seed_focus.reuse_sources // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_NEXT_ACTIONS=$(jq -c '.next_actions // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_MANUAL_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+        FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+        FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
+      fi
+
+      if [ -f "{{retestPlanFile}}" ] && jq empty "{{retestPlanFile}}" 2>/dev/null; then
+        HAS_RETEST_PLAN=true
+        RETEST_TARGETS=$(count_retest_targets "{{retestPlanFile}}")
+      fi
+      if [ -f "{{operatorQueueFile}}" ] && jq empty "{{operatorQueueFile}}" 2>/dev/null; then
+        HAS_OPERATOR_QUEUE=true
+        OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueFile}}")
+      fi
+      if [ -f "{{campaignHandoffFile}}" ] && jq empty "{{campaignHandoffFile}}" 2>/dev/null; then
+        HAS_CAMPAIGN_HANDOFF=true
+        CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffFile}}" 2>/dev/null || echo 0)
+        CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffFile}}" 2>/dev/null || echo false)
+      fi
+      if [ -f "{{campaignCreateFile}}" ] && jq empty "{{campaignCreateFile}}" 2>/dev/null; then
+        HAS_CAMPAIGN_CREATE=true
+        CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateFile}}" 2>/dev/null || echo not_requested)
+        CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' "{{campaignCreateFile}}" 2>/dev/null || echo "")
+        CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' "{{campaignCreateFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{retestQueueSummaryFile}}" ] && jq empty "{{retestQueueSummaryFile}}" 2>/dev/null; then
+        HAS_RETEST_QUEUE_SUMMARY=true
+        RETEST_QUEUED=$(jq -r '.queued_targets // 0' "{{retestQueueSummaryFile}}" 2>/dev/null || echo 0)
+      fi
+      if [ -f "{{rescanSummaryFile}}" ] && [ -s "{{rescanSummaryFile}}" ]; then
+        HAS_RESCAN_SUMMARY=true
+      fi
+
+      jq -n \
+        --arg generated_at "$(date -Iseconds)" \
+        --arg workspace "{{knowledgeWorkspace}}" \
+        --arg target "{{Target}}" \
+        --arg scope "{{knowledgeScope}}" \
+        --arg applied_profile "$APPLIED_PROFILE" \
+        --arg applied_severity "$APPLIED_SEVERITY" \
+        --arg priority_mode "$FOLLOWUP_PRIORITY_MODE" \
+        --arg confidence_level "$FOLLOWUP_CONFIDENCE_LEVEL" \
+        --arg next_phase "$FOLLOWUP_NEXT_PHASE" \
+        --arg applied_decision_file "{{appliedDecisionFile}}" \
+        --arg followup_decision_file "{{followupDecisionFile}}" \
+        --arg retest_plan_file "{{retestPlanFile}}" \
+        --arg operator_queue_file "{{operatorQueueFile}}" \
+        --arg campaign_handoff_file "{{campaignHandoffFile}}" \
+        --arg campaign_create_file "{{campaignCreateFile}}" \
+        --arg retest_queue_summary_file "{{retestQueueSummaryFile}}" \
+        --arg rescan_summary_file "{{rescanSummaryFile}}" \
+        --arg campaign_create_status "$CAMPAIGN_CREATE_STATUS" \
+        --arg campaign_create_id "$CAMPAIGN_CREATE_ID" \
+        --argjson escalation_score "$FOLLOWUP_ESCALATION_SCORE" \
+        --argjson manual_first_targets "$FOLLOWUP_MANUAL_FIRST" \
+        --argjson high_confidence_targets "$FOLLOWUP_HIGH_CONFIDENCE" \
+        --argjson retest_targets "$RETEST_TARGETS" \
+        --argjson operator_tasks "$OPERATOR_TASKS" \
+        --argjson campaign_targets "$CAMPAIGN_TARGETS" \
+        --argjson campaign_create_queued_runs "$CAMPAIGN_CREATE_QUEUED_RUNS" \
+        --argjson retest_queued_targets "$RETEST_QUEUED" \
+        --argjson reuse_sources "$FOLLOWUP_REUSE_SOURCES" \
+        --argjson next_actions "$FOLLOWUP_NEXT_ACTIONS" \
+        --argjson manual_followup_needed "$FOLLOWUP_MANUAL_NEEDED" \
+        --argjson campaign_followup_recommended "$FOLLOWUP_CAMPAIGN_RECOMMENDED" \
+        --argjson queue_followup_effective "$FOLLOWUP_QUEUE_EFFECTIVE" \
+        --argjson campaign_ready "$CAMPAIGN_READY" \
+        --argjson has_applied_decision "$HAS_APPLIED_DECISION" \
+        --argjson has_followup_decision "$HAS_FOLLOWUP_DECISION" \
+        --argjson has_retest_plan "$HAS_RETEST_PLAN" \
+        --argjson has_operator_queue "$HAS_OPERATOR_QUEUE" \
+        --argjson has_campaign_handoff "$HAS_CAMPAIGN_HANDOFF" \
+        --argjson has_campaign_create "$HAS_CAMPAIGN_CREATE" \
+        --argjson has_retest_queue_summary "$HAS_RETEST_QUEUE_SUMMARY" \
+        --argjson has_rescan_summary "$HAS_RESCAN_SUMMARY" \
+        '{
+          generated_at: $generated_at,
+          source: "ai-knowledge-autolearn",
+          workspace: $workspace,
+          target: $target,
+          scope: $scope,
+          applied_decision: {
+            profile: $applied_profile,
+            severity: $applied_severity
+          },
+          followup_seed_focus: {
+            priority_mode: $priority_mode,
+            confidence_level: $confidence_level,
+            next_phase: $next_phase,
+            escalation_score: $escalation_score,
+            manual_first_targets: $manual_first_targets,
+            high_confidence_targets: $high_confidence_targets,
+            reuse_sources: $reuse_sources,
+            next_actions: $next_actions,
+            manual_followup_needed: $manual_followup_needed,
+            campaign_followup_recommended: $campaign_followup_recommended,
+            queue_followup_effective: $queue_followup_effective
+          },
+          operational_counts: {
+            retest_targets: $retest_targets,
+            operator_tasks: $operator_tasks,
+            campaign_targets: $campaign_targets,
+            campaign_create_queued_runs: $campaign_create_queued_runs,
+            retest_queued_targets: $retest_queued_targets
+          },
+          campaign_creation: {
+            status: $campaign_create_status,
+            campaign_id: $campaign_create_id,
+            queued_runs: $campaign_create_queued_runs
+          },
+          artifact_presence: {
+            campaign_ready: $campaign_ready,
+            applied_decision: $has_applied_decision,
+            followup_decision: $has_followup_decision,
+            retest_plan: $has_retest_plan,
+            operator_queue: $has_operator_queue,
+            campaign_handoff: $has_campaign_handoff,
+            campaign_create: $has_campaign_create,
+            retest_queue_summary: $has_retest_queue_summary,
+            rescan_summary: $has_rescan_summary
+          },
+          artifact_files: {
+            applied_decision: $applied_decision_file,
+            followup_decision: $followup_decision_file,
+            retest_plan: $retest_plan_file,
+            operator_queue: $operator_queue_file,
+            campaign_handoff: $campaign_handoff_file,
+            campaign_create: $campaign_create_file,
+            retest_queue_summary: $retest_queue_summary_file,
+            rescan_summary: $rescan_summary_file
+          }
+        }' > "{{knowledgeLearnContextFile}}"
 
   - name: learn-workspace-knowledge
     type: bash
@@ -53,6 +273,15 @@ steps:
         echo "[Knowledge Learn] Binary: $OSM_BIN"
         echo "[Knowledge Learn] Workspace: {{knowledgeWorkspace}}"
         echo "[Knowledge Learn] Scope: {{knowledgeScope}}"
+        if [ -f "{{knowledgeLearnContextFile}}" ] && jq empty "{{knowledgeLearnContextFile}}" 2>/dev/null; then
+          echo "[Knowledge Learn] Context artifact: {{knowledgeLearnContextFile}}"
+          echo "[Knowledge Learn] Priority mode: $(jq -r '.followup_seed_focus.priority_mode // "not_generated"' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo not_generated)"
+          echo "[Knowledge Learn] Confidence level: $(jq -r '.followup_seed_focus.confidence_level // "not_generated"' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo not_generated)"
+          echo "[Knowledge Learn] Next phase: $(jq -r '.followup_seed_focus.next_phase // "knowledge-consolidation"' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo knowledge-consolidation)"
+          echo "[Knowledge Learn] Reuse sources: $(jq -r '(.followup_seed_focus.reuse_sources // []) | join(", ")' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo "")"
+          echo "[Knowledge Learn] Campaign create: $(jq -r '.campaign_creation.status // "not_requested"' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo not_requested)"
+          echo "[Knowledge Learn] Campaign queued runs: $(jq -r '.campaign_creation.queued_runs // 0' "{{knowledgeLearnContextFile}}" 2>/dev/null || echo 0)"
+        fi
         echo "[Knowledge Learn] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
         "$OSM_BIN" kb learn -w "{{knowledgeWorkspace}}" --scope "{{knowledgeScope}}" --include-ai

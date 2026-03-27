@@ -183,6 +183,24 @@ steps:
         jq empty "$file" >/dev/null 2>&1
       }
 
+      count_retest_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("targets") or has("automation_queue") then [((.targets[]? | if type == "object" then .target else . end)), ((.automation_queue[]? | if type == "object" then .target else . end))] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length else (.summary.total_targets // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_operator_tasks() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("tasks") then ([.tasks[]?] | length) else (.summary.total_tasks // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       count_lines() {
         file="$1"
         if [ -f "$file" ]; then
@@ -236,8 +254,8 @@ steps:
       FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
       FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
       FOLLOWUP_NEXT_ACTIONS=$(jq -r '(.next_actions // []) | join(" | ")' "{{followupDecisionFile}}" 2>/dev/null || echo "")
-      RETEST_TARGETS=$(jq -r '.summary.total_targets // ([.targets[]?] | length) // 0' "{{retestPlanFile}}" 2>/dev/null || echo 0)
-      OPERATOR_TASKS=$(jq -r '.summary.total_tasks // ([.tasks[]?] | length) // 0' "{{operatorQueueFile}}" 2>/dev/null || echo 0)
+      RETEST_TARGETS=$(count_retest_targets "{{retestPlanFile}}")
+      OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueFile}}")
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffFile}}" 2>/dev/null || echo false)
       CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffFile}}" 2>/dev/null || echo 0)
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateFile}}" 2>/dev/null || echo not_requested)

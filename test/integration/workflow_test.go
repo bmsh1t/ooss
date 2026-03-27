@@ -5590,6 +5590,67 @@ func TestExecuteEnhancedFinalReportUsesFirstSemanticArtifactWithHits(t *testing.
 	assert.NotContains(t, summaryText, "Semantic search file: "+filepath.Join(aiDir, "semantic-search-decision-followup-"+targetSpace+".json"))
 }
 
+func TestExecuteEnhancedFinalReportCountsRealOperationalArtifacts(t *testing.T) {
+	if _, err := osExec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not installed")
+	}
+
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report-enhanced.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-enhanced-real-operational-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	reportDir := filepath.Join(outputDir, "report")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-jsonl-"+targetSpace+".txt"),
+		`{"info":{"cve_id":"CVE-2025-0100","title":"Critical issue","severity":"critical"},"matched_at":"https://a.example.com/admin"}`+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 1},
+  "targets": [
+    {"target": "https://a.example.com/admin"}
+  ],
+  "automation_queue": [
+    {"target": "https://a.example.com/graphql"},
+    {"target": "https://a.example.com/admin"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 1},
+  "tasks": [
+    {"target": "https://a.example.com/admin"},
+    {"target": "https://a.example.com/upload"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://a.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	summaryData, err := os.ReadFile(filepath.Join(reportDir, "enhanced-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	summaryText := string(summaryData)
+	assert.Contains(t, summaryText, "Retest planned targets: 2")
+	assert.Contains(t, summaryText, "Operator tasks: 2")
+}
+
 func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5690,6 +5751,71 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
 	assert.Contains(t, summaryText, "Confidence level: high")
 	assert.Contains(t, summaryText, "Campaign create: created")
 	assert.Contains(t, summaryText, "Campaign queued runs: 4")
+
+	callsData, err := os.ReadFile(callsPath)
+	require.NoError(t, err)
+	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
+}
+
+func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-knowledge-autolearn.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	callsPath := installStubOsmedeus(t)
+	targetSpace := "knowledge-autolearn-real-operational-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 1},
+  "targets": [
+    {"target": "https://seed.example.com/admin"}
+  ],
+  "automation_queue": [
+    {"target": "https://seed.example.com/graphql"},
+    {"target": "https://seed.example.com/admin"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 1},
+  "tasks": [
+    {"target": "https://seed.example.com/admin"},
+    {"target": "https://seed.example.com/upload"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                  "https://app.example.com",
+		"space_name":              targetSpace,
+		"knowledgeWorkspace":      "shared-kb",
+		"knowledgeScope":          "workspace",
+		"enableKnowledgeLearning": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	contextData, err := os.ReadFile(filepath.Join(aiDir, "unified-analysis-knowledge-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var learnContext map[string]interface{}
+	require.NoError(t, json.Unmarshal(contextData, &learnContext))
+
+	operationalCounts, ok := learnContext["operational_counts"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), operationalCounts["retest_targets"])
+	assert.Equal(t, float64(2), operationalCounts["operator_tasks"])
 
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
