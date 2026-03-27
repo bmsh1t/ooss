@@ -17,13 +17,27 @@ params:
   - name: pathPlanningFile
     default: "{{Output}}/ai-analysis/path-planning-{{TargetSpace}}.json"
   - name: semanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
+  - name: fallbackSemanticSearchFile
     default: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
+  - name: secondFallbackSemanticSearchFile
+    default: "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json"
   - name: retestPlanOutput
     default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: appliedDecisionFile
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: previousFollowupDecisionFile
+    default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
 
   - name: enableOperatorQueue
     type: bool
@@ -44,24 +58,100 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/.input
 
+      normalize_int() {
+        value="$1"
+        case "$value" in
+          ''|*[!0-9]*)
+            echo 0
+            ;;
+          *)
+            echo "$value"
+            ;;
+        esac
+      }
+
+      csv_or_json_to_array() {
+        value="$1"
+        if [ -z "$value" ]; then
+          echo '[]'
+        elif printf '%s' "$value" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          printf '%s' "$value"
+        else
+          printf '%s' "$value" | jq -R 'split(",") | reduce .[] as $item ([]; ($item | gsub("^\\s+|\\s+$"; "")) as $normalized | if ($normalized != "" and (index($normalized) == null)) then . + [$normalized] else . end)'
+        fi
+      }
+
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      semantic_target_count() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '[.results[]?.target | select(. != null and . != "")] | unique | length' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      ACTIVE_SEMANTIC_FILE="{{semanticSearchFile}}"
+      for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}"; do
+        [ -n "$candidate" ] || continue
+        if semantic_hits "$candidate"; then
+          ACTIVE_SEMANTIC_FILE="$candidate"
+          break
+        fi
+      done
+
       VULN_COUNT=$(jq -r '.confirmed_real // .validation_summary.confirmed_real // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
       CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' "{{attackChainFile}}" 2>/dev/null || echo 0)
       PHASE_COUNT=$(jq -r '.plan_summary.total_phases // 0' "{{pathPlanningFile}}" 2>/dev/null || echo 0)
-      RETEST_COUNT=$(jq -r '.summary.total_targets // 0' "{{retestPlanOutput}}" 2>/dev/null || echo 0)
+      RETEST_COUNT=$(jq -r '[((.targets[]? | if type == "object" then .target else . end)), ((.automation_queue[]? | if type == "object" then .target else . end))] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{retestPlanOutput}}" 2>/dev/null || echo 0)
+      SEMANTIC_COUNT=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$ACTIVE_SEMANTIC_FILE" 2>/dev/null || echo 0)
+      SEMANTIC_TARGET_COUNT=$(semantic_target_count "$ACTIVE_SEMANTIC_FILE")
+      PREV_FOLLOWUP_TARGETS=0
+      PREV_PRIORITY_MODE=""
+      PREV_CONFIDENCE_LEVEL=""
+      PREV_COMBINED_TARGETS_JSON='[]'
+      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+      else
+        PREV_COMBINED_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
+        PREV_FOLLOWUP_TARGETS=$(normalize_int "{{previous_followup_targets}}")
+        if [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ] 2>/dev/null; then
+          PREV_FOLLOWUP_TARGETS=$(printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        fi
+        PREV_PRIORITY_MODE="{{previous_followup_priority_mode}}"
+        PREV_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
+      fi
 
       jq -n \
         --arg target "{{Target}}" \
         --arg vuln_file "{{vulnValidationFile}}" \
         --arg attack_chain_file "{{attackChainFile}}" \
         --arg path_planning_file "{{pathPlanningFile}}" \
-        --arg semantic_file "{{semanticSearchFile}}" \
+        --arg semantic_file "$ACTIVE_SEMANTIC_FILE" \
         --arg retest_file "{{retestPlanOutput}}" \
         --arg decision_file "{{aiDecisionFile}}" \
         --arg applied_decision_file "{{appliedDecisionFile}}" \
+        --arg previous_followup_file "{{previousFollowupDecisionFile}}" \
         --argjson vuln_count "$VULN_COUNT" \
         --argjson chain_count "$CHAIN_COUNT" \
         --argjson phase_count "$PHASE_COUNT" \
         --argjson retest_count "$RETEST_COUNT" \
+        --argjson semantic_count "$SEMANTIC_COUNT" \
+        --argjson semantic_target_count "$SEMANTIC_TARGET_COUNT" \
+        --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGETS" \
+        --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
+        --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
+        --argjson previous_followup_targets_list "$PREV_COMBINED_TARGETS_JSON" \
         '{
           target: $target,
           files: {
@@ -72,17 +162,26 @@ steps:
             retest_plan: $retest_file,
             ai_decision: $decision_file
             ,
-            applied_ai_decision: $applied_decision_file
+            applied_ai_decision: $applied_decision_file,
+            previous_followup: $previous_followup_file
           },
           counts: {
             confirmed_vulns: $vuln_count,
             attack_chains: $chain_count,
             execution_phases: $phase_count,
-            retest_targets: $retest_count
+            retest_targets: $retest_count,
+            semantic_results: $semantic_count,
+            semantic_targets: $semantic_target_count,
+            previous_followup_targets: $previous_followup_targets
+          },
+          previous_followup: {
+            priority_mode: $previous_followup_priority_mode,
+            confidence_level: $previous_followup_confidence_level,
+            targets_list: $previous_followup_targets_list
           }
         }' > {{Output}}/ai-analysis/.input/operator-queue-context.json
 
-      if [ "$VULN_COUNT" -eq 0 ] && [ "$CHAIN_COUNT" -eq 0 ] && [ "$RETEST_COUNT" -eq 0 ]; then
+      if [ "$VULN_COUNT" -eq 0 ] && [ "$CHAIN_COUNT" -eq 0 ] && [ "$RETEST_COUNT" -eq 0 ] && [ "$SEMANTIC_TARGET_COUNT" -eq 0 ] && [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ]; then
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.operator-queue-skip
       else
         rm -f {{Output}}/ai-analysis/.operator-queue-skip 2>/dev/null || true
@@ -152,10 +251,40 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
+      csv_or_json_to_array() {
+        value="$1"
+        if [ -z "$value" ]; then
+          echo '[]'
+        elif printf '%s' "$value" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          printf '%s' "$value"
+        else
+          printf '%s' "$value" | jq -R 'split(",") | reduce .[] as $item ([]; ($item | gsub("^\\s+|\\s+$"; "")) as $normalized | if ($normalized != "" and (index($normalized) == null)) then . + [$normalized] else . end)'
+        fi
+      }
+
+      extract_semantic_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '.results[]?.target // empty' "$file" 2>/dev/null | awk 'NF && !seen[$0]++' || true
+        fi
+      }
+
       if [ -f "{{Output}}/ai-analysis/.operator-queue-skip" ]; then
         echo '{"summary":{"total_tasks":0,"p1_tasks":0,"p2_tasks":0},"focus_targets":[],"tasks":[]}' > {{operatorQueueOutput}}
         exit 0
       fi
+
+      ACTIVE_SEMANTIC_FILE="{{semanticSearchFile}}"
+      for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+          hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$candidate" 2>/dev/null || echo 0)
+          if [ "${hits:-0}" -gt 0 ] 2>/dev/null; then
+            ACTIVE_SEMANTIC_FILE="$candidate"
+            break
+          fi
+        fi
+      done
 
       RAW_FILE="{{Output}}/ai-analysis/.operator-queue-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/.operator-queue-json-{{TargetSpace}}.json"
@@ -188,9 +317,19 @@ steps:
         ' "$JSON_FILE" > {{operatorQueueOutput}}
       else
         if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
-          jq -r '[.targets[]?.target, .automation_queue[]?.target] | map(select(. != null and . != "")) | unique | .[]' "{{retestPlanOutput}}" 2>/dev/null > "$FALLBACK_TARGETS" || true
+          jq -r '[.targets[]?.target, .automation_queue[]?.target] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | .[]' "{{retestPlanOutput}}" 2>/dev/null > "$FALLBACK_TARGETS" || true
         else
           : > "$FALLBACK_TARGETS"
+        fi
+        if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+          jq -r '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$FALLBACK_TARGETS" || true
+          awk 'NF && !seen[$0]++' "$FALLBACK_TARGETS" > "$FALLBACK_TARGETS.tmp" 2>/dev/null && mv "$FALLBACK_TARGETS.tmp" "$FALLBACK_TARGETS" || true
+        elif [ -n "{{previous_followup_combined_targets_list}}" ]; then
+          printf '%s\n' "$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")" | jq -r '.[]? // empty' 2>/dev/null >> "$FALLBACK_TARGETS" || true
+          awk 'NF && !seen[$0]++' "$FALLBACK_TARGETS" > "$FALLBACK_TARGETS.tmp" 2>/dev/null && mv "$FALLBACK_TARGETS.tmp" "$FALLBACK_TARGETS" || true
+        fi
+        if [ ! -s "$FALLBACK_TARGETS" ]; then
+          extract_semantic_targets "$ACTIVE_SEMANTIC_FILE" > "$FALLBACK_TARGETS" 2>/dev/null || true
         fi
 
         FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
@@ -209,10 +348,10 @@ steps:
                 priority: (if $i < 3 then "P1" else "P2" end),
                 target: $fallback_targets[$i],
                 title: "Manual validation follow-up",
-                reason: "fallback task derived from retest plan targets",
+                reason: "fallback task derived from retest plan or semantic targets",
                 procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
                 expected_outcome: "Confirm whether the target can be exploited or chained further",
-                evidence: ["retest_plan", "fallback_generation"]
+                evidence: ["semantic_search", "fallback_generation"]
               }
             ]
           }' > {{operatorQueueOutput}}

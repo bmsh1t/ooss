@@ -1231,6 +1231,74 @@ func TestExecuteAIOperatorQueueFallbackPreservesRetestPlanOrder(t *testing.T) {
 	}, focusTargets)
 }
 
+func TestExecuteAIOperatorQueueCountsRetestTargetsWithoutSummary(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-operator-queue.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-generate-operator-queue" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "operator-queue-retest-no-summary"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "targets": [
+    {"target": "https://b.example.com/admin"}
+  ],
+  "automation_queue": [
+    {"target": "https://a.example.com/graphql"},
+    {"target": "https://b.example.com/admin"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	_, err = os.Stat(filepath.Join(aiDir, ".operator-queue-skip"))
+	assert.True(t, os.IsNotExist(err))
+
+	contextData, err := os.ReadFile(filepath.Join(aiDir, ".input", "operator-queue-context.json"))
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(contextData, &payload))
+
+	counts, ok := payload["counts"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), counts["retest_targets"])
+
+	queueData, err := os.ReadFile(filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var queue map[string]interface{}
+	require.NoError(t, json.Unmarshal(queueData, &queue))
+
+	focusTargets, ok := queue["focus_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://b.example.com/admin",
+		"https://a.example.com/graphql",
+	}, focusTargets)
+}
+
 func TestExecuteAIOperatorQueueFallsBackToSemanticTargets(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -3670,7 +3738,7 @@ func TestExecuteAIPostFollowupCoordinationBuildsEnrichedSeedSignals(t *testing.T
 
 	signalScores, ok := seedFocus["signal_scores"].(map[string]interface{})
 	require.True(t, ok)
-	assert.Equal(t, float64(22), signalScores["escalation_score"])
+	assert.Equal(t, float64(24), signalScores["escalation_score"])
 	assert.Equal(t, float64(1), signalScores["confirmed_urls"])
 	assert.Equal(t, float64(2), signalScores["operator_tasks"])
 	assert.Contains(t, reuseSources, "campaign-create")
@@ -3722,6 +3790,78 @@ func TestExecuteAIPostFollowupCoordinationBuildsEnrichedSeedSignals(t *testing.T
 	require.True(t, ok)
 	assert.Contains(t, rescanTargets, "https://critical.example.com/admin")
 	assert.Contains(t, rescanTargets, "https://high.example.com/upload")
+}
+
+func TestExecuteAIPostFollowupCoordinationCountsRetestTargetsWithoutSummary(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-retest-no-summary"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "targets": [
+    {"target": "https://retest.example.com/admin"}
+  ],
+  "automation_queue": [
+    {"target": "https://queue.example.com/graphql"},
+    {"target": "https://retest.example.com/admin"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var followup map[string]interface{}
+	require.NoError(t, json.Unmarshal(followupData, &followup))
+
+	followupSummary, ok := followup["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), followupSummary["retest_targets"])
+
+	seedFocus, ok := followup["seed_focus"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "retest-first", seedFocus["priority_mode"])
+	assert.Equal(t, "medium", seedFocus["confidence_level"])
+	assert.Equal(t, "targeted-retest", seedFocus["next_phase"])
+	assert.Equal(t, "balanced", seedFocus["scan_profile"])
+
+	reuseSources, ok := seedFocus["reuse_sources"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, reuseSources, "retest")
+
+	signalScores, ok := seedFocus["signal_scores"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), signalScores["retest_targets"])
+	assert.Equal(t, float64(4), signalScores["escalation_score"])
+
+	seedTargets, ok := followup["seed_targets"].(map[string]interface{})
+	require.True(t, ok)
+	retestTargets, ok := seedTargets["retest_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://retest.example.com/admin",
+		"https://queue.example.com/graphql",
+	}, retestTargets)
 }
 
 func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
