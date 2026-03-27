@@ -235,6 +235,15 @@ steps:
         fi
       }
 
+      count_operator_tasks() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("tasks") then ([.tasks[]?] | length) else (.summary.total_tasks // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -285,7 +294,7 @@ steps:
       ENTRY_POINTS=$(count_lines "{{entryPointsFile}}")
       BEST_PATH_TARGETS=$(count_lines "{{bestPathTargetsFile}}")
       SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
-      OPERATOR_TASKS=$(jq -r '.summary.total_tasks // 0' {{operatorQueueFile}} 2>/dev/null || echo 0)
+      OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueFile}}")
       RETEST_QUEUED=$(jq -r '.queued_targets // 0' {{retestQueueSummaryFile}} 2>/dev/null || echo 0)
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' {{campaignHandoffFile}} 2>/dev/null || echo false)
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
@@ -586,6 +595,24 @@ steps:
         awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
       }
 
+      render_vuln_section() {
+        title="$1"
+        file="$2"
+        [ -f "$file" ] && [ -s "$file" ] || return 0
+
+        echo -e "\n### $title\n" >> {{fullReportFile}}
+        if jq empty "$file" >/dev/null 2>&1; then
+          jq -r '
+            "- **" + ((.["template-id"] // .template_id // "finding") | tostring) + "**: " +
+            ((.info.name // .name // "Unknown finding") | tostring) +
+            " at " +
+            ((.["matched-at"] // .matched_at // .host // .url // "unknown") | tostring)
+          ' "$file" 2>/dev/null | head -50 >> {{fullReportFile}} || true
+        else
+          head -50 "$file" | sed "s/^/- /" >> {{fullReportFile}} 2>/dev/null || true
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -609,16 +636,10 @@ steps:
       echo -e "\n---\n\n## 详细发现\n" >> {{fullReportFile}}
       
       # 关键漏洞
-      if [ -f "{{nucleiCriticalFile}}" ] && [ -s "{{nucleiCriticalFile}}" ]; then
-        echo -e "\n### 🔴 关键漏洞\n" >> {{fullReportFile}}
-        jq -r '"- **\(.template-id)**: \(.info.name) at \(.matched-at)"' {{nucleiCriticalFile}} 2>/dev/null | head -50 >> {{fullReportFile}} || true
-      fi
+      render_vuln_section "🔴 关键漏洞" "{{nucleiCriticalFile}}"
       
       # 高危漏洞
-      if [ -f "{{nucleiHighFile}}" ] && [ -s "{{nucleiHighFile}}" ]; then
-        echo -e "\n### 🟠 高危漏洞\n" >> {{fullReportFile}}
-        jq -r '"- **\(.template-id)**: \(.info.name) at \(.matched-at)"' {{nucleiHighFile}} 2>/dev/null | head -50 >> {{fullReportFile}} || true
-      fi
+      render_vuln_section "🟠 高危漏洞" "{{nucleiHighFile}}"
       
       # 敏感信息
       if [ -f "{{secretFile}}" ] && [ -s "{{secretFile}}" ]; then

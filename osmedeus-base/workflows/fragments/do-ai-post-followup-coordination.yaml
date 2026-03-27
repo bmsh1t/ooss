@@ -78,6 +78,15 @@ steps:
         fi
       }
 
+      count_operator_tasks() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r 'if has("tasks") then ([.tasks[]?] | length) else (.summary.total_tasks // 0) end' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -116,7 +125,7 @@ steps:
       OPERATOR_TASKS=0
       if [ -f "{{operatorQueueOutput}}" ] && jq empty "{{operatorQueueOutput}}" 2>/dev/null; then
         OPERATOR_TARGETS_JSON=$(jq -c '[.focus_targets[]?, .tasks[]?.target] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{operatorQueueOutput}}" 2>/dev/null || echo '[]')
-        OPERATOR_TASKS=$(jq -r '.summary.total_tasks // ([.tasks[]?] | length) // 0' "{{operatorQueueOutput}}" 2>/dev/null || echo 0)
+        OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueOutput}}")
       fi
 
       CAMPAIGN_READY=false

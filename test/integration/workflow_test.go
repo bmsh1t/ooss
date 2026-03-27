@@ -3864,6 +3864,73 @@ func TestExecuteAIPostFollowupCoordinationCountsRetestTargetsWithoutSummary(t *t
 	}, retestTargets)
 }
 
+func TestExecuteAIPostFollowupCoordinationCountsOperatorTasksFromTaskList(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-operator-task-count"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 1},
+  "focus_targets": ["https://operator.example.com/admin"],
+  "tasks": [
+    {"target": "https://operator.example.com/admin"},
+    {"target": "https://operator.example.com/upload"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var followup map[string]interface{}
+	require.NoError(t, json.Unmarshal(followupData, &followup))
+
+	followupSummary, ok := followup["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), followupSummary["operator_tasks"])
+
+	seedFocus, ok := followup["seed_focus"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "manual-first", seedFocus["priority_mode"])
+	assert.Equal(t, "high", seedFocus["confidence_level"])
+	assert.Equal(t, "manual-exploitation", seedFocus["next_phase"])
+	assert.Equal(t, "aggressive", seedFocus["scan_profile"])
+
+	signalScores, ok := seedFocus["signal_scores"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), signalScores["operator_tasks"])
+	assert.Equal(t, float64(8), signalScores["escalation_score"])
+
+	seedTargets, ok := followup["seed_targets"].(map[string]interface{})
+	require.True(t, ok)
+	manualFirst, ok := seedTargets["manual_first_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://operator.example.com/admin",
+		"https://operator.example.com/upload",
+	}, manualFirst)
+}
+
 func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5324,6 +5391,59 @@ func TestExecuteFinalReportWithAIArtifacts(t *testing.T) {
 	assert.Contains(t, fullReport, "Previous priority mode: manual-first")
 	assert.Contains(t, fullReport, "next-action: Validate admin auth boundary")
 	assert.Contains(t, fullReport, "Campaign ID: camp-report-42")
+}
+
+func TestExecuteFinalReportUsesRealOperatorTaskCount(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-real-operator-task-count"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	reportDir := filepath.Join(outputDir, "report")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 1},
+  "tasks": [
+    {"target": "https://a.example.com/admin"},
+    {"target": "https://a.example.com/upload"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                 "https://app.example.com",
+		"space_name":             targetSpace,
+		"enableLlmReport":        "false",
+		"enableLlmAttackSurface": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statsData, err := os.ReadFile(filepath.Join(reportDir, "statistics-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var stats map[string]interface{}
+	require.NoError(t, json.Unmarshal(statsData, &stats))
+
+	statistics, ok := stats["statistics"].(map[string]interface{})
+	require.True(t, ok)
+	aiStats, ok := statistics["ai"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), aiStats["operator_tasks"])
 }
 
 func TestExecuteFinalReportFallsBackToDecisionFollowupSemanticPriorityTargets(t *testing.T) {
