@@ -265,6 +265,7 @@ osmedeus run -f superdomain-extensive-hybrid -t example.com -P params.yaml
 - `ai-apply-decision` normalizes the AI output into `applied-ai-decision-{{TargetSpace}}.json`, `dynamic-config.yaml`, and `scan-env.sh`, so downstream modules consume one stable decision layer
 - `targeted-rescan` now feeds verified follow-up hits back into the main nuclei result set instead of leaving them isolated in a side artifact
 - `ai-post-followup-coordination` aggregates retest, operator queue, campaign handoff/create, and rescan outputs into `followup-decision-{{TargetSpace}}.json` and `.md`
+- `ai-retest-queue` now forwards normalized `previous_followup_*` state into queued reruns, and the pre-scan / apply-decision / intelligent-analysis stages can recover that context even when only queue params remain
 - the default follow-up workflow for retest/campaign execution is `web-analysis`
 - `ai-knowledge-autolearn` now generates structured learned knowledge documents such as workspace summary, verified findings, false-positive samples, and AI insights
 
@@ -298,10 +299,15 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `GET /osm/api/campaigns`
   - `POST /osm/api/campaigns`
   - `GET /osm/api/campaigns/:id`
+  - `GET /osm/api/campaigns/:id/report`
+  - `GET /osm/api/campaigns/:id/export`
   - `POST /osm/api/campaigns/:id/rerun-failed`
   - `POST /osm/api/campaigns/:id/deep-scan`
+  - CLI now includes `osmedeus campaign report <id>` and `osmedeus campaign export <id> --format csv|json`
+  - report/export now support `risk/status/trigger` target-row filters and `high-risk`, `recovered`, `failed` export presets
+  - report/export now support post-filter `offset/limit` pagination with explicit page metadata
   - campaign target status now includes `attack_chain_summary` beside `vuln_summary`
-  - high-risk deep-scan escalation can now be triggered by verified critical/high-impact attack-chain signals, not only raw vulnerability severities
+  - high-risk deep-scan escalation can now be triggered by operational critical/high-impact attack-chain signals, not only raw vulnerability severities
 - **Vulnerability Lifecycle APIs**
   - `GET /osm/api/vulnerabilities/board`
   - `PATCH /osm/api/vulnerabilities/:id`
@@ -323,12 +329,14 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - `stable`, `hybrid`, `optimized`, and `lite` now run knowledge auto-learning at the end of the workflow when `enableKnowledgeLearning=true`
   - All four workflows now emit a normalized `applied-ai-decision` artifact and a post-execution `followup-decision` artifact for downstream reuse and reporting
   - Retest, operator queue, campaign handoff, and targeted rescan are now folded back into the same decision chain instead of remaining isolated outputs
+  - Queued reruns now preserve manual-first, high-confidence, campaign-create, and retest follow-up signals through normalized `previous_followup_*` params when the previous `followup-decision` file is unavailable
   - Retest lifecycle now propagates source run UUIDs so post-retest state can converge back to `verified`, `closed`, or `triaged`
   - Knowledge auto-learning now writes higher-signal learned knowledge back into the KB for future retrieval
   - Attack-chain ACP input is now pre-curated to prefer verified findings and exclude false-positive nodes from chain generation
 - **Verification snapshot**
   - Current source builds successfully with `make build`
   - focused handler tests now cover vulnerability evidence/timeline enrichment, attack-chain reverse linkage, and campaign attack-chain-aware deep-scan selection
+  - focused workflow tests now cover queued `previous_followup_*` recovery across `ai-pre-scan-decision`, `ai-pre-scan-decision-acp`, `ai-apply-decision`, `ai-intelligent-analysis`, and `ai-retest-queue`
   - Local real-API regression passed for campaign, vulnerability, and attack-chain flows on a clean no-auth server instance
   - `superdomain-extensive-stable`, `superdomain-extensive-hybrid`, `superdomain-extensive`, `superdomain-extensive-lite`, and `ai-knowledge-autolearn` all pass workflow validation
   - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support

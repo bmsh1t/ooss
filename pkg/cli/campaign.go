@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/j3ssie/osmedeus/v5/internal/attackchain"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
 	"github.com/j3ssie/osmedeus/v5/internal/logger"
@@ -37,6 +41,14 @@ var (
 	campaignStatusFilter         string
 	campaignOffset               int
 	campaignLimit                int
+	campaignReportRiskLevels     []string
+	campaignReportStatuses       []string
+	campaignReportTriggerTypes   []string
+	campaignReportPreset         string
+	campaignReportOffset         int
+	campaignReportLimit          int
+	campaignExportFormat         string
+	campaignExportOutput         string
 )
 
 var campaignCmd = &cobra.Command{
@@ -62,6 +74,20 @@ var campaignStatusCmd = &cobra.Command{
 	Short: "Show campaign status and target-level progress",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runCampaignStatus,
+}
+
+var campaignReportCmd = &cobra.Command{
+	Use:   "report <campaign-id>",
+	Short: "Show campaign analytics, rerun history, and target-level findings",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCampaignReport,
+}
+
+var campaignExportCmd = &cobra.Command{
+	Use:   "export <campaign-id>",
+	Short: "Export campaign analytics as CSV or JSON",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCampaignExport,
 }
 
 var campaignDeepScanCmd = &cobra.Command{
@@ -99,9 +125,27 @@ func init() {
 	campaignListCmd.Flags().IntVar(&campaignOffset, "offset", 0, "pagination offset")
 	campaignListCmd.Flags().IntVar(&campaignLimit, "limit", 20, "pagination limit")
 
+	campaignReportCmd.Flags().StringSliceVar(&campaignReportRiskLevels, "risk", nil, "filter target rows by risk level")
+	campaignReportCmd.Flags().StringSliceVar(&campaignReportStatuses, "status", nil, "filter target rows by latest status")
+	campaignReportCmd.Flags().StringSliceVar(&campaignReportTriggerTypes, "trigger", nil, "filter target rows by latest trigger type")
+	campaignReportCmd.Flags().StringVar(&campaignReportPreset, "preset", "", "preset slice (high-risk, recovered, failed)")
+	campaignReportCmd.Flags().IntVar(&campaignReportOffset, "offset", 0, "pagination offset after filters")
+	campaignReportCmd.Flags().IntVar(&campaignReportLimit, "limit", 0, "pagination limit after filters (0 = all)")
+
+	campaignExportCmd.Flags().StringSliceVar(&campaignReportRiskLevels, "risk", nil, "filter target rows by risk level")
+	campaignExportCmd.Flags().StringSliceVar(&campaignReportStatuses, "status", nil, "filter target rows by latest status")
+	campaignExportCmd.Flags().StringSliceVar(&campaignReportTriggerTypes, "trigger", nil, "filter target rows by latest trigger type")
+	campaignExportCmd.Flags().StringVar(&campaignReportPreset, "preset", "", "preset slice (high-risk, recovered, failed)")
+	campaignExportCmd.Flags().IntVar(&campaignReportOffset, "offset", 0, "pagination offset after filters")
+	campaignExportCmd.Flags().IntVar(&campaignReportLimit, "limit", 0, "pagination limit after filters (0 = all)")
+	campaignExportCmd.Flags().StringVar(&campaignExportFormat, "format", "", "export format (csv or json)")
+	campaignExportCmd.Flags().StringVarP(&campaignExportOutput, "output", "o", "", "write export to file instead of stdout")
+
 	campaignCmd.AddCommand(campaignCreateCmd)
 	campaignCmd.AddCommand(campaignListCmd)
 	campaignCmd.AddCommand(campaignStatusCmd)
+	campaignCmd.AddCommand(campaignReportCmd)
+	campaignCmd.AddCommand(campaignExportCmd)
 	campaignCmd.AddCommand(campaignDeepScanCmd)
 	campaignCmd.AddCommand(campaignRerunFailedCmd)
 	rootCmd.AddCommand(campaignCmd)
@@ -357,6 +401,155 @@ func runCampaignStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runCampaignReport(cmd *cobra.Command, args []string) error {
+	if disableDB {
+		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
+	}
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	ctx := context.Background()
+	campaign, err := database.GetCampaignByID(ctx, args[0])
+	if err != nil {
+		return err
+	}
+
+	report, err := buildCampaignReportResponseCLI(ctx, campaign)
+	if err != nil {
+		return err
+	}
+	filters, err := normalizeCampaignReportFiltersCLI(campaignReportRiskLevels, campaignReportStatuses, campaignReportTriggerTypes, campaignReportPreset)
+	if err != nil {
+		return err
+	}
+	report = applyCampaignReportFiltersCLI(report, campaign, filters)
+	report = paginateCampaignReportCLI(report, campaignReportOffset, campaignReportLimit)
+
+	if globalJSON {
+		data, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("Campaign: %s\n", report.Campaign.Name)
+	fmt.Printf("ID:       %s\n", report.Campaign.ID)
+	fmt.Printf("Workflow: %s (%s)\n", report.Campaign.WorkflowName, report.Campaign.WorkflowKind)
+	fmt.Printf("Status:   %s\n", report.Status)
+	fmt.Printf("Targets:  returned=%d matched=%d total=%d\n", report.Pagination.ReturnedCount, report.ResultCount, report.TotalTargets)
+	if report.Pagination.Offset > 0 || report.Pagination.Limit > 0 {
+		fmt.Printf("Page:     offset=%d limit=%d has-more=%t\n", report.Pagination.Offset, report.Pagination.Limit, report.Pagination.HasMore)
+	}
+	fmt.Printf("Progress: total=%d pending=%d running=%d completed=%d failed=%d\n",
+		report.Progress.Total, report.Progress.Pending, report.Progress.Running, report.Progress.Completed, report.Progress.Failed)
+	fmt.Printf("Risk Distribution: critical=%d high=%d medium=%d low=%d none=%d\n",
+		report.RiskDistribution["critical"], report.RiskDistribution["high"], report.RiskDistribution["medium"], report.RiskDistribution["low"], report.RiskDistribution["none"])
+	fmt.Printf("Triggers: campaign=%d rerun=%d deep-scan=%d\n",
+		report.TriggerDistribution["campaign"], report.TriggerDistribution["campaign-rerun"], report.TriggerDistribution["campaign-deep-scan"])
+	fmt.Printf("Deep Scan: configured=%t eligible=%d queued-targets=%d total-runs=%d queued=%d running=%d completed=%d failed=%d conversion=%.2f\n",
+		report.DeepScan.Configured, report.DeepScan.EligibleTargets, report.DeepScan.QueuedTargets, report.DeepScan.TotalRuns,
+		report.DeepScan.QueuedRuns, report.DeepScan.RunningRuns, report.DeepScan.CompletedRuns, report.DeepScan.FailedRuns, report.DeepScan.ConversionRate)
+	fmt.Printf("Reruns: total=%d unique-targets=%d recovered=%d\n",
+		report.RerunHistory.TotalRuns, report.RerunHistory.UniqueTargets, report.RerunHistory.RecoveredTargets)
+	if report.RerunHistory.LastRerunAt != nil {
+		fmt.Printf("Last Rerun: %s\n", report.RerunHistory.LastRerunAt.Format(time.RFC3339))
+	}
+	if len(report.FiltersApplied.RiskLevels) > 0 || len(report.FiltersApplied.Statuses) > 0 || len(report.FiltersApplied.TriggerTypes) > 0 || report.FiltersApplied.Preset != "" {
+		fmt.Printf("Filters: risk=%s status=%s trigger=%s preset=%s\n",
+			strings.Join(report.FiltersApplied.RiskLevels, ","),
+			strings.Join(report.FiltersApplied.Statuses, ","),
+			strings.Join(report.FiltersApplied.TriggerTypes, ","),
+			report.FiltersApplied.Preset)
+	}
+	fmt.Println("")
+
+	for _, target := range report.Targets {
+		fmt.Printf("- %s\n", target.Target)
+		fmt.Printf("  Workspace: %s\n", target.Workspace)
+		fmt.Printf("  Status: %s | Risk: %s | Latest Trigger: %s | DeepScanQueued: %t\n",
+			target.Status, target.RiskLevel, target.LatestTriggerType, target.DeepScanQueued)
+		fmt.Printf("  Runs: total=%d rerun=%d deep-scan=%d recovered=%t\n",
+			target.TotalRuns, target.RerunRuns, target.DeepScanRuns, target.Recovered)
+		fmt.Printf("  Findings: critical=%d high=%d medium=%d low=%d open-high-risk=%d\n",
+			target.CriticalFindings, target.HighFindings, target.MediumFindings, target.LowFindings, target.OpenHighRiskFindings)
+		fmt.Printf("  Attack Chains: operational=%d verified=%d\n",
+			target.AttackChainOperationalHits, target.AttackChainVerifiedHits)
+	}
+	return nil
+}
+
+func runCampaignExport(cmd *cobra.Command, args []string) error {
+	if disableDB {
+		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
+	}
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	ctx := context.Background()
+	campaign, err := database.GetCampaignByID(ctx, args[0])
+	if err != nil {
+		return err
+	}
+
+	report, err := buildCampaignReportResponseCLI(ctx, campaign)
+	if err != nil {
+		return err
+	}
+	filters, err := normalizeCampaignReportFiltersCLI(campaignReportRiskLevels, campaignReportStatuses, campaignReportTriggerTypes, campaignReportPreset)
+	if err != nil {
+		return err
+	}
+	report = applyCampaignReportFiltersCLI(report, campaign, filters)
+	report = paginateCampaignReportCLI(report, campaignReportOffset, campaignReportLimit)
+
+	format := strings.TrimSpace(strings.ToLower(campaignExportFormat))
+	if format == "" {
+		if globalJSON {
+			format = "json"
+		} else {
+			format = "csv"
+		}
+	}
+
+	var data []byte
+	switch format {
+	case "json":
+		data, err = json.Marshal(report)
+	case "csv":
+		data, err = renderCampaignReportCSVCLI(report)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(campaignExportOutput) != "" {
+		outputPath := strings.TrimSpace(campaignExportOutput)
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("Exported campaign report to %s\n", outputPath)
+		return nil
+	}
+
+	if format == "json" {
+		fmt.Println(string(data))
+		return nil
+	}
+	fmt.Print(string(data))
+	return nil
+}
+
 func runCampaignDeepScan(cmd *cobra.Command, args []string) error {
 	if disableDB {
 		return fmt.Errorf("campaign commands unavailable: --disable-db flag is set")
@@ -561,23 +754,88 @@ type campaignSignalSummaryCLI struct {
 	VerifiedAttackChainTargets int `json:"verified_attack_chain_targets"`
 }
 
+type campaignReportResponseCLI struct {
+	Campaign                    *database.Campaign           `json:"campaign"`
+	GeneratedAt                 time.Time                    `json:"generated_at"`
+	Status                      string                       `json:"status"`
+	Progress                    campaignJobProgress          `json:"progress"`
+	Summary                     campaignSignalSummaryCLI     `json:"summary"`
+	RiskDistribution            map[string]int               `json:"risk_distribution"`
+	LatestRunStatusDistribution map[string]int               `json:"latest_run_status_distribution"`
+	TriggerDistribution         map[string]int               `json:"trigger_distribution"`
+	DeepScan                    campaignDeepScanReportCLI    `json:"deep_scan"`
+	RerunHistory                campaignRerunHistoryCLI      `json:"rerun_history"`
+	FiltersApplied              campaignReportFiltersCLI     `json:"filters_applied"`
+	TotalTargets                int                          `json:"total_targets"`
+	ResultCount                 int                          `json:"result_count"`
+	Pagination                  campaignReportPaginationCLI  `json:"pagination"`
+	Targets                     []campaignReportTargetRowCLI `json:"targets"`
+}
+
+type campaignReportFiltersCLI struct {
+	RiskLevels   []string `json:"risk_levels,omitempty"`
+	Statuses     []string `json:"statuses,omitempty"`
+	TriggerTypes []string `json:"trigger_types,omitempty"`
+	Preset       string   `json:"preset,omitempty"`
+}
+
+type campaignReportPaginationCLI struct {
+	Offset        int  `json:"offset"`
+	Limit         int  `json:"limit"`
+	ReturnedCount int  `json:"returned_count"`
+	HasMore       bool `json:"has_more"`
+}
+
+type campaignDeepScanReportCLI struct {
+	Configured      bool    `json:"configured"`
+	EligibleTargets int     `json:"eligible_targets"`
+	QueuedTargets   int     `json:"queued_targets"`
+	TotalRuns       int     `json:"total_runs"`
+	QueuedRuns      int     `json:"queued_runs"`
+	RunningRuns     int     `json:"running_runs"`
+	CompletedRuns   int     `json:"completed_runs"`
+	FailedRuns      int     `json:"failed_runs"`
+	ConversionRate  float64 `json:"conversion_rate"`
+}
+
+type campaignRerunHistoryCLI struct {
+	TotalRuns        int        `json:"total_runs"`
+	UniqueTargets    int        `json:"unique_targets"`
+	RecoveredTargets int        `json:"recovered_targets"`
+	LastRerunAt      *time.Time `json:"last_rerun_at,omitempty"`
+}
+
+type campaignReportTargetRowCLI struct {
+	Target                     string     `json:"target"`
+	Workspace                  string     `json:"workspace"`
+	Status                     string     `json:"status"`
+	RiskLevel                  string     `json:"risk_level"`
+	LatestRunUUID              string     `json:"latest_run_uuid,omitempty"`
+	LatestTriggerType          string     `json:"latest_trigger_type,omitempty"`
+	LatestRunAt                time.Time  `json:"latest_run_at,omitempty"`
+	DeepScanQueued             bool       `json:"deep_scan_queued"`
+	TotalRuns                  int        `json:"total_runs"`
+	RerunRuns                  int        `json:"rerun_runs"`
+	DeepScanRuns               int        `json:"deep_scan_runs"`
+	Recovered                  bool       `json:"recovered"`
+	LastRerunAt                *time.Time `json:"last_rerun_at,omitempty"`
+	LastDeepScanAt             *time.Time `json:"last_deep_scan_at,omitempty"`
+	CriticalFindings           int        `json:"critical_findings"`
+	HighFindings               int        `json:"high_findings"`
+	MediumFindings             int        `json:"medium_findings"`
+	LowFindings                int        `json:"low_findings"`
+	OpenHighRiskFindings       int        `json:"open_high_risk_findings"`
+	AttackChainOperationalHits int        `json:"attack_chain_operational_hits"`
+	AttackChainVerifiedHits    int        `json:"attack_chain_verified_hits"`
+}
+
 func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Campaign) (*campaignStatusResponseCLI, error) {
 	runs, err := database.GetRunsByRunGroupID(ctx, campaign.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	latestRuns := make(map[string]*database.Run)
-	for _, run := range runs {
-		if run.TriggerType == "campaign-deep-scan" {
-			continue
-		}
-		key := run.Workspace + "::" + run.Target
-		existing := latestRuns[key]
-		if existing == nil || run.CreatedAt.After(existing.CreatedAt) {
-			latestRuns[key] = run
-		}
-	}
+	latestRuns := latestCampaignRunsCLI(runs)
 
 	progress := campaignJobProgress{Total: len(latestRuns)}
 	var (
@@ -598,10 +856,10 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 			progress.Failed++
 		}
 
-		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		vulnSummary, _ := database.GetActiveVulnerabilitySummaryForTarget(ctx, run.Workspace, run.Target)
+		attackChainSummary, _ := attackchain.GetTargetSummary(ctx, run.Workspace, run.Target)
 		riskLevel := deriveCampaignRiskLevelCLI(vulnSummary, attackChainSummary)
-		deepScanQueued, _ := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+		deepScanQueued, _ := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow, run.Target)
 		summary.TargetsTotal++
 		if deepScanQueued {
 			summary.DeepScanQueuedTargets++
@@ -629,7 +887,9 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 	summary.HighRiskTargets = len(deduplicateTargets(highRiskTargets))
 
 	status := aggregateCampaignStatusCLI(progress)
-	_ = database.UpdateCampaignStatus(ctx, campaign.ID, status)
+	if err := database.UpdateCampaignStatus(ctx, campaign.ID, status); err != nil {
+		return nil, err
+	}
 	campaign.Status = status
 
 	return &campaignStatusResponseCLI{
@@ -643,15 +903,277 @@ func buildCampaignStatusResponseCLI(ctx context.Context, campaign *database.Camp
 	}, nil
 }
 
+func buildCampaignReportResponseCLI(ctx context.Context, campaign *database.Campaign) (*campaignReportResponseCLI, error) {
+	statusResponse, err := buildCampaignStatusResponseCLI(ctx, campaign)
+	if err != nil {
+		return nil, err
+	}
+
+	report := &campaignReportResponseCLI{
+		Campaign:                    statusResponse.Campaign,
+		GeneratedAt:                 time.Now().UTC(),
+		Status:                      statusResponse.Status,
+		Progress:                    statusResponse.Progress,
+		Summary:                     statusResponse.Summary,
+		RiskDistribution:            make(map[string]int),
+		LatestRunStatusDistribution: make(map[string]int),
+		TriggerDistribution:         make(map[string]int),
+	}
+
+	targetRows := make(map[string]*campaignReportTargetRowCLI, len(statusResponse.Targets))
+	for _, target := range statusResponse.Targets {
+		report.RiskDistribution[target.RiskLevel]++
+		report.LatestRunStatusDistribution[target.Status]++
+		row := &campaignReportTargetRowCLI{
+			Target:               target.Target,
+			Workspace:            target.Workspace,
+			Status:               target.Status,
+			RiskLevel:            target.RiskLevel,
+			LatestRunUUID:        target.RunUUID,
+			DeepScanQueued:       target.DeepScanQueued,
+			CriticalFindings:     target.VulnSummary["critical"],
+			HighFindings:         target.VulnSummary["high"],
+			MediumFindings:       target.VulnSummary["medium"],
+			LowFindings:          target.VulnSummary["low"],
+			OpenHighRiskFindings: target.VulnSummary["critical"] + target.VulnSummary["high"],
+		}
+		if target.AttackChainSummary != nil {
+			row.AttackChainOperationalHits = target.AttackChainSummary.OperationalHits
+			row.AttackChainVerifiedHits = target.AttackChainSummary.VerifiedHits
+		}
+		targetRows[campaignTargetKeyCLI(target.Workspace, target.Target)] = row
+	}
+
+	latestRuns := latestCampaignRunsCLI(statusResponse.Runs)
+	rerunTargets := make(map[string]struct{})
+
+	report.DeepScan.Configured = strings.TrimSpace(statusResponse.Campaign.DeepScanWorkflow) != ""
+	report.DeepScan.EligibleTargets = len(statusResponse.HighRiskTargets)
+	report.DeepScan.QueuedTargets = statusResponse.Summary.DeepScanQueuedTargets
+
+	for _, run := range statusResponse.Runs {
+		report.TriggerDistribution[run.TriggerType]++
+		key := campaignTargetKeyCLI(run.Workspace, run.Target)
+		row, ok := targetRows[key]
+		if !ok {
+			continue
+		}
+		row.TotalRuns++
+
+		switch run.TriggerType {
+		case "campaign-rerun":
+			row.RerunRuns++
+			report.RerunHistory.TotalRuns++
+			rerunTargets[key] = struct{}{}
+			updateCampaignRowTimeCLI(&row.LastRerunAt, run.CreatedAt)
+			updateCampaignRowTimeCLI(&report.RerunHistory.LastRerunAt, run.CreatedAt)
+		case "campaign-deep-scan":
+			row.DeepScanRuns++
+			report.DeepScan.TotalRuns++
+			updateCampaignRowTimeCLI(&row.LastDeepScanAt, run.CreatedAt)
+			switch run.Status {
+			case "queued", "pending":
+				report.DeepScan.QueuedRuns++
+			case "running":
+				report.DeepScan.RunningRuns++
+			case "completed":
+				report.DeepScan.CompletedRuns++
+			case "failed":
+				report.DeepScan.FailedRuns++
+			}
+		}
+	}
+	report.RerunHistory.UniqueTargets = len(rerunTargets)
+
+	for key, row := range targetRows {
+		if latest := latestRuns[key]; latest != nil {
+			row.LatestRunUUID = latest.RunUUID
+			row.LatestTriggerType = latest.TriggerType
+			row.LatestRunAt = latest.CreatedAt
+		}
+		if row.RerunRuns > 0 && latestCampaignTargetRecoveredCLI(statusResponse.Runs, key, latestRuns[key]) {
+			row.Recovered = true
+			report.RerunHistory.RecoveredTargets++
+		}
+		report.Targets = append(report.Targets, *row)
+	}
+
+	if report.DeepScan.EligibleTargets > 0 {
+		report.DeepScan.ConversionRate = float64(report.DeepScan.QueuedTargets) / float64(report.DeepScan.EligibleTargets)
+	}
+
+	sort.Slice(report.Targets, func(i, j int) bool {
+		left := report.Targets[i]
+		right := report.Targets[j]
+		if campaignRiskRankCLI(left.RiskLevel) == campaignRiskRankCLI(right.RiskLevel) {
+			if left.OpenHighRiskFindings == right.OpenHighRiskFindings {
+				return left.Target < right.Target
+			}
+			return left.OpenHighRiskFindings > right.OpenHighRiskFindings
+		}
+		return campaignRiskRankCLI(left.RiskLevel) > campaignRiskRankCLI(right.RiskLevel)
+	})
+
+	report.TotalTargets = len(report.Targets)
+	report.ResultCount = len(report.Targets)
+
+	return report, nil
+}
+
+func normalizeCampaignReportFiltersCLI(riskLevels, statuses, triggerTypes []string, preset string) (campaignReportFiltersCLI, error) {
+	filters := campaignReportFiltersCLI{
+		RiskLevels:   normalizeCampaignFilterListCLI(riskLevels),
+		Statuses:     normalizeCampaignFilterListCLI(statuses),
+		TriggerTypes: normalizeCampaignFilterListCLI(triggerTypes),
+		Preset:       normalizeCampaignReportPresetCLI(preset),
+	}
+	if filters.Preset == "" || filters.Preset == "high-risk" || filters.Preset == "recovered" || filters.Preset == "failed" {
+		return filters, nil
+	}
+	return campaignReportFiltersCLI{}, fmt.Errorf("unsupported campaign report preset: %s", preset)
+}
+
+func normalizeCampaignFilterListCLI(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var normalized []string
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			item = strings.ToLower(strings.TrimSpace(item))
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			normalized = append(normalized, item)
+		}
+	}
+	return normalized
+}
+
+func normalizeCampaignReportPresetCLI(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "_", "-")
+	return value
+}
+
+func applyCampaignReportFiltersCLI(report *campaignReportResponseCLI, campaign *database.Campaign, filters campaignReportFiltersCLI) *campaignReportResponseCLI {
+	if report == nil {
+		return nil
+	}
+
+	filtered := *report
+	filtered.FiltersApplied = filters
+	filtered.TotalTargets = len(report.Targets)
+	filtered.ResultCount = len(report.Targets)
+
+	if len(filters.RiskLevels) == 0 && len(filters.Statuses) == 0 && len(filters.TriggerTypes) == 0 && filters.Preset == "" {
+		return &filtered
+	}
+
+	filtered.Targets = nil
+	for _, row := range report.Targets {
+		if !campaignReportRowMatchesFiltersCLI(campaign, row, filters) {
+			continue
+		}
+		filtered.Targets = append(filtered.Targets, row)
+	}
+	filtered.ResultCount = len(filtered.Targets)
+	return &filtered
+}
+
+func paginateCampaignReportCLI(report *campaignReportResponseCLI, offset, limit int) *campaignReportResponseCLI {
+	if report == nil {
+		return nil
+	}
+
+	totalMatched := len(report.Targets)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > totalMatched {
+		offset = totalMatched
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	end := totalMatched
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+
+	paginated := *report
+	paginated.Targets = append([]campaignReportTargetRowCLI(nil), report.Targets[offset:end]...)
+	paginated.Pagination = campaignReportPaginationCLI{
+		Offset:        offset,
+		Limit:         limit,
+		ReturnedCount: len(paginated.Targets),
+		HasMore:       end < totalMatched,
+	}
+	return &paginated
+}
+
+func campaignReportRowMatchesFiltersCLI(campaign *database.Campaign, row campaignReportTargetRowCLI, filters campaignReportFiltersCLI) bool {
+	if len(filters.RiskLevels) > 0 && !campaignFilterContainsCLI(filters.RiskLevels, row.RiskLevel) {
+		return false
+	}
+	if len(filters.Statuses) > 0 && !campaignFilterContainsCLI(filters.Statuses, row.Status) {
+		return false
+	}
+	if len(filters.TriggerTypes) > 0 && !campaignFilterContainsCLI(filters.TriggerTypes, row.LatestTriggerType) {
+		return false
+	}
+
+	switch filters.Preset {
+	case "":
+		return true
+	case "high-risk":
+		return campaignReportRowIsHighRiskCLI(campaign, row)
+	case "recovered":
+		return row.Recovered
+	case "failed":
+		return strings.EqualFold(row.Status, "failed")
+	default:
+		return false
+	}
+}
+
+func campaignFilterContainsCLI(values []string, actual string) bool {
+	actual = strings.ToLower(strings.TrimSpace(actual))
+	for _, value := range values {
+		if actual == strings.ToLower(strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func campaignReportRowIsHighRiskCLI(campaign *database.Campaign, row campaignReportTargetRowCLI) bool {
+	for _, severity := range normalizeHighRiskSeveritiesCLI(campaign.HighRiskSeverities) {
+		if strings.EqualFold(strings.TrimSpace(severity), row.RiskLevel) {
+			return true
+		}
+	}
+	return false
+}
+
 func deriveCampaignRiskLevelCLI(summary map[string]int, attackChainSummary *database.AttackChainWorkspaceSummary) string {
 	switch {
 	case summary["critical"] > 0:
 		return "critical"
-	case attackChainSummary != nil && attackChainSummary.CriticalChains > 0 && attackChainSummary.VerifiedHits > 0:
+	case attackChainSummary != nil && attackChainSummary.CriticalChains > 0 && attackChainSummary.OperationalHits > 0:
 		return "critical"
 	case summary["high"] > 0:
 		return "high"
-	case attackChainSummary != nil && attackChainSummary.HighImpactChains > 0 && attackChainSummary.VerifiedHits > 0:
+	case attackChainSummary != nil && attackChainSummary.HighImpactChains > 0 && attackChainSummary.OperationalHits > 0:
 		return "high"
 	case summary["medium"] > 0:
 		return "medium"
@@ -667,7 +1189,7 @@ func campaignTargetIsHighRiskCLI(campaign *database.Campaign, summary map[string
 		if summary[severity] > 0 {
 			return true
 		}
-		if attackChainSummary == nil || attackChainSummary.VerifiedHits <= 0 {
+		if attackChainSummary == nil || attackChainSummary.OperationalHits <= 0 {
 			continue
 		}
 		switch severity {
@@ -720,16 +1242,16 @@ func queueCampaignDeepScanRunsCLI(ctx context.Context, cfg *config.Config, campa
 
 	var queued int
 	var targets []string
-	for _, run := range runs {
+	for _, run := range latestCampaignRunsCLI(runs) {
 		if run.TriggerType == "campaign-deep-scan" {
 			continue
 		}
-		vulnSummary, _ := database.GetVulnerabilitySummary(ctx, run.Workspace)
-		attackChainSummary, _ := database.GetAttackChainWorkspaceSummary(ctx, run.Workspace)
+		vulnSummary, _ := database.GetActiveVulnerabilitySummaryForTarget(ctx, run.Workspace, run.Target)
+		attackChainSummary, _ := attackchain.GetTargetSummary(ctx, run.Workspace, run.Target)
 		if !campaignTargetIsHighRiskCLI(campaign, vulnSummary, attackChainSummary) {
 			continue
 		}
-		exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow)
+		exists, err := database.HasCampaignDeepScanRun(ctx, campaign.ID, run.Workspace, campaign.DeepScanWorkflow, run.Target)
 		if err != nil || exists {
 			continue
 		}
@@ -764,6 +1286,142 @@ func queueCampaignDeepScanRunsCLI(ctx context.Context, cfg *config.Config, campa
 	return queued, deduplicateTargets(targets), nil
 }
 
+func latestCampaignRunsCLI(runs []*database.Run) map[string]*database.Run {
+	latestRuns := make(map[string]*database.Run)
+	for _, run := range runs {
+		if run.TriggerType == "campaign-deep-scan" {
+			continue
+		}
+		key := run.Workspace + "::" + run.Target
+		existing := latestRuns[key]
+		if existing == nil || run.CreatedAt.After(existing.CreatedAt) {
+			latestRuns[key] = run
+		}
+	}
+	return latestRuns
+}
+
+func campaignTargetKeyCLI(workspace, target string) string {
+	return strings.TrimSpace(workspace) + "::" + strings.TrimSpace(target)
+}
+
+func latestCampaignTargetRecoveredCLI(runs []*database.Run, key string, latest *database.Run) bool {
+	if latest == nil || latest.Status != "completed" {
+		return false
+	}
+
+	hadFailure := false
+	for _, run := range runs {
+		if run.TriggerType == "campaign-deep-scan" {
+			continue
+		}
+		if campaignTargetKeyCLI(run.Workspace, run.Target) != key {
+			continue
+		}
+		if run.Status == "failed" && run.CreatedAt.Before(latest.CreatedAt) {
+			hadFailure = true
+		}
+	}
+	return hadFailure
+}
+
+func updateCampaignRowTimeCLI(target **time.Time, value time.Time) {
+	if value.IsZero() {
+		return
+	}
+	if *target == nil || value.After(**target) {
+		copyValue := value
+		*target = &copyValue
+	}
+}
+
+func campaignRiskRankCLI(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "critical":
+		return 5
+	case "high":
+		return 4
+	case "medium":
+		return 3
+	case "low":
+		return 2
+	case "none":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func formatCampaignCSVTimeCLI(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func renderCampaignReportCSVCLI(report *campaignReportResponseCLI) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+
+	header := []string{
+		"target",
+		"workspace",
+		"status",
+		"risk_level",
+		"latest_run_uuid",
+		"latest_trigger_type",
+		"latest_run_at",
+		"deep_scan_queued",
+		"total_runs",
+		"rerun_runs",
+		"deep_scan_runs",
+		"recovered",
+		"critical_findings",
+		"high_findings",
+		"medium_findings",
+		"low_findings",
+		"open_high_risk_findings",
+		"attack_chain_operational_hits",
+		"attack_chain_verified_hits",
+	}
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+
+	for _, target := range report.Targets {
+		row := []string{
+			target.Target,
+			target.Workspace,
+			target.Status,
+			target.RiskLevel,
+			target.LatestRunUUID,
+			target.LatestTriggerType,
+			formatCampaignCSVTimeCLI(target.LatestRunAt),
+			fmt.Sprintf("%t", target.DeepScanQueued),
+			fmt.Sprintf("%d", target.TotalRuns),
+			fmt.Sprintf("%d", target.RerunRuns),
+			fmt.Sprintf("%d", target.DeepScanRuns),
+			fmt.Sprintf("%t", target.Recovered),
+			fmt.Sprintf("%d", target.CriticalFindings),
+			fmt.Sprintf("%d", target.HighFindings),
+			fmt.Sprintf("%d", target.MediumFindings),
+			fmt.Sprintf("%d", target.LowFindings),
+			fmt.Sprintf("%d", target.OpenHighRiskFindings),
+			fmt.Sprintf("%d", target.AttackChainOperationalHits),
+			fmt.Sprintf("%d", target.AttackChainVerifiedHits),
+		}
+		if err := writer.Write(row); err != nil {
+			return nil, err
+		}
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
 func cloneRunParamsCLI(input map[string]interface{}) map[string]interface{} {
 	if input == nil {
 		return map[string]interface{}{}
@@ -786,7 +1444,7 @@ func queueCampaignRerunFailedRunsCLI(ctx context.Context, cfg *config.Config, ca
 
 	var queued int
 	var targets []string
-	for _, run := range runs {
+	for _, run := range latestCampaignRunsCLI(runs) {
 		if run.Status != "failed" || run.TriggerType == "campaign-rerun" {
 			continue
 		}

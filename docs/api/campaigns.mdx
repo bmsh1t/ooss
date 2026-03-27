@@ -1,6 +1,6 @@
 ---
 title: "Campaigns"
-description: "Group queued runs, rerun failed targets, and queue deep scans"
+description: "Group queued runs, rerun failed targets, queue deep scans, and export campaign analytics"
 ---
 
 # Campaigns
@@ -12,7 +12,7 @@ Campaign target aggregation now includes both:
 - `vuln_summary`
 - `attack_chain_summary`
 
-That means a target can be promoted to high-risk not only by critical/high vulnerabilities, but also by verified high-impact attack-chain reports in the same workspace.
+That means a target can be promoted to high-risk not only by critical/high vulnerabilities, but also by attack-chain signals in the same workspace. For campaign risk decisions, Osmedeus keeps `retest`-stage linked chains in the operational window until they are disproven or closed.
 
 ## List Campaigns
 
@@ -82,7 +82,107 @@ It also includes a top-level `summary` block with aggregate counters such as:
 - `high_impact_chains`
 - `queue_hits`
 - `verified_hits`
+- `operational_hits`
 - `last_queued_at`
+
+## Get Campaign Report
+
+```bash
+curl http://localhost:8002/osm/api/campaigns/<campaign-id>/report \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The report endpoint keeps the status response and adds campaign-level analytics:
+
+- `risk_distribution`
+- `latest_run_status_distribution`
+- `trigger_distribution`
+- `deep_scan`
+- `rerun_history`
+- `targets`
+
+Optional query filters narrow the returned `targets` slice while keeping the top-level campaign analytics as full-batch totals:
+
+| Query | Example | Purpose |
+|-------|---------|---------|
+| `risk` | `risk=high,critical` | Match target `risk_level` |
+| `status` | `status=completed,failed` | Match target latest run status |
+| `trigger` | `trigger=campaign-rerun` | Match target latest trigger type |
+| `preset` | `preset=high-risk` | Apply an operator preset |
+| `offset` | `offset=20` | Skip N matched target rows after filters |
+| `limit` | `limit=50` | Return at most N matched rows after filters (`0` = all) |
+
+Available presets:
+
+- `high-risk`
+- `recovered`
+- `failed`
+
+The response also includes:
+
+- `filters_applied`
+- `total_targets`
+- `result_count`
+- `pagination`
+
+`result_count` is the number of matched rows after filters. `pagination.returned_count` is the number of rows returned in the current page.
+
+Each `targets` row is a flattened audit view with:
+
+- latest non-deep-scan run metadata
+- rerun count and recovery flag
+- deep-scan count and queued state
+- per-target finding counts
+- attack-chain `operational_hits` and `verified_hits`
+
+`deep_scan` helps measure follow-up conversion:
+
+- `eligible_targets`
+- `queued_targets`
+- `total_runs`
+- `queued_runs`
+- `running_runs`
+- `completed_runs`
+- `failed_runs`
+- `conversion_rate`
+
+`rerun_history` summarizes recovery behavior:
+
+- `total_runs`
+- `unique_targets`
+- `recovered_targets`
+- `last_rerun_at`
+
+## Export Campaign Report
+
+```bash
+curl http://localhost:8002/osm/api/campaigns/<campaign-id>/export \
+  -H "Authorization: Bearer $TOKEN" \
+  -o campaign-report.csv
+```
+
+Default export format is CSV. To export the same payload as JSON instead:
+
+```bash
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?format=json" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+You can combine export with the same row filters and presets:
+
+```bash
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?preset=failed" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o failed-targets.csv
+```
+
+Pagination works the same way for export:
+
+```bash
+curl "http://localhost:8002/osm/api/campaigns/<campaign-id>/export?status=completed&offset=100&limit=50" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o campaign-page.csv
+```
 
 ## Rerun Failed Targets
 
@@ -101,9 +201,9 @@ curl -X POST http://localhost:8002/osm/api/campaigns/<campaign-id>/deep-scan \
 Deep-scan target selection now treats a workspace as high-risk when either of these is true:
 
 - it has vulnerabilities matching `high_risk_severities`
-- it has verified attack-chain signals that match the same risk band
+- it has operational attack-chain signals that match the same risk band
 
 In practice:
 
-- `critical` risk can be triggered by verified critical chains
-- `high` risk can be triggered by verified high-impact chains
+- `critical` risk can be triggered by verified or `retest` critical chains
+- `high` risk can be triggered by verified or `retest` high-impact chains

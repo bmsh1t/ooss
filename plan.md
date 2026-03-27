@@ -132,11 +132,18 @@
 
 ### Priority 2: Campaign Productization
 
-- Extend campaign reporting with:
-  - target risk distribution
-  - deep-scan conversion rate
-  - rerun history
-  - campaign summary export
+- Completed in current branch:
+  - `GET /campaigns/:id/report` for target risk distribution, deep-scan conversion, trigger mix, and rerun history
+  - `GET /campaigns/:id/export` with CSV export and JSON fallback
+  - local CLI wrappers: `osmedeus campaign report` and `osmedeus campaign export`
+  - server-side and CLI filters for `risk/status/trigger` target slices
+  - operator handoff presets for `high-risk`, `recovered`, and `failed` exports
+  - minimal post-filter pagination for report/export with `offset/limit` and page metadata
+  - regression coverage for campaign report/export in handler tests and live API verification
+- Next hardening steps:
+  - add campaign-level trend snapshots for repeated batches on the same asset set
+  - add saved report profiles for recurring operator/export views
+  - add report ordering overrides for operators who need latest-activity or target-name views
 
 ### Priority 3: Knowledge Productization
 
