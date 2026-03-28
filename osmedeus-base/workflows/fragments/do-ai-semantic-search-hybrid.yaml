@@ -781,7 +781,7 @@ steps:
       fi
 
       if [ -f "$RESULTS_FILE" ] && jq empty "$RESULTS_FILE" >/dev/null 2>&1; then
-        TOTAL=$(jq '.total_results // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        TOTAL=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
         VECTOR_COUNT=$(jq '.vector_recall.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
         KB_COUNT=$(jq '.knowledge_base.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
         SCAN_COUNT=$(jq '.scan_data.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)

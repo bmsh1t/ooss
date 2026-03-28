@@ -241,6 +241,15 @@ steps:
         return 1
       }
 
+      semantic_result_count() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       # 聚合漏洞验证结果
       VULN_STATUS="not_available"
       CONFIRMED_VULNS=0
@@ -277,7 +286,7 @@ steps:
       INITIAL_SEMANTIC_RESULTS=0
       if check_file "$INITIAL_SEMANTIC_FILE" "Initial semantic search"; then
         INITIAL_SEMANTIC_STATUS="available"
-        INITIAL_SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$INITIAL_SEMANTIC_FILE" 2>/dev/null || echo 0)
+        INITIAL_SEMANTIC_RESULTS=$(semantic_result_count "$INITIAL_SEMANTIC_FILE")
       fi
 
       INITIAL_KNOWLEDGE_STATUS="not_available"
@@ -298,7 +307,7 @@ steps:
       SEMANTIC_RESULTS=0
       if check_file "$SEMANTIC_FILE" "Semantic search"; then
         SEMANTIC_STATUS="available"
-        SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$SEMANTIC_FILE" 2>/dev/null || echo 0)
+        SEMANTIC_RESULTS=$(semantic_result_count "$SEMANTIC_FILE")
       fi
 
       KNOWLEDGE_STATUS="not_available"

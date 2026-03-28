@@ -216,6 +216,20 @@ steps:
         awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
       }
 
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      valid_json_file() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1
+      }
+
       count_lines() {
         file="$1"
         if [ -f "$file" ]; then
@@ -244,6 +258,15 @@ steps:
         fi
       }
 
+      semantic_result_count() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -253,14 +276,26 @@ steps:
         fi
       done
 
-      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      ACTIVE_SEMANTIC_SEARCH_FILE=""
       for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
         [ -n "$candidate" ] || continue
-        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+        if semantic_hits "$candidate"; then
           ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
           break
         fi
       done
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+          [ -n "$candidate" ] || continue
+          if valid_json_file "$candidate"; then
+            ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+            break
+          fi
+        done
+      fi
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      fi
 
       # 资产统计
       SUBDOMAINS=$(count_lines "{{subdomainFile}}")
@@ -300,7 +335,7 @@ steps:
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
       CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' {{campaignCreateFile}} 2>/dev/null || echo "")
       CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' {{campaignCreateFile}} 2>/dev/null || echo 0)
-      SEMANTIC_RESULTS=$(jq -r '.total_results // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
+      SEMANTIC_RESULTS=$(semantic_result_count "$ACTIVE_SEMANTIC_SEARCH_FILE")
       RESCAN_TOTAL=$(count_lines "{{rescanFindingsFile}}")
       RESCAN_CRITICAL=$(count_severity_matches "{{rescanFindingsFile}}" "critical")
       RESCAN_HIGH=$(count_severity_matches "{{rescanFindingsFile}}" "high")
@@ -595,6 +630,20 @@ steps:
         awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
       }
 
+      semantic_hits() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1 || return 1
+        hits=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0)
+        [ "${hits:-0}" -gt 0 ] 2>/dev/null
+      }
+
+      valid_json_file() {
+        file="$1"
+        [ -f "$file" ] || return 1
+        jq empty "$file" >/dev/null 2>&1
+      }
+
       render_vuln_section() {
         title="$1"
         file="$2"
@@ -622,14 +671,26 @@ steps:
         fi
       done
 
-      ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      ACTIVE_SEMANTIC_SEARCH_FILE=""
       for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
         [ -n "$candidate" ] || continue
-        if [ -f "$candidate" ] && jq empty "$candidate" >/dev/null 2>&1; then
+        if semantic_hits "$candidate"; then
           ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
           break
         fi
       done
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        for candidate in "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}"; do
+          [ -n "$candidate" ] || continue
+          if valid_json_file "$candidate"; then
+            ACTIVE_SEMANTIC_SEARCH_FILE="$candidate"
+            break
+          fi
+        done
+      fi
+      if [ -z "$ACTIVE_SEMANTIC_SEARCH_FILE" ]; then
+        ACTIVE_SEMANTIC_SEARCH_FILE="{{semanticSearchFile}}"
+      fi
 
       cat {{summaryFile}} > {{fullReportFile}} 2>/dev/null || true
       

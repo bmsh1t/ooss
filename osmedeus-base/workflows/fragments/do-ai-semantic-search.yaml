@@ -1040,6 +1040,15 @@ steps:
       KB_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json"
       SCAN_LINES_FILE="{{Output}}/ai-analysis/.semantic-scan-lines-{{TargetSpace}}.txt"
       SCAN_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json"
+
+      json_result_count() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '.total_results // ([.results[]?] | length) // 0' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       # 收集统计数据
       VULNS_LINES=$(wc -l < "$INDEX_DIR/vulns-index.txt" 2>/dev/null || echo 0)
@@ -1047,7 +1056,7 @@ steps:
       SUBDOMAIN_LINES=$(wc -l < "$INDEX_DIR/subdomains-index.txt" 2>/dev/null || echo 0)
       HTTP_LINES=$(wc -l < "$INDEX_DIR/http-index.txt" 2>/dev/null || echo 0)
       KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
-      VECTOR_COUNT=$(jq -r '.total_results // 0' "$VECTOR_RESULTS_FILE" 2>/dev/null || echo 0)
+      VECTOR_COUNT=$(json_result_count "$VECTOR_RESULTS_FILE")
       KB_SEARCH_COUNT=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
       
       echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES, knowledge=$KB_LINES, vector=$VECTOR_COUNT, kb_search=$KB_SEARCH_COUNT"
@@ -1209,6 +1218,20 @@ steps:
       kb = load_json("{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json", [])
       scan = load_json("{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json", [])
 
+      def result_count(payload):
+          if not isinstance(payload, dict):
+              return 0
+          total = payload.get("total_results")
+          if total not in (None, ""):
+              try:
+                  return int(total)
+              except Exception:
+                  pass
+          results = payload.get("results")
+          if isinstance(results, list):
+              return len(results)
+          return 0
+
       def textify(value):
           text = str(value if value is not None else "")
           return re.sub(r"\s+", " ", text).strip()
@@ -1356,6 +1379,7 @@ steps:
       vector_results = [normalize(item, "vector_search") for item in vector.get("results", [])]
       kb_results = [normalize(item, "knowledge_base") for item in kb]
       scan_results = [normalize(item, "scan_index") for item in scan]
+      vector_total = result_count(vector)
 
       all_items = agent_results + vector_results + kb_results + scan_results
       target_source_map = {}
@@ -1428,7 +1452,7 @@ steps:
 
       insights = unique_keep_order(
           [str(v) for v in (agent.get("insights") or [])]
-          + (["向量召回结果已纳入语义搜索结果"] if (vector.get("total_results") or 0) > 0 else [])
+          + (["向量召回结果已纳入语义搜索结果"] if vector_total > 0 else [])
           + (["工作区知识库命中已纳入实战上下文"] if kb else [])
       )[:8]
 
@@ -1443,9 +1467,9 @@ steps:
           "source": (
               "merged_llm_vector_knowledge"
               if agent_status == "valid" and agent.get("results")
-              else ("vector_knowledge_fallback" if ((vector.get("total_results") or 0) > 0 or len(kb) > 0) else "scan_index_fallback")
+              else ("vector_knowledge_fallback" if (vector_total > 0 or len(kb) > 0) else "scan_index_fallback")
           ),
-          "vector_search_used": (vector.get("total_results") or 0) > 0,
+          "vector_search_used": vector_total > 0,
           "knowledge_search_used": len(kb) > 0,
           "provider": provider,
           "status": ("completed" if agent_status == "valid" else "fallback_completed") if combined else ("no_results" if agent_status == "valid" else "fallback_no_results"),
@@ -1611,7 +1635,7 @@ steps:
       echo "## Vector Recall Candidates" >> "$KB_OUTPUT"
       echo "" >> "$KB_OUTPUT"
       if jq empty "$VECTOR_JSON" 2>/dev/null; then
-        VECTOR_HITS=$(jq '.total_results // 0' "$VECTOR_JSON" 2>/dev/null || echo 0)
+        VECTOR_HITS=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$VECTOR_JSON" 2>/dev/null || echo 0)
         if [ "$VECTOR_HITS" -gt 0 ]; then
           jq -r '.results[] | "- [" + ((.relevance_score // 0) | tostring) + "] " + (.source // "unknown") + " :: " + (.content // "")' "$VECTOR_JSON" >> "$KB_OUTPUT" 2>/dev/null || true
         else

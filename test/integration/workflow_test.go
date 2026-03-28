@@ -2696,6 +2696,67 @@ func TestExecuteAIIntelligentAnalysisFallsBackToDecisionFollowupSemanticPriority
 	assert.Contains(t, rescanTargets, "https://fallback.example.com/admin")
 }
 
+func TestExecuteAIIntelligentAnalysisCountsSemanticResultsFromArrays(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-intelligent-analysis.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-intelligent-analysis-semantic-array-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-critical-"+targetSpace+".txt"), "[critical] https://a.example.com - admin\n")
+	writeTestFile(t, filepath.Join(aiDir, "semantic-search-early-"+targetSpace+".json"), `{
+  "results": [
+    {"target":"https://early.example.com/admin"},
+    {"target":"https://early.example.com/graphql"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "semantic-search-results-"+targetSpace+".json"), `{
+  "results": [
+    {"target":"https://final.example.com/admin"},
+    {"target":"https://final.example.com/graphql"},
+    {"target":"https://final.example.com/api"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	analysisData, err := os.ReadFile(filepath.Join(aiDir, "aggregated-results.json"))
+	require.NoError(t, err)
+	var analysis map[string]interface{}
+	require.NoError(t, json.Unmarshal(analysisData, &analysis))
+
+	components, ok := analysis["components"].(map[string]interface{})
+	require.True(t, ok)
+	initialSemantic, ok := components["semantic_search_initial"].(map[string]interface{})
+	require.True(t, ok)
+	semantic, ok := components["semantic_search"].(map[string]interface{})
+	require.True(t, ok)
+
+	assert.Equal(t, float64(2), initialSemantic["results"])
+	assert.Equal(t, float64(3), semantic["results"])
+}
+
 func TestExecuteAIApplyDecisionMergesPreviousFollowup(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -4772,6 +4833,70 @@ func TestExecuteAISemanticSearchFallbackNormalization(t *testing.T) {
 	assert.Contains(t, string(priorityVulns), "api_surface")
 }
 
+func TestExecuteAISemanticSearchUsesVectorArraysWithoutTotalResults(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-semantic-search.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "semantic-search-agent" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-semantic-search-array-vector-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "app.example.com\napi.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://app.example.com/admin\nhttps://api.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(outputDir, "fingerprint", "http-fingerprint-"+targetSpace+".jsonl"), `{"tech":["nginx","graphql"]}`+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "vector-search-results-"+targetSpace+".json"), `{
+  "status":"success",
+  "results":[
+    {"type":"vector_match","content":"admin surface at https://app.example.com/admin requires auth review","relevance_score":0.93,"source":"vector_search"},
+    {"type":"vector_match","content":"graphql endpoint exposed at https://api.example.com/graphql","relevance_score":0.89,"source":"vector_search"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":               "https://app.example.com",
+		"space_name":           targetSpace,
+		"useVectorSearch":      "false",
+		"includeKnowledgeBase": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	searchData, err := os.ReadFile(filepath.Join(aiDir, "semantic-search-results-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(searchData, &payload))
+
+	assert.Equal(t, "vector_knowledge_fallback", payload["source"])
+	assert.Equal(t, true, payload["vector_search_used"])
+	assert.GreaterOrEqual(t, payload["total_results"].(float64), 2.0)
+
+	indexStats, ok := payload["index_stats"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(2), indexStats["vector_candidates"])
+
+	insights, ok := payload["insights"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, insights, "向量召回结果已纳入语义搜索结果")
+}
+
 func TestExecuteAISemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5505,6 +5630,65 @@ func TestExecuteFinalReportFallsBackToDecisionFollowupSemanticPriorityTargets(t 
 	require.NoError(t, err)
 	fullReport := string(fullReportData)
 	assert.Contains(t, fullReport, "semantic-priority-targets-decision-followup-"+targetSpace+".txt")
+}
+
+func TestExecuteFinalReportUsesFirstSemanticArtifactWithHits(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-semantic-hit-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	reportDir := filepath.Join(outputDir, "report")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(aiDir, "semantic-search-decision-followup-"+targetSpace+".json"), `{"total_results":0,"results":[]}`)
+	writeTestFile(t, filepath.Join(aiDir, "semantic-search-post-vuln-"+targetSpace+".json"), `{
+  "results": [
+    {"target":"https://a.example.com/admin"},
+    {"target":"https://a.example.com/graphql"},
+    {"target":"https://a.example.com/api"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                 "https://app.example.com",
+		"space_name":             targetSpace,
+		"enableLlmReport":        "false",
+		"enableLlmAttackSurface": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statsData, err := os.ReadFile(filepath.Join(reportDir, "statistics-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var stats map[string]interface{}
+	require.NoError(t, json.Unmarshal(statsData, &stats))
+	statistics := stats["statistics"].(map[string]interface{})
+	aiStats := statistics["ai"].(map[string]interface{})
+
+	assert.Equal(t, float64(3), aiStats["semantic_results"])
+	assert.Equal(t, filepath.Join(aiDir, "semantic-search-post-vuln-"+targetSpace+".json"), aiStats["semantic_results_file"])
+
+	fullReportData, err := os.ReadFile(filepath.Join(reportDir, "full-report-"+targetSpace+".md"))
+	require.NoError(t, err)
+	fullReport := string(fullReportData)
+	assert.Contains(t, fullReport, "semantic-search-post-vuln-"+targetSpace+".json")
+	assert.NotContains(t, fullReport, "semantic-search-decision-followup-"+targetSpace+".json")
 }
 
 func TestExecuteFinalReportRendersPlaintextSeverityFiles(t *testing.T) {
