@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"os"
 	"runtime"
 	"testing"
 
@@ -68,6 +69,13 @@ func TestPlatformVariablesInjection(t *testing.T) {
 		name     string
 		expected interface{}
 	}{
+		{"OsmedeusExec", func() interface{} {
+			exePath, err := os.Executable()
+			if err != nil {
+				return ""
+			}
+			return exePath
+		}()},
 		{"PlatformOS", runtime.GOOS},
 		{"PlatformArch", runtime.GOARCH},
 		{"PlatformInDocker", DetectDocker()},
@@ -133,6 +141,13 @@ func TestPlatformVariablesTemplateRendering(t *testing.T) {
 		template string
 		expected string
 	}{
+		{"echo {{OsmedeusExec}}", func() string {
+			exePath, err := os.Executable()
+			if err != nil {
+				return "echo "
+			}
+			return "echo " + exePath
+		}()},
 		{"echo {{PlatformOS}}", "echo " + runtime.GOOS},
 		{"echo {{PlatformArch}}", "echo " + runtime.GOARCH},
 		{"echo {{PlatformInDocker}}", "echo false"},

@@ -229,6 +229,11 @@ func (e *Executor) injectBuiltinVariables(cfg *config.Config, params map[string]
 	// Settings-based variables
 	execCtx.SetVariable("BaseFolder", cfg.BaseFolder)
 	execCtx.SetVariable("OsmedeusBase", cfg.BaseFolder) // Backward-compatible alias used by workflow YAMLs
+	if exePath, err := os.Executable(); err == nil {
+		execCtx.SetVariable("OsmedeusExec", exePath)
+	} else {
+		execCtx.SetVariable("OsmedeusExec", "")
+	}
 	execCtx.SetVariable("Binaries", cfg.BinariesPath)
 	execCtx.SetVariable("Data", cfg.DataPath)
 	execCtx.SetVariable("ExternalData", cfg.DataPath) // Alias for Data

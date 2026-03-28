@@ -370,9 +370,9 @@ steps:
         exit 0
       fi
 
-      OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
-      if [ -z "$OSM_BIN" ] && [ -x "/root/.local/bin/osmedeus" ]; then
-        OSM_BIN="/root/.local/bin/osmedeus"
+      OSM_BIN="{{OsmedeusExec}}"
+      if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
+        OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
 
       if [ -z "$OSM_BIN" ]; then
