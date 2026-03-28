@@ -37,6 +37,8 @@
   - `stable`, `hybrid`, `optimized`, and `lite` include post-run knowledge auto-learning
 - Current-source verification completed for this round:
   - `make build`
+  - `make test-regression-api-ai`
+  - `make test-regression-api-knowledge`
   - targeted `go test ./internal/knowledge`
   - targeted `go test ./internal/vectorkb`
   - targeted `go test ./internal/database`
@@ -61,12 +63,14 @@
 - Runtime validation is mostly closed for the modified AI workflow/backend path.
 - Not done yet:
   - full `make test-unit` pass across the entire repository in an unrestricted host environment
-  - server startup validation
-  - end-to-end API verification
-  - workflow execution verification against current source
-  - regression pass across modified queue / vuln / attack-chain paths
+  - live vector-knowledge API verification with an explicit embeddings provider
+  - live queue-runner verification for normal queued runs, campaign deep-scan queue consumption, and vulnerability retest queue consumption
+  - workflow execution verification against current source for the full superdomain AI chain
 - Verified already:
   - clean current-source build
+  - real local server startup via `make test-regression-api-ai`
+  - real local server startup via `make test-regression-api-knowledge`
+  - live API verification for campaign, vulnerability lifecycle, attack-chain workbench, and non-vector knowledge-base routes
   - full `make test-unit` pass in the current host environment
   - lint/validate pass for all modified superdomain AI workflows and the new knowledge auto-learn fragment
   - targeted package/test coverage for the modified database, handler, and knowledge/URL mapping paths
@@ -120,10 +124,7 @@
 
 - Build and run the current source version.
 - Verify modified API routes:
-  - campaign APIs
-  - vulnerability lifecycle APIs
-  - attack-chain APIs
-  - knowledge-base APIs
+  - vector knowledge APIs with a configured embeddings provider
 - Verify queue runner behavior:
   - normal queued run
   - campaign deep-scan path
@@ -131,6 +132,7 @@
 - Verify workflow persistence path:
   - attack-chain JSON generation
   - attack-chain import into database
+  - knowledge auto-learn writeback from a live workflow run
 
 ### Priority 2: Campaign Productization
 

@@ -136,13 +136,19 @@ osmedeus --usage-example
 
 ## Regression Checks
 
-For a Docker-free live API regression that exercises the campaign batch APIs, vulnerability lifecycle bulk actions, and attack-chain workbench end to end against a real local `osmedeus serve` process, run:
+For Docker-free live API regressions against a real local `osmedeus serve` process, run:
 
 ```bash
 make test-regression-api-ai
+make test-regression-api-knowledge
 ```
 
-This target builds `build/bin/osmedeus`, launches a temporary local API server, verifies the `campaign / vulnerabilities / attack-chains` workflow on real HTTP endpoints, and stores temporary artifacts under `/tmp/osm-api-ai-workbench-live`.
+- `make test-regression-api-ai`
+  - verifies the `campaign / vulnerabilities / attack-chains` workflow on real HTTP endpoints
+  - stores temporary artifacts under `/tmp/osm-api-ai-workbench-live`
+- `make test-regression-api-knowledge`
+  - verifies `knowledge ingest / documents / search / learn` plus workspace-to-public layered retrieval without requiring a vector provider
+  - stores temporary artifacts under `/tmp/osm-api-knowledge-live`
 
 ## Knowledge Base and Vector Workflow Usage
 
