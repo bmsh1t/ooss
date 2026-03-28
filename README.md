@@ -134,6 +134,16 @@ osmedeus agent --list
 osmedeus --usage-example
 ```
 
+## Regression Checks
+
+For a Docker-free live API regression that exercises the campaign batch APIs, vulnerability lifecycle bulk actions, and attack-chain workbench end to end against a real local `osmedeus serve` process, run:
+
+```bash
+make test-regression-api-ai
+```
+
+This target builds `build/bin/osmedeus`, launches a temporary local API server, verifies the `campaign / vulnerabilities / attack-chains` workflow on real HTTP endpoints, and stores temporary artifacts under `/tmp/osm-api-ai-workbench-live`.
+
 ## Knowledge Base and Vector Workflow Usage
 
 You can now extend the local knowledge base with your own documents and have `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` consume that knowledge during semantic search.

@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
+.PHONY: build run test test-unit test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
 
 # Go parameters
 GOCMD=go
@@ -199,6 +199,14 @@ test-e2e-api: build install-gotestsum
 	$(TESTCMD) $(TESTFLAGS) -run API ./test/e2e/...
 	@echo "$(PREFIX) Cleaning up..."
 	docker-compose -f build/docker/docker-compose.distributed-test.yaml down -v
+
+# Live API regression for campaign / vulnerability / attack-chain workflows (no Docker required)
+test-regression-api-ai:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running live AI workflow API regression..."
+	@BASE_DIR=/tmp/osm-api-ai-workbench-live PORT=8906 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/api-ai-workbench-live.sh
 
 # Nix E2E tests (requires Docker for Nix container)
 test-e2e-nix: build install-gotestsum
