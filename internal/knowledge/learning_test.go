@@ -724,3 +724,70 @@ func TestFirstRenderableLearnedSection_PrefersNewestRenderableArtifact(t *testin
 	assert.Equal(t, oldFile, file)
 	assert.Contains(t, section, "manual-exploitation")
 }
+
+func TestRenderRetestPlanSection_PrefersRealTargetsOverStaleSummary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "retest-plan.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "summary":{"recommended_flow":"web-analysis","priority":"high","total_targets":0},
+  "targets":[
+    {"target":"https://app.acme.test/admin","priority":"P1"},
+    {"target":"https://app.acme.test/graphql","priority":"P1"}
+  ],
+  "automation_queue":[
+    {"target":"https://app.acme.test/admin"},
+    {"target":"https://app.acme.test/api"}
+  ]
+}`), 0o644))
+
+	section := renderRetestPlanSection(path)
+	assert.Contains(t, section, "Total targets: 3")
+}
+
+func TestRenderOperatorQueueSection_PrefersTaskListOverStaleSummary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "operator-queue.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "summary":{"total_tasks":0,"p1_tasks":0,"p2_tasks":0},
+  "focus_targets":["https://app.acme.test/admin"],
+  "tasks":[
+    {"priority":"P1","title":"Validate admin takeover","target":"https://app.acme.test/admin"},
+    {"priority":"P2","title":"Check graphql authz","target":"https://app.acme.test/graphql"}
+  ]
+}`), 0o644))
+
+	section := renderOperatorQueueSection(path)
+	assert.Contains(t, section, "Total tasks: 2")
+	assert.Contains(t, section, "P1 tasks: 1")
+	assert.Contains(t, section, "P2 tasks: 1")
+}
+
+func TestRenderCampaignHandoffSection_PrefersTargetGroupsOverStaleCounts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "campaign-handoff.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "handoff_ready": true,
+  "campaign_profile": {
+    "recommended_flow":"web-classic",
+    "retest_priority":"critical",
+    "focus_areas":["https://app.acme.test/admin"]
+  },
+  "counts": {
+    "campaign_targets": 0,
+    "operator_tasks": 1,
+    "previous_followup_targets": 0
+  },
+  "targets": {
+    "decision_rescan": ["https://app.acme.test/admin"],
+    "retest": ["https://app.acme.test/graphql"],
+    "operator_focus": ["https://app.acme.test/admin"],
+    "semantic_priority": ["https://app.acme.test/api"],
+    "previous_followup": ["https://app.acme.test/graphql", "https://app.acme.test/api"]
+  },
+  "next_actions":["Promote admin path into campaign"]
+}`), 0o644))
+
+	section := renderCampaignHandoffSection(path)
+	assert.Contains(t, section, "Campaign targets: 3")
+	assert.Contains(t, section, "Previous follow-up targets: 2")
+}

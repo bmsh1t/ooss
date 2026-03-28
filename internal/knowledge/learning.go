@@ -501,7 +501,7 @@ func renderRetestPlanSection(path string) string {
 
 	recommendedFlow := normalizeLearnedValue(learnedString(lookupLearnedValue(obj, "summary", "recommended_flow")), "web-analysis")
 	priority := normalizeLearnedValue(learnedString(lookupLearnedValue(obj, "summary", "priority")), "high")
-	totalTargets := learnedInt(lookupLearnedValue(obj, "summary", "total_targets"))
+	totalTargets := learnedRetestTargetCount(obj)
 	objective := learnedString(lookupLearnedValue(obj, "summary", "objective"))
 	targets := learnedObjectSlice(lookupLearnedValue(obj, "targets"))
 
@@ -538,11 +538,9 @@ func renderOperatorQueueSection(path string) string {
 		return ""
 	}
 
-	totalTasks := learnedInt(lookupLearnedValue(obj, "summary", "total_tasks"))
-	p1Tasks := learnedInt(lookupLearnedValue(obj, "summary", "p1_tasks"))
-	p2Tasks := learnedInt(lookupLearnedValue(obj, "summary", "p2_tasks"))
 	focusTargets := learnedStringSlice(lookupLearnedValue(obj, "focus_targets"), maxOperationalItems)
 	tasks := learnedObjectSlice(lookupLearnedValue(obj, "tasks"))
+	totalTasks, p1Tasks, p2Tasks := learnedOperatorTaskCounts(obj, tasks)
 
 	var builder strings.Builder
 	builder.WriteString("## Operator Queue\n\n")
@@ -587,9 +585,9 @@ func renderCampaignHandoffSection(path string) string {
 	previousReuseSources := learnedStringSlice(lookupLearnedValue(obj, "campaign_profile", "previous_reuse_sources"), maxOperationalItems)
 	semanticTargets := learnedStringSlice(lookupLearnedValue(obj, "targets", "semantic_priority"), maxOperationalItems)
 	nextActions := learnedStringSlice(lookupLearnedValue(obj, "next_actions"), maxOperationalItems)
-	campaignTargets := learnedInt(lookupLearnedValue(obj, "counts", "campaign_targets"))
+	campaignTargets := learnedCampaignTargetCount(obj)
 	operatorTasks := learnedInt(lookupLearnedValue(obj, "counts", "operator_tasks"))
-	previousFollowupTargets := learnedInt(lookupLearnedValue(obj, "counts", "previous_followup_targets"))
+	previousFollowupTargets := learnedPreviousFollowupTargetCount(obj)
 
 	var builder strings.Builder
 	builder.WriteString("## Campaign Handoff\n\n")
@@ -1011,6 +1009,102 @@ func learnedObjectSlice(value interface{}) []map[string]interface{} {
 		items = append(items, asMap)
 	}
 	return items
+}
+
+func learnedRetestTargetCount(obj map[string]interface{}) int {
+	targets := uniqueLearnedStrings(append(
+		learnedTargetValues(lookupLearnedValue(obj, "targets")),
+		learnedTargetValues(lookupLearnedValue(obj, "automation_queue"))...,
+	))
+	if len(targets) > 0 {
+		return len(targets)
+	}
+	return learnedInt(lookupLearnedValue(obj, "summary", "total_targets"))
+}
+
+func learnedCampaignTargetCount(obj map[string]interface{}) int {
+	targets := uniqueLearnedStrings(append(
+		learnedTargetValues(lookupLearnedValue(obj, "targets", "decision_rescan")),
+		append(
+			learnedTargetValues(lookupLearnedValue(obj, "targets", "retest")),
+			append(
+				learnedTargetValues(lookupLearnedValue(obj, "targets", "operator_focus")),
+				append(
+					learnedTargetValues(lookupLearnedValue(obj, "targets", "semantic_priority")),
+					learnedTargetValues(lookupLearnedValue(obj, "targets", "previous_followup"))...,
+				)...,
+			)...,
+		)...,
+	))
+	if len(targets) > 0 {
+		return len(targets)
+	}
+	return learnedInt(lookupLearnedValue(obj, "counts", "campaign_targets"))
+}
+
+func learnedPreviousFollowupTargetCount(obj map[string]interface{}) int {
+	targets := uniqueLearnedStrings(learnedTargetValues(lookupLearnedValue(obj, "targets", "previous_followup")))
+	if len(targets) > 0 {
+		return len(targets)
+	}
+	return learnedInt(lookupLearnedValue(obj, "counts", "previous_followup_targets"))
+}
+
+func learnedOperatorTaskCounts(obj map[string]interface{}, tasks []map[string]interface{}) (int, int, int) {
+	if len(tasks) == 0 {
+		return learnedInt(lookupLearnedValue(obj, "summary", "total_tasks")),
+			learnedInt(lookupLearnedValue(obj, "summary", "p1_tasks")),
+			learnedInt(lookupLearnedValue(obj, "summary", "p2_tasks"))
+	}
+
+	totalTasks := len(tasks)
+	p1Tasks := 0
+	p2Tasks := 0
+	for _, task := range tasks {
+		switch strings.ToUpper(strings.TrimSpace(learnedString(task["priority"]))) {
+		case "P1":
+			p1Tasks++
+		case "P2":
+			p2Tasks++
+		}
+	}
+	if p1Tasks == 0 && p2Tasks == 0 {
+		p1Tasks = learnedInt(lookupLearnedValue(obj, "summary", "p1_tasks"))
+		p2Tasks = learnedInt(lookupLearnedValue(obj, "summary", "p2_tasks"))
+	}
+	return totalTasks, p1Tasks, p2Tasks
+}
+
+func learnedTargetValues(value interface{}) []string {
+	switch typed := value.(type) {
+	case []interface{}:
+		values := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			switch item := raw.(type) {
+			case map[string]interface{}:
+				target := learnedString(item["target"])
+				if target == "" {
+					target = learnedString(item["url"])
+				}
+				if target == "" {
+					target = learnedString(item["host"])
+				}
+				if target == "" {
+					continue
+				}
+				values = append(values, target)
+			default:
+				target := learnedString(raw)
+				if target == "" {
+					continue
+				}
+				values = append(values, target)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func appendLearnedListSection(builder *strings.Builder, title string, items []string) {
