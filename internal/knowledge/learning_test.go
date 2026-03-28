@@ -791,3 +791,71 @@ func TestRenderCampaignHandoffSection_PrefersTargetGroupsOverStaleCounts(t *test
 	assert.Contains(t, section, "Campaign targets: 3")
 	assert.Contains(t, section, "Previous follow-up targets: 2")
 }
+
+func TestRenderFollowupDecisionSection_PrefersRescanTargetArraysOverStaleSummary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "followup-decision.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "execution_feedback":{"next_phase":"manual-exploitation"},
+  "seed_focus":{"priority_mode":"manual-first","confidence_level":"high"},
+  "followup_summary":{"rescan_critical":0,"rescan_high":0},
+  "seed_targets":{
+    "rescan_critical_targets":[
+      "https://app.acme.test/admin",
+      "https://app.acme.test/admin"
+    ],
+    "rescan_high_targets":[
+      "https://app.acme.test/graphql",
+      "https://app.acme.test/upload"
+    ]
+  }
+}`), 0o644))
+
+	section := renderFollowupDecisionSection(path)
+	assert.Contains(t, section, "Rescan severity recap: critical=1 high=2")
+}
+
+func TestRenderRetestQueueSection_PrefersTargetFileAndCombinedTargetList(t *testing.T) {
+	dir := t.TempDir()
+	targetFile := filepath.Join(dir, "targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("https://app.acme.test/admin\nhttps://app.acme.test/graphql\n"), 0o644))
+
+	path := filepath.Join(dir, "retest-queue.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "status":"queued",
+  "workflow":"web-analysis",
+  "workflow_kind":"flow",
+  "priority":"high",
+  "queued_targets":0,
+  "previous_followup_targets":0,
+  "target_file":"`+targetFile+`",
+  "previous_combined_targets_list":[
+    "https://app.acme.test/admin",
+    "https://app.acme.test/graphql",
+    "https://app.acme.test/admin"
+  ]
+}`), 0o644))
+
+	section := renderRetestQueueSection(path)
+	assert.Contains(t, section, "Queued targets: 2")
+	assert.Contains(t, section, "Previous follow-up targets: 2")
+}
+
+func TestRenderCampaignCreateSection_PrefersTargetFileOverStaleCount(t *testing.T) {
+	dir := t.TempDir()
+	targetFile := filepath.Join(dir, "campaign-targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("https://app.acme.test/admin\nhttps://app.acme.test/graphql\nhttps://app.acme.test/api\n"), 0o644))
+
+	path := filepath.Join(dir, "campaign-create.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "status":"created",
+  "workflow":"web-analysis",
+  "workflow_kind":"flow",
+  "priority":"high",
+  "target_count":0,
+  "target_file":"`+targetFile+`"
+}`), 0o644))
+
+	section := renderCampaignCreateSection(path)
+	assert.Contains(t, section, "Target count: 3")
+}

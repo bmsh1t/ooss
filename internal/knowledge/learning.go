@@ -672,8 +672,7 @@ func renderFollowupDecisionSection(path string) string {
 	manualFollowup := learnedBool(lookupLearnedValue(obj, "execution_feedback", "manual_followup_needed"))
 	campaignFollowup := learnedBool(lookupLearnedValue(obj, "execution_feedback", "campaign_followup_recommended"))
 	queueEffective := learnedBool(lookupLearnedValue(obj, "execution_feedback", "queue_followup_effective"))
-	rescanCritical := learnedInt(lookupLearnedValue(obj, "followup_summary", "rescan_critical"))
-	rescanHigh := learnedInt(lookupLearnedValue(obj, "followup_summary", "rescan_high"))
+	rescanCritical, rescanHigh := learnedRescanSeverityCounts(obj)
 	priorityMode := normalizeLearnedValue(learnedString(lookupLearnedValue(obj, "seed_focus", "priority_mode")), "knowledge-first")
 	confidenceLevel := normalizeLearnedValue(learnedString(lookupLearnedValue(obj, "seed_focus", "confidence_level")), "low")
 	escalationScore := learnedInt(lookupLearnedValue(obj, "seed_focus", "signal_scores", "escalation_score"))
@@ -716,7 +715,7 @@ func renderCampaignCreateSection(path string) string {
 	workflow := normalizeLearnedValue(learnedString(obj["workflow"]), "web-analysis")
 	workflowKind := normalizeLearnedValue(learnedString(obj["workflow_kind"]), "flow")
 	priority := normalizeLearnedValue(learnedString(obj["priority"]), "high")
-	targetCount := learnedInt(obj["target_count"])
+	targetCount := learnedCampaignCreateQueuedTargetCount(obj)
 	priorityMode := learnedString(obj["campaign_priority_mode"])
 	confidenceLevel := learnedString(obj["campaign_confidence_level"])
 	nextPhase := learnedString(obj["campaign_followup_next_phase"])
@@ -777,8 +776,8 @@ func renderRetestQueueSection(path string) string {
 	workflowKind := normalizeLearnedValue(learnedString(obj["workflow_kind"]), "flow")
 	priority := normalizeLearnedValue(learnedString(obj["priority"]), "high")
 	targetSource := learnedString(obj["target_source"])
-	targetCount := learnedInt(obj["queued_targets"])
-	previousFollowupTargets := learnedInt(obj["previous_followup_targets"])
+	targetCount := learnedRetestQueuedTargetCount(obj)
+	previousFollowupTargets := learnedRetestQueuePreviousFollowupTargetCount(obj)
 	previousPriorityMode := learnedString(obj["previous_priority_mode"])
 	previousConfidenceLevel := learnedString(obj["previous_confidence_level"])
 
@@ -1022,6 +1021,27 @@ func learnedRetestTargetCount(obj map[string]interface{}) int {
 	return learnedInt(lookupLearnedValue(obj, "summary", "total_targets"))
 }
 
+func learnedRetestQueuedTargetCount(obj map[string]interface{}) int {
+	if count := learnedTextLineCount(learnedString(obj["target_file"])); count > 0 {
+		return count
+	}
+	return learnedInt(obj["queued_targets"])
+}
+
+func learnedRetestQueuePreviousFollowupTargetCount(obj map[string]interface{}) int {
+	targets := uniqueLearnedStrings(append(
+		learnedTargetValues(obj["previous_combined_targets_list"]),
+		append(
+			learnedTargetValues(obj["previous_manual_first_targets_list"]),
+			learnedTargetValues(obj["previous_high_confidence_targets_list"])...,
+		)...,
+	))
+	if len(targets) > 0 {
+		return len(targets)
+	}
+	return learnedInt(obj["previous_followup_targets"])
+}
+
 func learnedCampaignTargetCount(obj map[string]interface{}) int {
 	targets := uniqueLearnedStrings(append(
 		learnedTargetValues(lookupLearnedValue(obj, "targets", "decision_rescan")),
@@ -1042,12 +1062,32 @@ func learnedCampaignTargetCount(obj map[string]interface{}) int {
 	return learnedInt(lookupLearnedValue(obj, "counts", "campaign_targets"))
 }
 
+func learnedCampaignCreateQueuedTargetCount(obj map[string]interface{}) int {
+	if count := learnedTextLineCount(learnedString(obj["target_file"])); count > 0 {
+		return count
+	}
+	return learnedInt(obj["target_count"])
+}
+
 func learnedPreviousFollowupTargetCount(obj map[string]interface{}) int {
 	targets := uniqueLearnedStrings(learnedTargetValues(lookupLearnedValue(obj, "targets", "previous_followup")))
 	if len(targets) > 0 {
 		return len(targets)
 	}
 	return learnedInt(lookupLearnedValue(obj, "counts", "previous_followup_targets"))
+}
+
+func learnedRescanSeverityCounts(obj map[string]interface{}) (int, int) {
+	rescanCritical := learnedInt(lookupLearnedValue(obj, "followup_summary", "rescan_critical"))
+	rescanHigh := learnedInt(lookupLearnedValue(obj, "followup_summary", "rescan_high"))
+
+	if targets := uniqueLearnedStrings(learnedTargetValues(lookupLearnedValue(obj, "seed_targets", "rescan_critical_targets"))); len(targets) > 0 {
+		rescanCritical = len(targets)
+	}
+	if targets := uniqueLearnedStrings(learnedTargetValues(lookupLearnedValue(obj, "seed_targets", "rescan_high_targets"))); len(targets) > 0 {
+		rescanHigh = len(targets)
+	}
+	return rescanCritical, rescanHigh
 }
 
 func learnedOperatorTaskCounts(obj map[string]interface{}, tasks []map[string]interface{}) (int, int, int) {
@@ -1105,6 +1145,29 @@ func learnedTargetValues(value interface{}) []string {
 	default:
 		return nil
 	}
+}
+
+func learnedTextLineCount(path string) int {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return 0
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func appendLearnedListSection(builder *strings.Builder, title string, items []string) {
