@@ -165,6 +165,10 @@ make test-unit-plain
 make test-plain
 ```
 
+Release checklist:
+
+- `docs/stable-core-checklist.md`
+
 ## Knowledge Base and Vector Workflow Usage
 
 You can now extend the local knowledge base with your own documents and have `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` consume that knowledge during semantic search.

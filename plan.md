@@ -125,7 +125,7 @@
 - Not done yet:
   - usage examples for new CLI/API capabilities
   - workflow authoring notes for attack-chain persistence and knowledge auto-learning
-  - release checklist doc for the new `test-regression-stable-core` target
+  - deeper operator-facing examples for the new `test-regression-stable-core` target
 
 ## Next Plan
 
