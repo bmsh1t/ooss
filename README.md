@@ -142,6 +142,7 @@ For Docker-free live regressions against a real local `osmedeus serve` / queue-w
 make test-regression-api-ai
 make test-regression-api-knowledge
 make test-regression-queue-live
+make test-regression-stable-core
 ```
 
 - `make test-regression-api-ai`
@@ -153,6 +154,16 @@ make test-regression-queue-live
 - `make test-regression-queue-live`
   - verifies CLI queued runs, vulnerability retest queue consumption, and campaign deep-scan queue consumption against a real worker
   - stores temporary artifacts under `/tmp/osm-queue-live`
+- `make test-regression-stable-core`
+  - runs the core stable-release smoke path serially: superdomain workflow validation plus AI API, knowledge, and queue live regressions
+  - stores temporary artifacts under `/tmp/osm-stable-core-*`
+
+If `gotestsum` is noisy or fails to exit cleanly in your environment, you can bypass it with plain Go test entry points:
+
+```bash
+make test-unit-plain
+make test-plain
+```
 
 ## Knowledge Base and Vector Workflow Usage
 

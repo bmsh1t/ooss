@@ -13,6 +13,8 @@ import (
 var builtInVariables = map[string]bool{
 	// Path Variables
 	"BaseFolder":           true,
+	"OsmedeusBase":         true,
+	"OsmedeusExec":         true,
 	"Binaries":             true,
 	"binaries":             true,
 	"Data":                 true,

@@ -719,6 +719,20 @@ steps:
 	assert.Empty(t, issues)
 }
 
+func TestUndefinedVariableRule_ExecutorBuiltins(t *testing.T) {
+	rule := &UndefinedVariableRule{}
+	ast := parseTestWorkflow(t, `
+name: test
+kind: module
+steps:
+  - name: step1
+    type: bash
+    command: echo "{{OsmedeusBase}} {{OsmedeusExec}} {{BaseFolder}}"
+`)
+	issues := rule.Check(ast)
+	assert.Empty(t, issues)
+}
+
 // --- Comprehensive tests for enhanced UnusedVariableRule ---
 
 func TestUnusedVariableRule_ReferencedInNewFields(t *testing.T) {

@@ -40,11 +40,13 @@
   - `make test-regression-api-ai`
   - `make test-regression-api-knowledge`
   - `make test-regression-queue-live`
+  - `make test-regression-stable-core`
   - targeted `go test ./internal/knowledge`
   - targeted `go test ./internal/vectorkb`
   - targeted `go test ./internal/database`
   - targeted `go test ./pkg/server/handlers`
   - targeted `go test ./pkg/cli`
+  - targeted `go test ./internal/linter`
   - workflow validation for `superdomain-extensive-ai-stable`
   - workflow validation for `superdomain-extensive-ai-hybrid`
   - workflow validation for `superdomain-extensive-ai-optimized`
@@ -57,6 +59,8 @@
 - Static checks completed for the current round.
   - `gofmt`
   - YAML structure review for modified workflow fragments
+  - builtin workflow variable lint coverage for `OsmedeusBase` / `OsmedeusExec`
+  - plain `go test` Make targets for environments where `gotestsum` is flaky
 
 ## Unfinished Work
 
@@ -121,12 +125,14 @@
 - Not done yet:
   - usage examples for new CLI/API capabilities
   - workflow authoring notes for attack-chain persistence and knowledge auto-learning
+  - release checklist doc for the new `test-regression-stable-core` target
 
 ## Next Plan
 
 ### Priority 1: Full Runtime Verification
 
 - Build and run the current source version.
+- Keep `test-regression-stable-core` as the serial stable-release smoke path and extend it only when new backend-critical features land.
 - Verify modified API routes:
   - vector knowledge APIs with a configured embeddings provider
 - Verify workflow persistence path:

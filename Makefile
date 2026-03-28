@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-queue-live test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
+.PHONY: build run test test-plain test-unit test-unit-plain test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-queue-live test-regression-stable-core test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
 
 # Go parameters
 GOCMD=go
@@ -106,6 +106,10 @@ install-gotestsum:
 test: install-gotestsum
 	$(TESTCMD) $(TESTFLAGS) -race ./...
 
+# Run tests without gotestsum formatting/wrapping
+test-plain:
+	$(GOTEST) -race -v ./...
+
 # Run tests with coverage
 test-coverage: install-gotestsum
 	$(TESTCMD) $(TESTFLAGS) -race -coverprofile=coverage.out ./...
@@ -114,6 +118,10 @@ test-coverage: install-gotestsum
 # Unit tests (fast, no external dependencies)
 test-unit: install-gotestsum
 	$(TESTCMD) $(TESTFLAGS) -short ./...
+
+# Unit tests without gotestsum formatting/wrapping
+test-unit-plain:
+	$(GOTEST) -short -v ./...
 
 # Integration tests (requires Docker for some tests)
 test-integration: install-gotestsum
@@ -223,6 +231,14 @@ test-regression-queue-live:
 	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
 	@echo "$(PREFIX) Running live queue regression..."
 	@BASE_DIR=/tmp/osm-queue-live PORT=8908 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/queue-live bash ./test/regression/queue-runner-live.sh
+
+# Stable-core regression: serial workflow lint + AI API + knowledge + queue live regressions
+test-regression-stable-core:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running stable core regression..."
+	@OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus MAIN_WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows QUEUE_WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/queue-live bash ./test/regression/stable-core.sh
 
 # Nix E2E tests (requires Docker for Nix container)
 test-e2e-nix: build install-gotestsum
