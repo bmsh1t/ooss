@@ -201,6 +201,57 @@ steps:
         fi
       }
 
+      campaign_targets_json_from_handoff() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -c '
+            if has("targets") then
+              [
+                (.targets.decision_rescan[]?),
+                (.targets.retest[]?),
+                (.targets.operator_focus[]?),
+                (.targets.semantic_priority[]?),
+                (.targets.previous_followup[]?)
+              ]
+              | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+            else
+              []
+            end
+          ' "$file" 2>/dev/null || echo '[]'
+        else
+          echo '[]'
+        fi
+      }
+
+      count_campaign_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_json=$(campaign_targets_json_from_handoff "$file")
+          target_count=$(printf '%s\n' "$target_json" | jq -r 'length' 2>/dev/null || echo 0)
+          if [ "${target_count:-0}" -gt 0 ] 2>/dev/null; then
+            printf '%s\n' "$target_count"
+          else
+            jq -r '.counts.campaign_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
+      count_retest_queued_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_file=$(jq -r '.target_file // ""' "$file" 2>/dev/null || echo "")
+          if [ -n "$target_file" ] && text_has_lines "$target_file"; then
+            awk 'NF {count++} END {print count+0}' "$target_file" 2>/dev/null || echo 0
+          else
+            jq -r '.queued_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
       count_lines() {
         file="$1"
         if [ -f "$file" ]; then
@@ -257,12 +308,12 @@ steps:
       RETEST_TARGETS=$(count_retest_targets "{{retestPlanFile}}")
       OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueFile}}")
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffFile}}" 2>/dev/null || echo false)
-      CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffFile}}" 2>/dev/null || echo 0)
+      CAMPAIGN_TARGETS=$(count_campaign_targets "{{campaignHandoffFile}}")
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateFile}}" 2>/dev/null || echo not_requested)
       CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' "{{campaignCreateFile}}" 2>/dev/null || echo "")
       CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' "{{campaignCreateFile}}" 2>/dev/null || echo 0)
       RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummaryFile}}" 2>/dev/null || echo not_requested)
-      RETEST_QUEUED_TARGETS=$(jq -r '.queued_targets // 0' "{{retestQueueSummaryFile}}" 2>/dev/null || echo 0)
+      RETEST_QUEUED_TARGETS=$(count_retest_queued_targets "{{retestQueueSummaryFile}}")
       SEMANTIC_RESULTS=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$ACTIVE_SEMANTIC_SEARCH_FILE" 2>/dev/null || echo 0)
       SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
 

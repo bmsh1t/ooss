@@ -258,6 +258,61 @@ steps:
         fi
       }
 
+      campaign_targets_json_from_handoff() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -c '
+            if has("targets") then
+              [
+                (.targets.decision_rescan[]?),
+                (.targets.retest[]?),
+                (.targets.operator_focus[]?),
+                (.targets.semantic_priority[]?),
+                (.targets.previous_followup[]?)
+              ]
+              | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+            else
+              []
+            end
+          ' "$file" 2>/dev/null || echo '[]'
+        else
+          echo '[]'
+        fi
+      }
+
+      count_campaign_targets() {
+        target_file="$1"
+        handoff_file="$2"
+        target_count=$(count_lines "$target_file")
+        if [ "${target_count:-0}" -gt 0 ] 2>/dev/null; then
+          printf '%s\n' "$target_count"
+        elif [ -f "$handoff_file" ] && jq empty "$handoff_file" >/dev/null 2>&1; then
+          target_json=$(campaign_targets_json_from_handoff "$handoff_file")
+          target_count=$(printf '%s\n' "$target_json" | jq -r 'length' 2>/dev/null || echo 0)
+          if [ "${target_count:-0}" -gt 0 ] 2>/dev/null; then
+            printf '%s\n' "$target_count"
+          else
+            jq -r '.counts.campaign_targets // 0' "$handoff_file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
+      count_retest_queued_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_file=$(jq -r '.target_file // ""' "$file" 2>/dev/null || echo "")
+          if [ -n "$target_file" ] && text_has_lines "$target_file"; then
+            awk 'NF {count++} END {print count+0}' "$target_file" 2>/dev/null || echo 0
+          else
+            jq -r '.queued_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
       semantic_result_count() {
         file="$1"
         if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
@@ -324,13 +379,13 @@ steps:
       PATH_PHASES=$(jq -r '.plan_summary.total_phases // 0' {{pathPlanningFile}} 2>/dev/null || echo 0)
       RETEST_TARGETS=$(count_lines "{{retestTargetsFile}}")
       OPERATOR_TARGETS=$(count_lines "{{operatorQueueTargetsFile}}")
-      CAMPAIGN_TARGETS=$(count_lines "{{campaignTargetsFile}}")
+      CAMPAIGN_TARGETS=$(count_campaign_targets "{{campaignTargetsFile}}" "{{campaignHandoffFile}}")
       CONFIRMED_URLS=$(count_lines "{{confirmedUrlsFile}}")
       ENTRY_POINTS=$(count_lines "{{entryPointsFile}}")
       BEST_PATH_TARGETS=$(count_lines "{{bestPathTargetsFile}}")
       SEMANTIC_PRIORITY_TARGETS=$(count_lines "$ACTIVE_SEMANTIC_PRIORITY_FILE")
       OPERATOR_TASKS=$(count_operator_tasks "{{operatorQueueFile}}")
-      RETEST_QUEUED=$(jq -r '.queued_targets // 0' {{retestQueueSummaryFile}} 2>/dev/null || echo 0)
+      RETEST_QUEUED=$(count_retest_queued_targets "{{retestQueueSummaryFile}}")
       CAMPAIGN_READY=$(jq -r '.handoff_ready // false' {{campaignHandoffFile}} 2>/dev/null || echo false)
       CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' {{campaignCreateFile}} 2>/dev/null || echo not_requested)
       CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' {{campaignCreateFile}} 2>/dev/null || echo "")
@@ -418,6 +473,28 @@ steps:
         awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }' "$file" >/dev/null 2>&1
       }
 
+      campaign_targets_json_from_handoff() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -c '
+            if has("targets") then
+              [
+                (.targets.decision_rescan[]?),
+                (.targets.retest[]?),
+                (.targets.operator_focus[]?),
+                (.targets.semantic_priority[]?),
+                (.targets.previous_followup[]?)
+              ]
+              | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+            else
+              []
+            end
+          ' "$file" 2>/dev/null || echo '[]'
+        else
+          echo '[]'
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -489,8 +566,10 @@ steps:
         fi
         echo ""
         echo "## Campaign Targets"
-        if [ -f "{{campaignTargetsFile}}" ] && [ -s "{{campaignTargetsFile}}" ]; then
+        if text_has_lines "{{campaignTargetsFile}}"; then
           head -50 "{{campaignTargetsFile}}" | sed 's/^/- /'
+        elif [ "$(campaign_targets_json_from_handoff "{{campaignHandoffFile}}" | jq -r 'length' 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; then
+          campaign_targets_json_from_handoff "{{campaignHandoffFile}}" | jq -r '.[] | "- \(.)"' 2>/dev/null | head -50
         else
           echo "- none"
         fi
@@ -787,7 +866,24 @@ steps:
           [
             "- Handoff ready: " + ((.handoff_ready // false) | tostring),
             "- Recommended flow: " + (.campaign_profile.recommended_flow // "web-analysis"),
-            "- Campaign targets: " + ((.counts.campaign_targets // 0) | tostring),
+            "- Campaign targets: " + (
+              if has("targets") then
+                (
+                  [
+                    (.targets.decision_rescan[]?),
+                    (.targets.retest[]?),
+                    (.targets.operator_focus[]?),
+                    (.targets.semantic_priority[]?),
+                    (.targets.previous_followup[]?)
+                  ]
+                  | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+                  | length
+                )
+              else
+                (.counts.campaign_targets // 0)
+              end
+              | tostring
+            ),
             "- Previous priority mode: " + (.campaign_profile.previous_priority_mode // "n/a"),
             "- Previous confidence level: " + (.campaign_profile.previous_confidence_level // "n/a")
           ] | .[]

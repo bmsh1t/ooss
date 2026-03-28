@@ -87,6 +87,57 @@ steps:
         fi
       }
 
+      campaign_targets_json_from_handoff() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -c '
+            if has("targets") then
+              [
+                (.targets.decision_rescan[]?),
+                (.targets.retest[]?),
+                (.targets.operator_focus[]?),
+                (.targets.semantic_priority[]?),
+                (.targets.previous_followup[]?)
+              ]
+              | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+            else
+              []
+            end
+          ' "$file" 2>/dev/null || echo '[]'
+        else
+          echo '[]'
+        fi
+      }
+
+      count_campaign_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_json=$(campaign_targets_json_from_handoff "$file")
+          target_count=$(printf '%s\n' "$target_json" | jq -r 'length' 2>/dev/null || echo 0)
+          if [ "${target_count:-0}" -gt 0 ] 2>/dev/null; then
+            printf '%s\n' "$target_count"
+          else
+            jq -r '.counts.campaign_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
+      count_retest_queued_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_file=$(jq -r '.target_file // ""' "$file" 2>/dev/null || echo "")
+          if [ -n "$target_file" ] && [ -f "$target_file" ]; then
+            awk 'NF {count++} END {print count+0}' "$target_file" 2>/dev/null || echo 0
+          else
+            jq -r '.queued_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -135,7 +186,7 @@ steps:
       CAMPAIGN_CREATE_QUEUED_RUNS=0
       if [ -f "{{campaignHandoffOutput}}" ] && jq empty "{{campaignHandoffOutput}}" 2>/dev/null; then
         CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffOutput}}" 2>/dev/null || echo false)
-        CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffOutput}}" 2>/dev/null || echo 0)
+        CAMPAIGN_TARGETS=$(count_campaign_targets "{{campaignHandoffOutput}}")
       fi
       if [ -f "{{campaignCreateOutput}}" ] && jq empty "{{campaignCreateOutput}}" 2>/dev/null; then
         CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateOutput}}" 2>/dev/null || echo not_requested)
@@ -146,7 +197,7 @@ steps:
       RETEST_QUEUED=0
       RETEST_QUEUE_STATUS="not_requested"
       if [ -f "{{retestQueueSummary}}" ] && jq empty "{{retestQueueSummary}}" 2>/dev/null; then
-        RETEST_QUEUED=$(jq -r '.queued_targets // 0' "{{retestQueueSummary}}" 2>/dev/null || echo 0)
+        RETEST_QUEUED=$(count_retest_queued_targets "{{retestQueueSummary}}")
         RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummary}}" 2>/dev/null || echo not_requested)
       fi
 
@@ -178,6 +229,9 @@ steps:
       CONFIRMED_JSON=$(file_to_json_array "{{confirmedUrlsFile}}")
       CONFIRMED_COUNT=$(printf '%s\n' "$CONFIRMED_JSON" | jq -r 'length' 2>/dev/null || echo 0)
       CAMPAIGN_TARGETS_JSON=$(file_to_json_array "{{campaignTargetsFile}}")
+      if [ "$(printf '%s\n' "$CAMPAIGN_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)" -eq 0 ] 2>/dev/null; then
+        CAMPAIGN_TARGETS_JSON=$(campaign_targets_json_from_handoff "{{campaignHandoffOutput}}")
+      fi
       SEMANTIC_PRIORITY_JSON=$(file_to_json_array "$ACTIVE_SEMANTIC_PRIORITY_FILE")
 
       RESCAN_CRITICAL_TMP="{{Output}}/ai-analysis/.rescan-critical-targets-{{TargetSpace}}.txt"

@@ -3992,6 +3992,83 @@ func TestExecuteAIPostFollowupCoordinationCountsOperatorTasksFromTaskList(t *tes
 	}, manualFirst)
 }
 
+func TestExecuteAIPostFollowupCoordinationCountsCampaignAndQueuedRetestsFromArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-campaign-queue-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	retestTargetFile := filepath.Join(aiDir, "queued-retests-"+targetSpace+".txt")
+	writeTestFile(t, retestTargetFile, "https://queue.example.com/admin\nhttps://queue.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 0},
+  "targets": {
+    "decision_rescan": ["https://campaign.example.com/admin"],
+    "retest": ["https://campaign.example.com/graphql"],
+    "operator_focus": ["https://campaign.example.com/admin"],
+    "semantic_priority": ["https://campaign.example.com/api"],
+    "previous_followup": ["https://campaign.example.com/graphql", "https://campaign.example.com/api"]
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "status":"queued",
+  "queued_targets":0,
+  "target_file":"`+retestTargetFile+`"
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var followup map[string]interface{}
+	require.NoError(t, json.Unmarshal(followupData, &followup))
+
+	followupSummary, ok := followup["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(3), followupSummary["campaign_targets"])
+	assert.Equal(t, float64(2), followupSummary["retest_queued_targets"])
+
+	seedFocus, ok := followup["seed_focus"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "campaign-first", seedFocus["priority_mode"])
+	assert.Equal(t, "medium", seedFocus["confidence_level"])
+	assert.Equal(t, "campaign-followup", seedFocus["next_phase"])
+
+	signalScores, ok := seedFocus["signal_scores"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(7), signalScores["escalation_score"])
+
+	seedTargets, ok := followup["seed_targets"].(map[string]interface{})
+	require.True(t, ok)
+	campaignTargets, ok := seedTargets["campaign_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://campaign.example.com/admin",
+		"https://campaign.example.com/graphql",
+		"https://campaign.example.com/api",
+	}, campaignTargets)
+}
+
 func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5691,6 +5768,80 @@ func TestExecuteFinalReportUsesFirstSemanticArtifactWithHits(t *testing.T) {
 	assert.NotContains(t, fullReport, "semantic-search-decision-followup-"+targetSpace+".json")
 }
 
+func TestExecuteFinalReportCountsCampaignAndQueuedRetestsFromRealArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-real-campaign-queue-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	reportDir := filepath.Join(outputDir, "report")
+
+	retestTargetFile := filepath.Join(aiDir, "queued-retests-"+targetSpace+".txt")
+	writeTestFile(t, retestTargetFile, "https://queue.example.com/admin\nhttps://queue.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 0},
+  "targets": {
+    "decision_rescan": ["https://campaign.example.com/admin"],
+    "retest": ["https://campaign.example.com/graphql"],
+    "operator_focus": ["https://campaign.example.com/admin"],
+    "semantic_priority": ["https://campaign.example.com/api"],
+    "previous_followup": ["https://campaign.example.com/graphql", "https://campaign.example.com/api"]
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "status":"queued",
+  "queued_targets":0,
+  "target_file":"`+retestTargetFile+`"
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                 "https://app.example.com",
+		"space_name":             targetSpace,
+		"enableLlmReport":        "false",
+		"enableLlmAttackSurface": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statsData, err := os.ReadFile(filepath.Join(reportDir, "statistics-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var stats map[string]interface{}
+	require.NoError(t, json.Unmarshal(statsData, &stats))
+	statistics := stats["statistics"].(map[string]interface{})
+	aiStats := statistics["ai"].(map[string]interface{})
+	assert.Equal(t, float64(3), aiStats["campaign_targets"])
+	assert.Equal(t, float64(2), aiStats["retest_queued_targets"])
+
+	assetsData, err := os.ReadFile(filepath.Join(reportDir, "assets-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	assetsText := string(assetsData)
+	assert.Contains(t, assetsText, "https://campaign.example.com/admin")
+	assert.Contains(t, assetsText, "https://campaign.example.com/graphql")
+	assert.Contains(t, assetsText, "https://campaign.example.com/api")
+
+	fullReportData, err := os.ReadFile(filepath.Join(reportDir, "full-report-"+targetSpace+".md"))
+	require.NoError(t, err)
+	fullReport := string(fullReportData)
+	assert.Contains(t, fullReport, "Campaign targets: 3")
+}
+
 func TestExecuteFinalReportRendersPlaintextSeverityFiles(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5953,6 +6104,69 @@ func TestExecuteEnhancedFinalReportCountsRealOperationalArtifacts(t *testing.T) 
 	summaryText := string(summaryData)
 	assert.Contains(t, summaryText, "Retest planned targets: 2")
 	assert.Contains(t, summaryText, "Operator tasks: 2")
+}
+
+func TestExecuteEnhancedFinalReportCountsCampaignAndQueuedRetestsFromRealArtifacts(t *testing.T) {
+	if _, err := osExec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not installed")
+	}
+
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report-enhanced.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-enhanced-real-campaign-queue-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	reportDir := filepath.Join(outputDir, "report")
+
+	retestTargetFile := filepath.Join(aiDir, "queued-retests-"+targetSpace+".txt")
+	writeTestFile(t, retestTargetFile, "https://queue.example.com/admin\nhttps://queue.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-jsonl-"+targetSpace+".txt"),
+		`{"info":{"cve_id":"CVE-2025-0101","title":"Critical issue","severity":"critical"},"matched_at":"https://a.example.com/admin"}`+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 0},
+  "targets": {
+    "decision_rescan": ["https://campaign.example.com/admin"],
+    "retest": ["https://campaign.example.com/graphql"],
+    "operator_focus": ["https://campaign.example.com/admin"],
+    "semantic_priority": ["https://campaign.example.com/api"],
+    "previous_followup": ["https://campaign.example.com/graphql", "https://campaign.example.com/api"]
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "status":"queued",
+  "queued_targets":0,
+  "target_file":"`+retestTargetFile+`"
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://a.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	summaryData, err := os.ReadFile(filepath.Join(reportDir, "enhanced-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	summaryText := string(summaryData)
+	assert.Contains(t, summaryText, "Campaign targets: 3")
+	assert.Contains(t, summaryText, "Retest queue: queued")
+	assert.Contains(t, summaryText, "Retest queued targets: 2")
 }
 
 func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) {
