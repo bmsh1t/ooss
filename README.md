@@ -136,11 +136,12 @@ osmedeus --usage-example
 
 ## Regression Checks
 
-For Docker-free live API regressions against a real local `osmedeus serve` process, run:
+For Docker-free live regressions against a real local `osmedeus serve` / queue-worker process, run:
 
 ```bash
 make test-regression-api-ai
 make test-regression-api-knowledge
+make test-regression-queue-live
 ```
 
 - `make test-regression-api-ai`
@@ -149,6 +150,9 @@ make test-regression-api-knowledge
 - `make test-regression-api-knowledge`
   - verifies `knowledge ingest / documents / search / learn` plus workspace-to-public layered retrieval without requiring a vector provider
   - stores temporary artifacts under `/tmp/osm-api-knowledge-live`
+- `make test-regression-queue-live`
+  - verifies CLI queued runs, vulnerability retest queue consumption, and campaign deep-scan queue consumption against a real worker
+  - stores temporary artifacts under `/tmp/osm-queue-live`
 
 ## Knowledge Base and Vector Workflow Usage
 

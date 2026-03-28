@@ -1,0 +1,13 @@
+kind: flow
+name: queue-smoke-flow
+description: Minimal flow used by the live queue regression.
+
+params:
+  - name: target
+    required: true
+
+modules:
+  - name: smoke
+    path: queue-smoke-module.yaml
+    params:
+      target: "{{Target}}"

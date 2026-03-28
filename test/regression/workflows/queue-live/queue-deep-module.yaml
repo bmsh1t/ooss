@@ -1,0 +1,16 @@
+kind: module
+name: queue-deep-module
+description: Minimal deep-scan module used by the live queue regression.
+
+params:
+  - name: target
+    required: true
+
+steps:
+  - name: write-marker
+    type: bash
+    command: |
+      mkdir -p {{Output}}/regression
+      cat > {{Output}}/regression/queue-deep.json <<'EOF'
+      {"workflow":"queue-deep-module","target":"{{Target}}"}
+      EOF

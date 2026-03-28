@@ -1,0 +1,16 @@
+kind: module
+name: queue-retest-module
+description: Minimal retest module used by the live queue regression.
+
+params:
+  - name: target
+    required: true
+
+steps:
+  - name: write-marker
+    type: bash
+    command: |
+      mkdir -p {{Output}}/regression
+      cat > {{Output}}/regression/queue-retest.json <<'EOF'
+      {"workflow":"queue-retest-module","target":"{{Target}}"}
+      EOF

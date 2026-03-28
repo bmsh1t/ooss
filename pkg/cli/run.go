@@ -2271,6 +2271,13 @@ func queueRuns(ctx context.Context, cfg *config.Config, workflowName, workflowKi
 	var queuedCount int
 
 	for _, target := range allTargets {
+		stringParams := make(map[string]string)
+		for key, value := range params {
+			if raw, ok := value.(string); ok {
+				stringParams[key] = raw
+			}
+		}
+
 		// Detect if the target is a file
 		inputIsFile := false
 		inputFilePath := ""
@@ -2310,6 +2317,7 @@ func queueRuns(ctx context.Context, cfg *config.Config, workflowName, workflowKi
 			RunPriority:   "high",
 			RunMode:       "queue",
 			IsQueued:      true,
+			Workspace:     computeWorkspace(target, stringParams),
 			InputIsFile:   inputIsFile,
 			InputFilePath: inputFilePath,
 		}

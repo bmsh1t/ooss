@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
+.PHONY: build run test test-unit test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-queue-live test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
 
 # Go parameters
 GOCMD=go
@@ -215,6 +215,14 @@ test-regression-api-knowledge:
 	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
 	@echo "$(PREFIX) Running live knowledge API regression..."
 	@BASE_DIR=/tmp/osm-api-knowledge-live PORT=8907 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/api-knowledge-live.sh
+
+# Live queue-runner regression for CLI queue, vulnerability retest, and campaign deep-scan flows
+test-regression-queue-live:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running live queue regression..."
+	@BASE_DIR=/tmp/osm-queue-live PORT=8908 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/queue-live bash ./test/regression/queue-runner-live.sh
 
 # Nix E2E tests (requires Docker for Nix container)
 test-e2e-nix: build install-gotestsum

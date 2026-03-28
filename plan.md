@@ -39,6 +39,7 @@
   - `make build`
   - `make test-regression-api-ai`
   - `make test-regression-api-knowledge`
+  - `make test-regression-queue-live`
   - targeted `go test ./internal/knowledge`
   - targeted `go test ./internal/vectorkb`
   - targeted `go test ./internal/database`
@@ -52,6 +53,7 @@
 - Targeted tests were added for:
   - vulnerability retest closure
   - source run UUID propagation in vulnerability mapping
+  - CLI queued run workspace metadata persistence
 - Static checks completed for the current round.
   - `gofmt`
   - YAML structure review for modified workflow fragments
@@ -62,18 +64,20 @@
 
 - Runtime validation is mostly closed for the modified AI workflow/backend path.
 - Not done yet:
-  - full `make test-unit` pass across the entire repository in an unrestricted host environment
+  - full `make test-unit` clean exit across the entire repository in the current environment
   - live vector-knowledge API verification with an explicit embeddings provider
-  - live queue-runner verification for normal queued runs, campaign deep-scan queue consumption, and vulnerability retest queue consumption
   - workflow execution verification against current source for the full superdomain AI chain
 - Verified already:
   - clean current-source build
   - real local server startup via `make test-regression-api-ai`
   - real local server startup via `make test-regression-api-knowledge`
+  - real local server + worker startup via `make test-regression-queue-live`
   - live API verification for campaign, vulnerability lifecycle, attack-chain workbench, and non-vector knowledge-base routes
-  - full `make test-unit` pass in the current host environment
+  - live queue-runner verification for normal queued runs, campaign deep-scan queue consumption, and vulnerability retest queue consumption
   - lint/validate pass for all modified superdomain AI workflows and the new knowledge auto-learn fragment
   - targeted package/test coverage for the modified database, handler, and knowledge/URL mapping paths
+- Attempted but not yet counted as closed:
+  - `make test-unit` printed passing/skipped package output through the suite, but `gotestsum` still did not exit cleanly in this Codex session
 - This is the highest-risk remaining gap.
 
 ### 2. Knowledge Base
@@ -125,14 +129,11 @@
 - Build and run the current source version.
 - Verify modified API routes:
   - vector knowledge APIs with a configured embeddings provider
-- Verify queue runner behavior:
-  - normal queued run
-  - campaign deep-scan path
-  - vulnerability retest path
 - Verify workflow persistence path:
   - attack-chain JSON generation
   - attack-chain import into database
   - knowledge auto-learn writeback from a live workflow run
+- Investigate and close the `make test-unit` / `gotestsum` non-exit issue so the full unit suite can be counted as green.
 
 ### Priority 2: Campaign Productization
 
@@ -168,4 +169,5 @@
 
 - Stability is still the primary constraint.
 - Prefer backend-first, additive changes over large UI or engine rewrites.
-- Current-source build and workflow validation are done; unrestricted-host runtime verification is still the final closure step.
+- Current-source live verification now covers AI workbench routes, knowledge ingest/search/learn, and real queue-worker consumption.
+- Remaining runtime closure is concentrated in vector-provider verification, full superdomain AI workflow execution, and the `make test-unit` clean-exit issue.

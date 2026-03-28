@@ -7,9 +7,35 @@ import (
 	"time"
 
 	"github.com/j3ssie/osmedeus/v5/internal/database"
+	"github.com/j3ssie/osmedeus/v5/internal/terminal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestQueueRuns_AssignsWorkspaceMetadata(t *testing.T) {
+	cfg := setupCampaignTestEnv(t)
+	writeTestWorkflow(t, cfg.WorkflowsPath, "queue-smoke", "module")
+
+	ctx := context.Background()
+	printer := terminal.NewPrinter()
+
+	require.NoError(t, queueRuns(ctx, cfg, "queue-smoke", "module", []string{"https://cli.example.com/login"}, "", map[string]interface{}{
+		"space_name": "queue-cli-space",
+	}, printer))
+	require.NoError(t, queueRuns(ctx, cfg, "queue-smoke", "module", []string{"https://derived.example.com/path"}, "", map[string]interface{}{}, printer))
+
+	result, err := database.ListRuns(ctx, 0, 10, "", "queue-smoke", "", "")
+	require.NoError(t, err)
+	require.Len(t, result.Data, 2)
+
+	workspaceByTarget := make(map[string]string, len(result.Data))
+	for _, run := range result.Data {
+		workspaceByTarget[run.Target] = run.Workspace
+	}
+
+	assert.Equal(t, "queue-cli-space", workspaceByTarget["https://cli.example.com/login"])
+	assert.Equal(t, computeWorkspace("https://derived.example.com/path", map[string]string{}), workspaceByTarget["https://derived.example.com/path"])
+}
 
 func TestMaybeQueueCampaignDeepScan_ScopesRiskPerTarget(t *testing.T) {
 	_ = setupCampaignTestEnv(t)
