@@ -6126,3 +6126,69 @@ func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T)
 	callLine := strings.TrimSpace(string(callsData))
 	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
 }
+
+func TestExecuteAIKnowledgeAutolearnCountsCampaignAndQueueFromRealArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-knowledge-autolearn.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	callsPath := installStubOsmedeus(t)
+	targetSpace := "knowledge-autolearn-real-campaign-queue-counts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	retestTargetFile := filepath.Join(aiDir, "queued-targets-"+targetSpace+".txt")
+	writeTestFile(t, retestTargetFile, "https://seed.example.com/admin\nhttps://seed.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 0},
+  "targets": {
+    "decision_rescan": ["https://seed.example.com/admin"],
+    "retest": ["https://seed.example.com/graphql"],
+    "operator_focus": ["https://seed.example.com/admin"],
+    "semantic_priority": ["https://seed.example.com/api"],
+    "previous_followup": ["https://seed.example.com/graphql", "https://seed.example.com/api"]
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "status":"queued",
+  "queued_targets":0,
+  "target_file":"`+retestTargetFile+`"
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                  "https://app.example.com",
+		"space_name":              targetSpace,
+		"knowledgeWorkspace":      "shared-kb",
+		"knowledgeScope":          "workspace",
+		"enableKnowledgeLearning": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	contextData, err := os.ReadFile(filepath.Join(aiDir, "unified-analysis-knowledge-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var learnContext map[string]interface{}
+	require.NoError(t, json.Unmarshal(contextData, &learnContext))
+
+	operationalCounts, ok := learnContext["operational_counts"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(3), operationalCounts["campaign_targets"])
+	assert.Equal(t, float64(2), operationalCounts["retest_queued_targets"])
+
+	callsData, err := os.ReadFile(callsPath)
+	require.NoError(t, err)
+	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
+}

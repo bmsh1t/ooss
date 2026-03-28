@@ -72,6 +72,43 @@ steps:
         fi
       }
 
+      count_campaign_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          jq -r '
+            if has("targets") then
+              [
+                (.targets.decision_rescan[]?),
+                (.targets.retest[]?),
+                (.targets.operator_focus[]?),
+                (.targets.semantic_priority[]?),
+                (.targets.previous_followup[]?)
+              ]
+              | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)
+              | length
+            else
+              (.counts.campaign_targets // 0)
+            end
+          ' "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_retest_queued_targets() {
+        file="$1"
+        if [ -f "$file" ] && jq empty "$file" >/dev/null 2>&1; then
+          target_file=$(jq -r '.target_file // ""' "$file" 2>/dev/null || echo "")
+          if [ -n "$target_file" ] && [ -f "$target_file" ]; then
+            awk 'NF {count++} END {print count+0}' "$target_file" 2>/dev/null || echo 0
+          else
+            jq -r '.queued_targets // 0' "$file" 2>/dev/null || echo 0
+          fi
+        else
+          echo 0
+        fi
+      }
+
       APPLIED_PROFILE="focused"
       APPLIED_SEVERITY="critical,high"
       FOLLOWUP_PRIORITY_MODE="not_generated"
@@ -133,7 +170,7 @@ steps:
       fi
       if [ -f "{{campaignHandoffFile}}" ] && jq empty "{{campaignHandoffFile}}" 2>/dev/null; then
         HAS_CAMPAIGN_HANDOFF=true
-        CAMPAIGN_TARGETS=$(jq -r '.counts.campaign_targets // 0' "{{campaignHandoffFile}}" 2>/dev/null || echo 0)
+        CAMPAIGN_TARGETS=$(count_campaign_targets "{{campaignHandoffFile}}")
         CAMPAIGN_READY=$(jq -r '.handoff_ready // false' "{{campaignHandoffFile}}" 2>/dev/null || echo false)
       fi
       if [ -f "{{campaignCreateFile}}" ] && jq empty "{{campaignCreateFile}}" 2>/dev/null; then
@@ -144,7 +181,7 @@ steps:
       fi
       if [ -f "{{retestQueueSummaryFile}}" ] && jq empty "{{retestQueueSummaryFile}}" 2>/dev/null; then
         HAS_RETEST_QUEUE_SUMMARY=true
-        RETEST_QUEUED=$(jq -r '.queued_targets // 0' "{{retestQueueSummaryFile}}" 2>/dev/null || echo 0)
+        RETEST_QUEUED=$(count_retest_queued_targets "{{retestQueueSummaryFile}}")
       fi
       if [ -f "{{rescanSummaryFile}}" ] && [ -s "{{rescanSummaryFile}}" ]; then
         HAS_RESCAN_SUMMARY=true
