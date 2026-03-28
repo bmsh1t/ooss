@@ -475,6 +475,113 @@ func TestLearnWorkspace_IncludesOperationalPlaybookFromFollowupArtifacts(t *test
 	assert.Contains(t, content, "Context Reuse Sources")
 }
 
+func TestLearnWorkspace_OperationalPlaybookFallsBackToOlderRenderableArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspacesDir := filepath.Join(tmpDir, "workspaces")
+	workspaceDir := filepath.Join(workspacesDir, "acme")
+	aiDir := filepath.Join(workspaceDir, "ai-analysis")
+	require.NoError(t, os.MkdirAll(aiDir, 0o755))
+
+	validFollowup := filepath.Join(aiDir, "followup-decision-acme-valid.json")
+	invalidFollowup := filepath.Join(aiDir, "followup-decision-acme-latest.json")
+	validRescan := filepath.Join(aiDir, "rescan-summary-acme-valid.md")
+	emptyRescan := filepath.Join(aiDir, "rescan-summary-acme-latest.md")
+
+	require.NoError(t, os.WriteFile(validFollowup, []byte(`{
+  "followup_summary":{"rescan_critical":1,"rescan_high":0},
+  "seed_targets":{
+    "manual_first_targets":["https://app.acme.test/admin"],
+    "high_confidence_targets":["https://app.acme.test/api"]
+  },
+  "seed_focus":{
+    "priority_mode":"manual-first",
+    "confidence_level":"high",
+    "reuse_sources":["operator-queue"],
+    "signal_scores":{"escalation_score":12}
+  },
+  "refined_targets":{"focus_areas":["https://app.acme.test/admin"],"priority_targets":["https://app.acme.test/admin"]},
+  "execution_feedback":{"next_phase":"manual-exploitation","manual_followup_needed":true,"campaign_followup_recommended":false,"queue_followup_effective":false},
+  "next_actions":["Replay admin token path"]
+}`), 0o644))
+	require.NoError(t, os.WriteFile(invalidFollowup, []byte(`{"seed_focus":`), 0o644))
+	require.NoError(t, os.WriteFile(validRescan, []byte("# Rescan\n\nLegacy admin replay note."), 0o644))
+	require.NoError(t, os.WriteFile(emptyRescan, []byte("   \n"), 0o644))
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, os.Chtimes(validFollowup, oldTime, oldTime))
+	require.NoError(t, os.Chtimes(invalidFollowup, newTime, newTime))
+	require.NoError(t, os.Chtimes(validRescan, oldTime, oldTime))
+	require.NoError(t, os.Chtimes(emptyRescan, newTime, newTime))
+
+	cfg := &config.Config{
+		BaseFolder:     tmpDir,
+		WorkspacesPath: workspacesDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge-learning-fallback.sqlite"),
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	verified := &database.Vulnerability{
+		Workspace:  "acme",
+		VulnInfo:   "auth-bypass",
+		VulnTitle:  "Authentication Bypass",
+		Severity:   "critical",
+		Confidence: "certain",
+		AssetType:  "url",
+		AssetValue: "https://app.acme.test/admin",
+		VulnStatus: "verified",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		LastSeenAt: now,
+	}
+	_, err = database.CreateVulnerabilityRecord(ctx, verified)
+	require.NoError(t, err)
+
+	summary, err := LearnWorkspace(ctx, cfg, LearnOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	assert.Contains(t, summary.SourcePaths, "kb://learned/workspace/acme/operational-playbook.md")
+
+	var doc database.KnowledgeDocument
+	err = database.GetDB().NewSelect().
+		Model(&doc).
+		Where("workspace = ?", "acme").
+		Where("source_path = ?", "kb://learned/workspace/acme/operational-playbook.md").
+		Limit(1).
+		Scan(ctx)
+	require.NoError(t, err)
+
+	var chunks []database.KnowledgeChunk
+	err = database.GetDB().NewSelect().
+		Model(&chunks).
+		Where("document_id = ?", doc.ID).
+		Order("chunk_index ASC").
+		Scan(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+
+	var combined strings.Builder
+	for _, chunk := range chunks {
+		combined.WriteString(chunk.Content)
+		combined.WriteString("\n")
+	}
+	content := combined.String()
+	assert.Contains(t, content, "manual-exploitation")
+	assert.Contains(t, content, "Replay admin token path")
+	assert.Contains(t, content, "Legacy admin replay note.")
+}
+
 func TestLearnWorkspace_FetchesVerifiedAndFalsePositiveMemoryOutsideRecentMixedWindow(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspacesDir := filepath.Join(tmpDir, "workspaces")
@@ -595,4 +702,25 @@ func TestFirstLearnedFile_PrefersNewestArtifact(t *testing.T) {
 	require.NoError(t, os.Chtimes(newFile, newTime, newTime))
 
 	assert.Equal(t, newFile, firstLearnedFile(dir, "followup-decision-*.json"))
+}
+
+func TestFirstRenderableLearnedSection_PrefersNewestRenderableArtifact(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := filepath.Join(dir, "followup-decision-old.json")
+	newFile := filepath.Join(dir, "followup-decision-new.json")
+	require.NoError(t, os.WriteFile(oldFile, []byte(`{
+  "execution_feedback":{"next_phase":"manual-exploitation"},
+  "seed_focus":{"priority_mode":"manual-first","confidence_level":"high"},
+  "followup_summary":{"rescan_critical":1,"rescan_high":0}
+}`), 0o644))
+	require.NoError(t, os.WriteFile(newFile, []byte(`{"execution_feedback":`), 0o644))
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, os.Chtimes(oldFile, oldTime, oldTime))
+	require.NoError(t, os.Chtimes(newFile, newTime, newTime))
+
+	file, section := firstRenderableLearnedSection(dir, "followup-decision-*.json", renderFollowupDecisionSection)
+	assert.Equal(t, oldFile, file)
+	assert.Contains(t, section, "manual-exploitation")
 }

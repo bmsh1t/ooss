@@ -409,59 +409,43 @@ func buildOperationalPlaybookMarkdown(workspace, scope, workspaceDir string, inc
 	includedFiles := []string{}
 	sections := []string{}
 
-	if file := firstLearnedFile(aiDir, "applied-ai-decision-*.json"); file != "" {
-		if section := renderAppliedDecisionSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "applied-ai-decision-*.json", renderAppliedDecisionSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "retest-plan-*.json"); file != "" {
-		if section := renderRetestPlanSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "retest-plan-*.json", renderRetestPlanSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "operator-queue-*.json"); file != "" {
-		if section := renderOperatorQueueSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "operator-queue-*.json", renderOperatorQueueSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "campaign-handoff-*.json"); file != "" {
-		if section := renderCampaignHandoffSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "campaign-handoff-*.json", renderCampaignHandoffSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "campaign-create-*.json"); file != "" {
-		if section := renderCampaignCreateSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "campaign-create-*.json", renderCampaignCreateSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "unified-analysis-knowledge-*.json"); file != "" {
-		if section := renderKnowledgeLearningContextSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "unified-analysis-knowledge-*.json", renderKnowledgeLearningContextSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "followup-decision-*.json"); file != "" {
-		if section := renderFollowupDecisionSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "followup-decision-*.json", renderFollowupDecisionSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "retest-queue-summary-*.json"); file != "" {
-		if section := renderRetestQueueSection(file); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "retest-queue-summary-*.json", renderRetestQueueSection); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
-	if file := firstLearnedFile(aiDir, "rescan-summary-*.md"); file != "" {
-		if section := renderLearnedTextExcerptSection("Targeted Rescan Notes", file, 1800); section != "" {
-			sections = append(sections, section)
-			includedFiles = append(includedFiles, file)
-		}
+	if file, section := firstRenderableLearnedSection(aiDir, "rescan-summary-*.md", func(path string) string {
+		return renderLearnedTextExcerptSection("Targeted Rescan Notes", path, 1800)
+	}); file != "" {
+		sections = append(sections, section)
+		includedFiles = append(includedFiles, file)
 	}
 
 	includedFiles = uniqueLearnedStrings(includedFiles)
@@ -898,6 +882,17 @@ func firstLearnedFile(baseDir, pattern string) string {
 		return ""
 	}
 	return files[0]
+}
+
+func firstRenderableLearnedSection(baseDir, pattern string, render func(path string) string) (string, string) {
+	for _, file := range collectLearnedFiles(baseDir, []string{pattern}, maxLearnedFiles) {
+		section := strings.TrimSpace(render(file))
+		if section == "" {
+			continue
+		}
+		return file, section
+	}
+	return "", ""
 }
 
 func uniqueLearnedStrings(values []string) []string {
