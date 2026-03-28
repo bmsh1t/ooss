@@ -1,10 +1,35 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestConfigResolvePaths_UsesOSMWorkspacesOverride(t *testing.T) {
+	t.Setenv("OSM_WORKSPACES", "$HOME/override-workspaces")
+
+	cfg := &Config{
+		BaseFolder: "/tmp/osmedeus-base",
+		Environments: EnvironmentConfig{
+			ExternalBinariesPath: "{{base_folder}}/external-binaries",
+			ExternalData:         "{{base_folder}}/external-data",
+			ExternalConfigs:      "{{base_folder}}/external-configs",
+			Workspaces:           "{{base_folder}}/workspaces",
+			Workflows:            "{{base_folder}}/workflows",
+		},
+	}
+
+	cfg.ResolvePaths()
+
+	homeDir, err := os.UserHomeDir()
+	assert.NoError(t, err)
+	expected := filepath.Clean(filepath.Join(homeDir, "override-workspaces"))
+	assert.Equal(t, expected, filepath.Clean(cfg.WorkspacesPath))
+	assert.Equal(t, expected, filepath.Clean(cfg.Environments.Workspaces))
+}
 
 func TestServerConfig_GetServerURL(t *testing.T) {
 	tests := []struct {

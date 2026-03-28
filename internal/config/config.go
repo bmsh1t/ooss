@@ -880,6 +880,7 @@ func LoadFromBytes(data []byte) (*Config, error) {
 func (c *Config) ResolvePaths() {
 	baseFolder := c.resolveEnvVars(c.BaseFolder)
 	c.BaseFolder = baseFolder
+	c.applyEnvironmentOverrides(baseFolder)
 
 	// Resolve each path with base_folder substitution
 	c.BinariesPath = c.resolvePath(c.Environments.ExternalBinariesPath, baseFolder)
@@ -902,6 +903,14 @@ func (c *Config) ResolvePaths() {
 
 	// Resolve external scripts path
 	c.ExternalScriptsPath = c.resolvePath(c.Environments.ExternalScripts, baseFolder)
+}
+
+// applyEnvironmentOverrides lets tests and automation pin runtime paths without
+// rewriting the on-disk config file.
+func (c *Config) applyEnvironmentOverrides(baseFolder string) {
+	if override := strings.TrimSpace(os.Getenv("OSM_WORKSPACES")); override != "" {
+		c.Environments.Workspaces = c.resolvePath(override, baseFolder)
+	}
 }
 
 // resolvePath resolves a single path with variable substitution
