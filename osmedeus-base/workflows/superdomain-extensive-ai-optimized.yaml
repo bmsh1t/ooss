@@ -330,7 +330,7 @@ modules:
 
   # AI 预扫描决策 - 依赖子域名枚举 + DNS 结果，尽早产出优先级列表
   - name: ai-pre-scan-decision
-    path: fragments/do-ai-pre-scan-decision-acp.yaml
+    path: fragments/do-ai-pre-scan-decision.yaml
     depends_on: [subdomain, dns-resolve]
     pre_condition: "{{enablePreScanDecision}}"
 
@@ -359,7 +359,7 @@ modules:
 
   # AI 实时 WAF 规避 - 依赖指纹识别结果
   - name: ai-waf-bypass
-    path: fragments/do-ai-waf-bypass-acp.yaml
+    path: fragments/do-ai-waf-bypass.yaml
     depends_on: [http-probe, fingerprint]
     pre_condition: "{{enableWafBypass}}"
 
@@ -374,13 +374,13 @@ modules:
 
   # AI 漏洞验证 - 依赖 vuln-suite 扫描结果 + skills 知识库
   - name: ai-vuln-validation
-    path: fragments/do-ai-vuln-validation-acp.yaml
+    path: fragments/do-ai-vuln-validation.yaml
     depends_on: [vuln-suite, ai-skills-loader]
     pre_condition: "{{enableVulnValidation}}"
 
   # AI 攻击链分析 - 依赖 ai-vuln-validation 的输出
   - name: ai-attack-chain
-    path: fragments/do-ai-attack-chain-acp.yaml
+    path: fragments/do-ai-attack-chain.yaml
     depends_on: [ai-vuln-validation, ai-semantic-search]
     pre_condition: "{{enableAttackChain}}"
     params:
@@ -396,7 +396,7 @@ modules:
 
   # AI 攻击路径规划 - 依赖 ai-attack-chain 的输出
   - name: ai-path-planning
-    path: fragments/do-ai-path-planning-acp.yaml
+    path: fragments/do-ai-path-planning.yaml
     depends_on: [ai-attack-chain, ai-semantic-search]
     pre_condition: "{{enablePathPlanning}}"
     params:
@@ -453,7 +453,7 @@ modules:
   # Phase 10: Code Review
   # ===========================================================================
   - name: ai-code-review
-    path: fragments/do-ai-code-review-acp.yaml
+    path: fragments/do-ai-code-review-enhanced.yaml
     depends_on: [vuln-suite]
     pre_condition: "{{enableLlmCodeReview}}"
 

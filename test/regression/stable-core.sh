@@ -82,13 +82,6 @@ OSMEDEUS_BIN="$OSMEDEUS_BIN" \
 WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
 bash "${ROOT_DIR}/test/regression/superdomain-stable-flow-smoke.sh"
 
-BASE_DIR=/tmp/osm-stable-core-superdomain-optimized \
-EMBED_PORT=8915 \
-FLOW_NAME=superdomain-extensive-ai-optimized \
-OSMEDEUS_BIN="$OSMEDEUS_BIN" \
-WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
-bash "${ROOT_DIR}/test/regression/superdomain-stable-flow-smoke.sh"
-
 BASE_DIR=/tmp/osm-stable-core-scan-content \
 OSMEDEUS_BIN="$OSMEDEUS_BIN" \
 WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \

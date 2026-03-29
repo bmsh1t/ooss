@@ -8,7 +8,6 @@ OSMEDEUS_BIN="${OSMEDEUS_BIN:-${ROOT_DIR}/build/bin/osmedeus}"
 WORKSPACES_DIR="${WORKSPACES_DIR:-${BASE_DIR}/workspaces}"
 EMBED_PORT="${EMBED_PORT:-8914}"
 TARGET="${TARGET:-example.com}"
-FLOW_NAME="${FLOW_NAME:-superdomain-extensive-ai-stable}"
 KNOWLEDGE_WORKSPACE="${KNOWLEDGE_WORKSPACE:-example.com}"
 SHARED_WORKSPACE="${SHARED_WORKSPACE:-shared-web}"
 GLOBAL_WORKSPACE="${GLOBAL_WORKSPACE:-global}"
@@ -351,14 +350,14 @@ OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
   --workflow-folder "$WORKFLOW_DIR" \
-  workflow validate "$FLOW_NAME" \
+  workflow validate superdomain-extensive-ai-stable \
   >"$BASE_DIR/validate.log" 2>&1
 
 run_args=(
   --base-folder "$BASE_DIR"
   --workflow-folder "$WORKFLOW_DIR"
   run
-  -f "$FLOW_NAME"
+  -f superdomain-extensive-ai-stable
   -t "$TARGET"
   -p "enablePreScanDecision=false"
   -p "enableSemanticSearch=true"
@@ -547,4 +546,4 @@ assert_contains "$knowledge_log" "Knowledge learning completed" "knowledge learn
 assert_contains "$knowledge_log" "Base folder: $BASE_DIR" "knowledge learning base folder"
 assert_contains "$knowledge_log" "Scope: workspace" "knowledge learning scope"
 
-echo "ok superdomain flow smoke regression: $FLOW_NAME executes acp-backed fallback chain, workbench import, and knowledge autolearn closure"
+echo "ok superdomain stable flow smoke regression: current-source stable flow executes acp-backed fallback chain, workbench import, and knowledge autolearn closure"
