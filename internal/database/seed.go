@@ -3454,6 +3454,37 @@ func ListWorkspacesFullFromDB(ctx context.Context, offset, limit int) (*FullWork
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch workspaces: %w", err)
 	}
+
+	if len(workspaces) > 0 {
+		names := make([]string, 0, len(workspaces))
+		for _, ws := range workspaces {
+			names = append(names, ws.Name)
+		}
+
+		var assetCounts []WorkspaceInfo
+		err = db.NewSelect().
+			Model((*Asset)(nil)).
+			ColumnExpr("workspace AS name").
+			ColumnExpr("COUNT(*) AS asset_count").
+			Where("workspace IN (?)", bun.In(names)).
+			Group("workspace").
+			Scan(ctx, &assetCounts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch workspace asset counts: %w", err)
+		}
+
+		assetCountByName := make(map[string]int, len(assetCounts))
+		for _, item := range assetCounts {
+			assetCountByName[item.Name] = item.AssetCount
+		}
+
+		for i := range workspaces {
+			if count, ok := assetCountByName[workspaces[i].Name]; ok {
+				workspaces[i].TotalAssets = count
+			}
+		}
+	}
+
 	result.Data = workspaces
 
 	return result, nil

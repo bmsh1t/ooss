@@ -90,4 +90,4 @@ steps:
     log: "IIS shortname scan summary"
     pre_condition: 'file_exists("{{outputDir}}/iis-shortname-{{TargetSpace}}.txt")'
     functions:
-      - 'db_total_assets("{{outputDir}}/iis-shortname-{{TargetSpace}}.txt")'
+      - 'log_info("IIS shortname scan findings: {{file_length(outputDir + \"/iis-shortname-\" + TargetSpace + \".txt\")}}")'

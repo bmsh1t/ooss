@@ -1,0 +1,278 @@
+kind: module
+name: seed-ai-followup-fixtures-module
+description: Seed deterministic scan and AI artifacts for the AI workflow smoke regression.
+
+steps:
+  - name: seed-artifacts
+    type: bash
+    command: |
+      mkdir -p {{Output}}/ai-analysis {{Output}}/subdomain {{Output}}/probing {{Output}}/fingerprint {{Output}}/vulnscan {{Output}}/fixtures
+
+      LOGIN_URL="https://{{Target}}/login"
+      ADMIN_URL="https://{{Target}}/admin"
+      API_URL="https://api.{{Target}}/v1/users"
+      FILE_URL="https://files.{{Target}}/download"
+      PREVIEW_URL="https://{{Target}}/preview"
+
+      cat > {{Output}}/subdomain/subdomain-{{TargetSpace}}.txt <<EOF
+      {{Target}}
+      api.{{Target}}
+      files.{{Target}}
+      EOF
+
+      cat > {{Output}}/probing/http-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      $ADMIN_URL
+      $API_URL
+      $FILE_URL
+      EOF
+
+      cat > {{Output}}/probing/resolved-{{TargetSpace}}.txt <<EOF
+      {{Target}}
+      api.{{Target}}
+      files.{{Target}}
+      EOF
+
+      cat > {{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl <<EOF
+      {"url":"$LOGIN_URL","tech":["nginx","go","jwt"],"title":"Login Portal"}
+      {"url":"$ADMIN_URL","tech":["nginx","nextjs"],"title":"Admin Console"}
+      {"url":"$API_URL","tech":["go","graphql"],"title":"API Gateway"}
+      EOF
+
+      cat > {{Output}}/vulnscan/nuclei-critical-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      EOF
+
+      cat > {{Output}}/vulnscan/nuclei-high-{{TargetSpace}}.txt <<EOF
+      $ADMIN_URL
+      $API_URL
+      EOF
+
+      cat > {{Output}}/fixtures/nuclei-{{TargetSpace}}.jsonl <<EOF
+      {"template-id":"jwt-confusion","info":{"name":"JWT Algorithm Confusion","severity":"critical","description":"JWT validation accepts attacker-controlled algorithm selection."},"matched-at":"$LOGIN_URL","host":"$LOGIN_URL","type":"http"}
+      {"template-id":"admin-exposure","info":{"name":"Admin Panel Exposure","severity":"high","description":"Administrative preview panel is reachable without the expected access control."},"matched-at":"$ADMIN_URL","host":"$ADMIN_URL","type":"http"}
+      EOF
+
+      cat > {{Output}}/ai-analysis/vuln-validation-{{TargetSpace}}.json <<EOF
+      {
+        "status": "success",
+        "confirmed_real": 2,
+        "false_positives": 1,
+        "validation_summary": {
+          "confirmed_real": 2,
+          "false_positives": 1
+        },
+        "confirmed_targets": ["$LOGIN_URL", "$ADMIN_URL"],
+        "notes": ["jwt confusion accepted", "admin panel still exposed"]
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json <<EOF
+      {
+        "status": "success",
+        "query": "early semantic follow-up",
+        "total_results": 2,
+        "results": [
+          {
+            "target": "$LOGIN_URL",
+            "score": 0.97,
+            "title": "JWT login choke point",
+            "snippet": "Token confusion and audience validation were weak in the login edge."
+          },
+          {
+            "target": "$PREVIEW_URL",
+            "score": 0.82,
+            "title": "Preview route exposure",
+            "snippet": "Preview routes bypass the expected middleware and deserve manual retest."
+          }
+        ]
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json <<EOF
+      {
+        "status": "success",
+        "query": "post validation semantic follow-up",
+        "total_results": 3,
+        "results": [
+          {
+            "target": "$LOGIN_URL",
+            "score": 0.99,
+            "title": "JWT confusion path",
+            "snippet": "Confirmed login path lines up with prior token confusion notes and session replay checks."
+          },
+          {
+            "target": "$ADMIN_URL",
+            "score": 0.95,
+            "title": "Admin console manual follow-up",
+            "snippet": "Admin console is a high-value pivot target once auth boundaries are bypassed."
+          },
+          {
+            "target": "$API_URL",
+            "score": 0.84,
+            "title": "API privilege abuse path",
+            "snippet": "Authenticated API routes should be retested for role confusion and replay."
+          }
+        ]
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json <<EOF
+      [
+        {
+          "workspace": "{{TargetSpace}}",
+          "title": "Workspace note",
+          "snippet": "Focus on JWT audience validation and preview routes."
+        }
+      ]
+      EOF
+
+      cat > {{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json <<EOF
+      [
+        {
+          "workspace": "{{TargetSpace}}",
+          "title": "Verified auth issue",
+          "snippet": "JWT confusion was confirmed and should drive manual-first follow-up."
+        },
+        {
+          "workspace": "public",
+          "title": "Admin exposure playbook",
+          "snippet": "Admin exposure plus weak auth usually warrants campaign and retest queue creation."
+        }
+      ]
+      EOF
+
+      cat > {{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json <<EOF
+      [
+        {
+          "workspace": "{{TargetSpace}}",
+          "title": "Vector auth context",
+          "content": "JWT login weakness appears in previous private notes.",
+          "metadata": {
+            "sample_type": "workspace-summary"
+          }
+        }
+      ]
+      EOF
+
+      cat > {{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json <<EOF
+      [
+        {
+          "workspace": "{{TargetSpace}}",
+          "title": "Vector verified finding",
+          "content": "Verified login and admin findings should be rechecked and queued.",
+          "metadata": {
+            "sample_type": "verified"
+          }
+        }
+      ]
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json <<EOF
+      {
+        "focus_targets": ["$LOGIN_URL", "$PREVIEW_URL"],
+        "themes": ["jwt", "preview-route"]
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json <<EOF
+      {
+        "focus_targets": ["$LOGIN_URL", "$ADMIN_URL", "$API_URL"],
+        "themes": ["jwt", "admin-panel", "role-confusion"]
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      $ADMIN_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      $ADMIN_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/entry-points-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/best-path-targets-{{TargetSpace}}.txt <<EOF
+      $API_URL
+      $FILE_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      $PREVIEW_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt <<EOF
+      $LOGIN_URL
+      $ADMIN_URL
+      $API_URL
+      EOF
+
+      cat > {{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json <<EOF
+      {
+        "base_decision": {
+          "profile": "balanced",
+          "severity": "critical,high",
+          "reasoning": "Previous follow-up highlighted auth and admin surfaces."
+        },
+        "followup_summary": {
+          "campaign_create_status": "created",
+          "campaign_create_id": "seed-campaign",
+          "campaign_create_queued_runs": 2
+        },
+        "seed_targets": {
+          "focus_areas": ["$LOGIN_URL", "$ADMIN_URL"],
+          "priority_targets": ["$LOGIN_URL", "$API_URL"],
+          "retest_targets": ["$LOGIN_URL"],
+          "manual_first_targets": ["$ADMIN_URL"],
+          "high_confidence_targets": ["$LOGIN_URL", "$API_URL"],
+          "confirmed_targets": ["$LOGIN_URL", "$ADMIN_URL"],
+          "semantic_targets": ["$LOGIN_URL", "$PREVIEW_URL"],
+          "rescan_targets": ["$LOGIN_URL", "$ADMIN_URL"],
+          "rescan_critical_targets": ["$LOGIN_URL"],
+          "rescan_high_targets": ["$ADMIN_URL"]
+        },
+        "seed_focus": {
+          "scan_profile": "balanced",
+          "severity": "critical,high",
+          "reasoning": "Use manual-first follow-up on auth and admin assets.",
+          "next_phase": "campaign-followup",
+          "priority_mode": "manual-first",
+          "confidence_level": "high",
+          "reuse_sources": ["semantic-priority", "confirmed-urls", "campaign-create"],
+          "manual_followup_needed": true,
+          "campaign_followup_recommended": true,
+          "queue_followup_effective": true,
+          "signal_scores": {
+            "escalation_score": 14
+          }
+        },
+        "execution_feedback": {
+          "next_phase": "campaign-followup",
+          "manual_followup_needed": true,
+          "campaign_followup_recommended": true,
+          "queue_followup_effective": true
+        }
+      }
+      EOF
+
+      cat > {{Output}}/ai-analysis/unified-analysis-{{TargetSpace}}.md <<EOF
+      # Unified Analysis
+
+      The smoke regression confirms the login and admin surfaces remain the most practical manual-first follow-up targets.
+      Campaign packaging should stay enabled because the same verified targets are reusable for batch execution.
+      EOF
+
+  - name: import-seeded-vulnerabilities
+    type: function
+    functions:
+      - 'db_import_vuln_from_file("{{TargetSpace}}", "{{Output}}/fixtures/nuclei-{{TargetSpace}}.jsonl")'
+
+  - name: log-fixtures-ready
+    type: function
+    functions:
+      - 'log_info("AI smoke fixtures seeded for {{Target}}")'

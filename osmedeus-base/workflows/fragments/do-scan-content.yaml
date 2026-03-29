@@ -19,23 +19,23 @@ params:
 
   # speed tuning params
   - name: deparosMaxtime
-    default: "30m"
+    default: "10m"
   - name: deparosParallel
-    default: "10"
+    default: "4"
   - name: deparosThreads
-    default: "40"
+    default: "16"
   - name: deparosTimeout
-    default: "30m"
+    default: "12m"
   - name: deparosSessionName
     default: "{{Today}}" # 2026-01-30
 
   ## ffuf params
   - name: ffufTimeout
-    default: "30m"
+    default: "15m"
   - name: ffufParallel
-    default: "10"
+    default: "6"
   - name: ffThreads
-    default: "25"
+    default: "20"
 
   - name: defaultUA
     default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
@@ -65,6 +65,8 @@ params:
     default: "{{ threads * 2 }}"
   - name: httpTimeout
     default: "15"
+  - name: contentProbeTimeout
+    default: "15m"
   - name: contentDiscoverUrlsFile
     default: "{{Output}}/content-discovery/content-discovery-url-{{TargetSpace}}.txt"
   - name: httpFingerprintJsonFile
@@ -134,7 +136,23 @@ steps:
     step:
       name: deparos-single-target
       type: bash
-      command: "timeout -k 1m {{deparosTimeout}} deparos discover --silent --threads {{deparosThreads}} -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name {{deparosSessionName}} --max-duration {{deparosMaxtime}}"
+      command: |
+        INPUT_COUNT=$(awk 'NF { c++ } END { print c + 0 }' {{httpFile}} 2>/dev/null)
+        DEPAROS_THREADS="{{deparosThreads}}"
+        DEPAROS_MAXTIME="{{deparosMaxtime}}"
+        DEPAROS_TIMEOUT="{{deparosTimeout}}"
+
+        if [ "${INPUT_COUNT:-0}" -le 3 ]; then
+          DEPAROS_THREADS="8"
+          DEPAROS_MAXTIME="4m"
+          DEPAROS_TIMEOUT="6m"
+        elif [ "${INPUT_COUNT:-0}" -le 10 ]; then
+          DEPAROS_THREADS="12"
+          DEPAROS_MAXTIME="6m"
+          DEPAROS_TIMEOUT="8m"
+        fi
+
+        timeout -k 1m "$DEPAROS_TIMEOUT" deparos discover --silent --threads "$DEPAROS_THREADS" -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name "{{deparosSessionName}}" --max-duration "$DEPAROS_MAXTIME"
       # with custom wordlists
       # command: "timeout -k 1m {{deparosTimeout}} deparos discover -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name {{deparosSessionName}} --max-duration {{deparosMaxtime}} -short-file-wordlist='{{shortFileWordlist}}' -short-dir-wordlist='{{shortDirWordlist}}' -long-dir-wordlist='{{longDirWordlist}}' -long-file-wordlist='{{longFileWordlist}}'"
 
@@ -174,14 +192,27 @@ steps:
   - name: directory-bruteforce-with-ffuf
     type: foreach
     log: "Running directory bruteforce with ffuf"
-    pre_condition: 'file_exists("{{httpFile}}")'
+    pre_condition: '(!file_exists("{{contentDiscoveryJsonlFile}}") || file_length("{{contentDiscoveryJsonlFile}}") == 0) && file_exists("{{httpFile}}")'
     input: "{{httpFile}}"
     variable: line
     threads: "{{ffufParallel}}"
     step:
       name: ffuf-single-target
       type: bash
-      command: 'timeout -k 1m {{ffufTimeout}} ffuf -s -t {{ffThreads}} -noninteractive -ac -acs advanced -timeout 15 -se -D -fc "429,404,400" -e "asp,aspx,aspx~,asp~,py,py~,rb,rb~,php,php~,bak,bkp,cache,cgi,conf,csv,html,inc,js,json,jsp,jsp~,log,old,txt" -json -H "{{defaultUA}}" -ac -s -fc "429,404,400" -json -u "[[line]]/FUZZ" -w {{contentDiscoverWordlist}}:FUZZ > {{Output}}/content-discovery/ffuf-raw-[[_id_]].json 2>/dev/null'
+      command: |
+        INPUT_COUNT=$(awk 'NF { c++ } END { print c + 0 }' {{httpFile}} 2>/dev/null)
+        FF_THREADS="{{ffThreads}}"
+        FF_TIMEOUT="{{ffufTimeout}}"
+
+        if [ "${INPUT_COUNT:-0}" -le 3 ]; then
+          FF_THREADS="12"
+          FF_TIMEOUT="8m"
+        elif [ "${INPUT_COUNT:-0}" -le 10 ]; then
+          FF_THREADS="16"
+          FF_TIMEOUT="10m"
+        fi
+
+        timeout -k 1m "$FF_TIMEOUT" ffuf -s -t "$FF_THREADS" -noninteractive -ac -acs advanced -timeout 15 -se -D -fc "429,404,400" -e "asp,aspx,aspx~,asp~,py,py~,rb,rb~,php,php~,bak,bkp,cache,cgi,conf,csv,html,inc,js,json,jsp,jsp~,log,old,txt" -json -H "{{defaultUA}}" -ac -s -fc "429,404,400" -json -u "[[line]]/FUZZ" -w {{contentDiscoverWordlist}}:FUZZ > {{Output}}/content-discovery/ffuf-raw-[[_id_]].json 2>/dev/null
 
   # ---------------------------------------------------------------------------
   # Process and beautify results
@@ -191,10 +222,24 @@ steps:
     log: "Processing and beautifying scan results"
     pre_condition: 'dir_length("{{Output}}/content-discovery/") > 0'
     functions:
-      - exec_cmd("cat {{Output}}/content-discovery/ffuf-raw-*.json | jq -r '.url' > {{contentDiscoverUrlsFile}}")
-      # clean up raw json files
-      - exec_cmd("rm -rf {{Output}}/content-discovery/ffuf-raw-*.json")
-      - sort_unix("{{contentDiscoverUrlsFile}}")
+      - 'exec_cmd("if ls {{Output}}/content-discovery/ffuf-raw-*.json 1>/dev/null 2>&1; then cat {{Output}}/content-discovery/ffuf-raw-*.json > {{contentDiscoverFile}}; else : > {{contentDiscoverFile}}; fi")'
+      - 'exec_cmd("rm -rf {{Output}}/content-discovery/ffuf-raw-*.json 2>/dev/null || true")'
+      - jsonl_filter("{{contentDiscoverFile}}", "{{contentDiscoverFilteredFile}}", "url,status_code,words,content_length,content_type,location")
+      - sort_unix("{{contentDiscoverFilteredFile}}")
+
+  - name: collect-content-discovery-urls
+    type: bash
+    log: "Collecting discovered URLs for fingerprinting"
+    pre_condition: 'file_exists("{{contentDiscoveryJsonlFile}}") || file_exists("{{contentDiscoverFilteredFile}}")'
+    command: |
+      {
+        if [ -s "{{contentDiscoveryJsonlFile}}" ]; then
+          jq -r '.url // empty' "{{contentDiscoveryJsonlFile}}"
+        fi
+        if [ -s "{{contentDiscoverFilteredFile}}" ]; then
+          jq -r '.url // empty' "{{contentDiscoverFilteredFile}}"
+        fi
+      } | awk 'NF' | sort -u > "{{contentDiscoverUrlsFile}}"
 
   # ---------------------------------------------------------------------------
   # HTTP fingerprinting with httpx
@@ -202,9 +247,9 @@ steps:
   - name: http-fingerprint-on-discovered-urls
     type: bash
     log: "Fingerprinting discovered URLs with httpx"
-    pre_condition: 'file_exists("{{contentDiscoverUrlsFile}}")'
+    pre_condition: 'file_exists("{{contentDiscoverUrlsFile}}") && file_length("{{contentDiscoverUrlsFile}}") > 0'
     commands:
-      - 'cat {{contentDiscoverUrlsFile}} | httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpFingerprintJsonFile}}'
+      - 'timeout -k 1m {{contentProbeTimeout}} httpx -l {{contentDiscoverUrlsFile}} -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain -o {{httpFingerprintJsonFile}} >/dev/null 2>&1 || true'
   - name: process-content-discovery-fingerprint-in-db
     type: function
     log: "Processing content discovery fingerprint in db"

@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
+	"github.com/j3ssie/osmedeus/v5/internal/retry"
 )
+
+var embeddingRequestGate struct {
+	mu   sync.Mutex
+	last time.Time
+}
 
 type embeddingAPIRequest struct {
 	Model          string   `json:"model"`
@@ -47,6 +53,26 @@ func GenerateEmbeddings(ctx context.Context, cfg *config.Config, input []string,
 	}
 
 	timeout := getEmbeddingTimeout(cfg)
+
+	if cfg.IsEmbeddingsConfigEnabled() {
+		providerName := strings.TrimSpace(cfg.Embeddings.Provider)
+		if providerName == "" {
+			return nil, "", fmt.Errorf("embeddings_config.provider is empty")
+		}
+		provider, _, err := cfg.ResolveEmbeddingProvider(providerName)
+		if err != nil {
+			return nil, "", err
+		}
+
+		model := strings.TrimSpace(modelOverride)
+		if model == "" {
+			model = strings.TrimSpace(provider.Model)
+		}
+		if model == "" {
+			return nil, "", fmt.Errorf("embedding model is empty for provider %q", providerName)
+		}
+		return requestEmbeddings(ctx, cfg, provider, input, model, timeout)
+	}
 
 	maxRetries := cfg.LLM.MaxRetries
 	if maxRetries <= 0 {
@@ -112,6 +138,9 @@ func validateEmbeddingConfig(cfg *config.Config, input []string) error {
 	if len(input) == 0 {
 		return fmt.Errorf("input is required")
 	}
+	if cfg.IsEmbeddingsConfigEnabled() {
+		return nil
+	}
 	if cfg.LLM.GetProviderCount() == 0 {
 		return fmt.Errorf("no LLM providers configured")
 	}
@@ -126,44 +155,74 @@ func getEmbeddingTimeout(cfg *config.Config) time.Duration {
 	return timeout
 }
 
-func resolveEmbeddingProvider(cfg *config.Config, providerName string) (*config.LLMProvider, error) {
-	name := strings.TrimSpace(providerName)
-	if name == "" {
-		return nil, fmt.Errorf("provider is required")
+func getEmbeddingRetryConfig(cfg *config.Config) retry.Config {
+	retryCfg := retry.DefaultConfig()
+
+	if attempts := cfg.LLM.MaxRetries; attempts > 0 {
+		retryCfg.MaxAttempts = attempts
+	}
+	if parsed, err := time.ParseDuration(strings.TrimSpace(cfg.LLM.RetryDelay)); err == nil && parsed > 0 {
+		retryCfg.InitialDelay = parsed
+	}
+	if cfg.LLM.RetryBackoff {
+		retryCfg.Multiplier = 2.0
+		maxDelay := retryCfg.InitialDelay * 8
+		if maxDelay < retryCfg.InitialDelay {
+			maxDelay = retryCfg.InitialDelay
+		}
+		retryCfg.MaxDelay = maxDelay
+	} else {
+		retryCfg.Multiplier = 1.0
+		retryCfg.MaxDelay = retryCfg.InitialDelay
 	}
 
-	var match *config.LLMProvider
-	for i := range cfg.LLM.LLMProviders {
-		provider := &cfg.LLM.LLMProviders[i]
-		if !strings.EqualFold(strings.TrimSpace(provider.Provider), name) {
-			continue
-		}
-		if match != nil {
-			return nil, fmt.Errorf("multiple LLM providers match %q; provider names must be unique for embeddings", name)
-		}
-		match = provider
+	return retryCfg
+}
+
+func getEmbeddingRequestDelay(cfg *config.Config) time.Duration {
+	if cfg == nil {
+		return 0
 	}
-	if match == nil {
-		return nil, fmt.Errorf("LLM provider %q is not configured (available: %s)", name, strings.Join(listEmbeddingProviders(cfg), ", "))
+	if parsed, err := time.ParseDuration(strings.TrimSpace(cfg.LLM.RequestDelay)); err == nil && parsed > 0 {
+		return parsed
 	}
-	return match, nil
+	return 0
+}
+
+func waitForEmbeddingRequestSlot(ctx context.Context, cfg *config.Config) error {
+	delay := getEmbeddingRequestDelay(cfg)
+	if delay <= 0 {
+		return nil
+	}
+
+	embeddingRequestGate.mu.Lock()
+	defer embeddingRequestGate.mu.Unlock()
+
+	if !embeddingRequestGate.last.IsZero() {
+		wait := time.Until(embeddingRequestGate.last.Add(delay))
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+
+	embeddingRequestGate.last = time.Now()
+	return nil
+}
+
+func resolveEmbeddingProvider(cfg *config.Config, providerName string) (*config.LLMProvider, error) {
+	provider, _, err := cfg.ResolveEmbeddingProvider(providerName)
+	return provider, err
 }
 
 func listEmbeddingProviders(cfg *config.Config) []string {
-	seen := make(map[string]struct{}, len(cfg.LLM.LLMProviders))
-	names := make([]string, 0, len(cfg.LLM.LLMProviders))
-	for _, provider := range cfg.LLM.LLMProviders {
-		name := strings.TrimSpace(provider.Provider)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := cfg.ListEmbeddingProviders()
 	if len(names) == 0 {
 		return []string{"none"}
 	}
@@ -190,43 +249,63 @@ func requestEmbeddings(ctx context.Context, cfg *config.Config, provider *config
 		return nil, "", fmt.Errorf("embedding endpoint is empty")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", embeddingURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create embedding request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if strings.TrimSpace(provider.AuthToken) != "" {
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(provider.AuthToken))
-	}
-
-	for key, value := range parseCustomHeaders(cfg.LLM.CustomHeaders) {
-		req.Header.Set(key, value)
-	}
-
 	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("embedding request failed: %w", err)
+	headers := parseCustomHeaders(cfg.LLM.CustomHeaders)
+	if strings.TrimSpace(provider.AuthToken) != "" {
+		headers["Authorization"] = "Bearer " + strings.TrimSpace(provider.AuthToken)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read embedding response: %w", err)
-	}
+	headers["Content-Type"] = "application/json"
 
 	var response embeddingAPIResponse
-	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, "", fmt.Errorf("failed to parse embedding response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		if response.Error != nil {
-			return nil, "", fmt.Errorf("embedding API error: %s", response.Error.Message)
+	retryCfg := getEmbeddingRetryConfig(cfg)
+	err = retry.Do(ctx, retryCfg, func() error {
+		if err := waitForEmbeddingRequestSlot(ctx, cfg); err != nil {
+			return err
 		}
-		return nil, "", fmt.Errorf("embedding HTTP %d", resp.StatusCode)
-	}
-	if response.Error != nil {
-		return nil, "", fmt.Errorf("embedding API error: %s", response.Error.Message)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, embeddingURL, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("failed to create embedding request: %w", err)
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return retry.Retryable(fmt.Errorf("embedding request failed: %w", err))
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return retry.Retryable(fmt.Errorf("failed to read embedding response: %w", err))
+		}
+
+		var parsed embeddingAPIResponse
+		parseErr := json.Unmarshal(respBody, &parsed)
+
+		if shouldRetryEmbeddingResponse(resp.StatusCode, &parsed) {
+			return retry.Retryable(buildEmbeddingResponseError(resp.StatusCode, &parsed))
+		}
+		if resp.StatusCode >= 400 {
+			return buildEmbeddingResponseError(resp.StatusCode, &parsed)
+		}
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse embedding response: %w", parseErr)
+		}
+		if parsed.Error != nil {
+			if isEmbeddingRateLimitError(parsed.Error) {
+				return retry.Retryable(buildEmbeddingResponseError(resp.StatusCode, &parsed))
+			}
+			return buildEmbeddingResponseError(resp.StatusCode, &parsed)
+		}
+
+		response = parsed
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
 	}
 
 	embeddings := make([][]float64, len(response.Data))
@@ -251,4 +330,30 @@ func parseCustomHeaders(raw string) map[string]string {
 		headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 	return headers
+}
+
+func shouldRetryEmbeddingResponse(statusCode int, response *embeddingAPIResponse) bool {
+	if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
+		return true
+	}
+	return isEmbeddingRateLimitError(response.Error)
+}
+
+func isEmbeddingRateLimitError(apiErr *embeddingAPIError) bool {
+	if apiErr == nil {
+		return false
+	}
+	return apiErr.Type == "rate_limit_error" ||
+		strings.Contains(strings.ToLower(apiErr.Code), "rate_limit") ||
+		strings.Contains(strings.ToLower(apiErr.Message), "rate limit")
+}
+
+func buildEmbeddingResponseError(statusCode int, response *embeddingAPIResponse) error {
+	if response != nil && response.Error != nil && strings.TrimSpace(response.Error.Message) != "" {
+		return fmt.Errorf("embedding API error: %s", response.Error.Message)
+	}
+	if statusCode > 0 {
+		return fmt.Errorf("embedding HTTP %d", statusCode)
+	}
+	return fmt.Errorf("embedding request failed")
 }

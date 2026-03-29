@@ -125,4 +125,6 @@ steps:
     type: function
     log: "Incremental check summary"
     functions:
-      - 'db_total_assets("{{newSubdomainsFile}}")'
+      - 'log_info("Incremental check summary complete for {{Target}}")'
+      - 'log_info("New subdomains detected: {{file_length(newSubdomainsFile)}}")'
+      - 'log_info("New HTTP endpoints detected: {{file_length(newHttpFile)}}")'

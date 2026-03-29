@@ -69,6 +69,20 @@ func installStubOsmedeus(t *testing.T) string {
 	stubPath := filepath.Join(stubDir, "osmedeus")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base-folder|--workflow-folder)
+      shift
+      [ "$#" -gt 0 ] && shift
+      ;;
+    --silent)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [ "$1" = "--json" ] && [ "$2" = "campaign" ] && [ "$3" = "create" ]; then
   printf '{"status":"created","campaign_id":"camp-123","queued_runs":3}\n'
   exit 0
@@ -86,6 +100,7 @@ exit 1
 `, callsPath)
 	require.NoError(t, os.WriteFile(stubPath, []byte(script), 0755))
 	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+	t.Setenv("OSMEDEUS_CLI_BIN", stubPath)
 
 	return callsPath
 }
@@ -98,6 +113,20 @@ func installKBSearchStubOsmedeus(t *testing.T) string {
 	stubPath := filepath.Join(stubDir, "osmedeus")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base-folder|--workflow-folder)
+      shift
+      [ "$#" -gt 0 ] && shift
+      ;;
+    --silent)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [ "$1" = "kb" ] && [ "$2" = "export" ]; then
   workspace=""
   output=""
@@ -156,6 +185,7 @@ exit 1
 `, callsPath)
 	require.NoError(t, os.WriteFile(stubPath, []byte(script), 0755))
 	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+	t.Setenv("OSMEDEUS_CLI_BIN", stubPath)
 
 	return callsPath
 }
@@ -6237,6 +6267,9 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
 	require.NoError(t, err)
 	var learnContext map[string]interface{}
 	require.NoError(t, json.Unmarshal(contextData, &learnContext))
+	assert.Equal(t, targetSpace, learnContext["workspace"])
+	assert.Equal(t, targetSpace, learnContext["learning_workspace"])
+	assert.Equal(t, "shared-kb", learnContext["retrieval_workspace"])
 
 	followupSeed, ok := learnContext["followup_seed_focus"].(map[string]interface{})
 	require.True(t, ok)
@@ -6269,11 +6302,13 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
 	assert.Contains(t, summaryText, "Confidence level: high")
 	assert.Contains(t, summaryText, "Campaign create: created")
 	assert.Contains(t, summaryText, "Campaign queued runs: 4")
+	assert.Contains(t, summaryText, "Learning workspace: "+targetSpace)
+	assert.Contains(t, summaryText, "Retrieval workspace: shared-kb")
 
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
-	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
+	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
 }
 
 func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T) {
@@ -6329,6 +6364,9 @@ func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T)
 	require.NoError(t, err)
 	var learnContext map[string]interface{}
 	require.NoError(t, json.Unmarshal(contextData, &learnContext))
+	assert.Equal(t, targetSpace, learnContext["workspace"])
+	assert.Equal(t, targetSpace, learnContext["learning_workspace"])
+	assert.Equal(t, "shared-kb", learnContext["retrieval_workspace"])
 
 	operationalCounts, ok := learnContext["operational_counts"].(map[string]interface{})
 	require.True(t, ok)
@@ -6338,7 +6376,7 @@ func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T)
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
-	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
+	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
 }
 
 func TestExecuteAIKnowledgeAutolearnCountsCampaignAndQueueFromRealArtifacts(t *testing.T) {
@@ -6395,6 +6433,9 @@ func TestExecuteAIKnowledgeAutolearnCountsCampaignAndQueueFromRealArtifacts(t *t
 	require.NoError(t, err)
 	var learnContext map[string]interface{}
 	require.NoError(t, json.Unmarshal(contextData, &learnContext))
+	assert.Equal(t, targetSpace, learnContext["workspace"])
+	assert.Equal(t, targetSpace, learnContext["learning_workspace"])
+	assert.Equal(t, "shared-kb", learnContext["retrieval_workspace"])
 
 	operationalCounts, ok := learnContext["operational_counts"].(map[string]interface{})
 	require.True(t, ok)
@@ -6404,5 +6445,5 @@ func TestExecuteAIKnowledgeAutolearnCountsCampaignAndQueueFromRealArtifacts(t *t
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
-	assert.Contains(t, callLine, "kb learn -w shared-kb --scope workspace --include-ai")
+	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
 }

@@ -249,6 +249,28 @@ storage:
   enabled: false
 
 # =============================================================================
+# Independent Vector Knowledge DB
+# =============================================================================
+# If default_provider/default_model are left empty, Osmedeus will fall back to
+# embeddings_config.provider and that provider's configured model.
+# There is no separate semantic_search_config block; AI semantic retrieval is
+# controlled by workflows plus knowledge_vector/embeddings_config.
+knowledge_vector:
+  enabled: true
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+  default_provider: ""
+  default_model: ""
+  dimension: 1024
+  metric: cosine
+  top_k: 20
+  hybrid_weight: 0.7
+  keyword_weight: 0.3
+  auto_index_on_ingest: true
+  auto_index_on_learn: true
+  batch_size: 32
+  max_indexing_chunks: 5000
+
+# =============================================================================
 # LLM Configuration (Optional)
 # =============================================================================
 # Large Language Model settings for AI-powered features
@@ -289,6 +311,15 @@ llm_config:
   # Maximum number of retries for failed requests
   max_retries: 3
 
+  # Delay between retries
+  retry_delay: 1s
+
+  # Enable exponential backoff for retries
+  retry_backoff: true
+
+  # Delay between outbound requests (useful for embedding rate limits)
+  request_delay: 2s
+
   # Timeout for API requests
   timeout: 120s
 
@@ -303,3 +334,30 @@ llm_config:
 
   # Custom headers for API requests
   custom_headers: ""
+
+# =============================================================================
+# Embeddings Configuration (Optional)
+# =============================================================================
+embeddings_config:
+  enabled: false
+  provider: ""
+
+  jina:
+    api_url: "https://api.jina.ai/v1/embeddings"
+    model: "jina-embeddings-v3"
+    api_key: ""
+
+  openai:
+    api_url: "https://api.openai.com/v1/embeddings"
+    model: "text-embedding-3-small"
+    api_key: ""
+
+  azure:
+    api_url: ""
+    model: ""
+    api_key: ""
+
+  ollama:
+    api_url: "http://localhost:11434/api/embeddings"
+    model: "nomic-embed-text"
+    api_key: ""

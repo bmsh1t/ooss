@@ -1,8 +1,11 @@
 package database
 
-import "testing"
+import (
+	"testing"
+	"time"
 
-import "github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/require"
+)
 
 func TestComputeKnowledgeMetadataBoost_PrefersOperationalMemoryForOperationalQuery(t *testing.T) {
 	query := "manual exploitation retest admin auth bypass followup proof"
@@ -42,6 +45,44 @@ func TestParseKnowledgeMetadata_ParsesRetrievalFingerprint(t *testing.T) {
 	require.NotNil(t, metadata)
 	require.Equal(t, "fp-123", metadata.RetrievalFingerprint)
 	require.Equal(t, "fp-123", KnowledgeMetadataFingerprint(metadata))
+}
+
+func TestParseKnowledgeMetadata_ParsesConfidenceObservedAt(t *testing.T) {
+	metadata := ParseKnowledgeMetadata(`{"sample_type":"ai-analysis","generated_at":"2026-03-01T10:00:00Z"}`)
+	require.NotNil(t, metadata)
+	require.False(t, metadata.observedAt.IsZero())
+	require.Equal(t, time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC), metadata.observedAt)
+}
+
+func TestComputeKnowledgeMetadataBoost_AgesStaleAIAnalysis(t *testing.T) {
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+	query := "auth bypass proof"
+
+	freshAI := &KnowledgeMetadataSummary{
+		Scope:            "workspace",
+		SampleType:       "ai-analysis",
+		SourceConfidence: 0.92,
+		observedAt:       now.Add(-12 * time.Hour),
+	}
+	staleAI := &KnowledgeMetadataSummary{
+		Scope:            "workspace",
+		SampleType:       "ai-analysis",
+		SourceConfidence: 0.92,
+		observedAt:       now.Add(-90 * 24 * time.Hour),
+	}
+	staleVerified := &KnowledgeMetadataSummary{
+		Scope:            "workspace",
+		SampleType:       "verified",
+		SourceConfidence: 0.92,
+		observedAt:       now.Add(-90 * 24 * time.Hour),
+	}
+
+	freshBoost := ComputeKnowledgeMetadataBoostAt(query, freshAI, now)
+	staleAIBoost := ComputeKnowledgeMetadataBoostAt(query, staleAI, now)
+	staleVerifiedBoost := ComputeKnowledgeMetadataBoostAt(query, staleVerified, now)
+
+	require.Greater(t, freshBoost, staleAIBoost)
+	require.Greater(t, staleVerifiedBoost, staleAIBoost)
 }
 
 func TestKnowledgeMetadataMatchesFilters_AllowsPlainDocsButFiltersLearnedNoise(t *testing.T) {

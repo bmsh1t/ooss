@@ -100,7 +100,7 @@ params:
   # 工具路径
   # =========================
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
   - name: cloudenumDir
     default: "{{toolsDir}}/cloud_enum"
   - name: cloudenumThreads
@@ -108,6 +108,10 @@ params:
   - name: cloudenumQuickscan
     type: bool
     default: true
+  - name: osintExternalTimeout
+    type: string
+    default: "60s"
+    description: "Hard timeout for slower third-party OSINT helper tools"
 
   # =========================
   # 输出文件 - OSINT
@@ -327,7 +331,12 @@ steps:
     type: bash
     log: "Searching for leaked passwords with LeakSearch"
     pre_condition: "{{enableEmailLeaks}}"
-    command: 'cd "{{toolsDir}}/LeakSearch" 2>/dev/null && "{{toolsDir}}/LeakSearch/venv/bin/python3" LeakSearch.py -k {{Target}} -o {{passwordsOutput}} 2>/dev/null || LeakSearch.py -k {{Target}} -o {{passwordsOutput}} 2>/dev/null || true'
+    command: |
+      timeout --foreground -k 10s {{osintExternalTimeout}} bash -lc '
+        cd "{{toolsDir}}/LeakSearch" 2>/dev/null &&
+        "{{toolsDir}}/LeakSearch/venv/bin/python3" LeakSearch.py -k "{{Target}}" -o "{{passwordsOutput}}" 2>/dev/null ||
+        LeakSearch.py -k "{{Target}}" -o "{{passwordsOutput}}" 2>/dev/null || true
+      ' || true
     on_error:
       - action: continue
 
@@ -349,7 +358,7 @@ steps:
     type: bash
     log: "Searching Google dorks"
     pre_condition: "{{enableGoogleDorks}}"
-    command: '"{{toolsDir}}/dorks_hunter/venv/bin/python3" "{{toolsDir}}/dorks_hunter/dorks_hunter.py" -d {{Target}} -o {{googleDorksOutput}} 2>/dev/null || true'
+    command: 'timeout --foreground -k 10s {{osintExternalTimeout}} "{{toolsDir}}/dorks_hunter/venv/bin/python3" "{{toolsDir}}/dorks_hunter/dorks_hunter.py" -d {{Target}} -o {{googleDorksOutput}} 2>/dev/null || true'
     on_error:
       - action: continue
 
@@ -368,7 +377,7 @@ steps:
     type: bash
     log: "Downloading documents and extracting metadata with metagoofil"
     pre_condition: "{{enableMetagoofil}}"
-    command: 'mkdir -p {{Output}}/.tmp/metagoofil_{{TargetSpace}} && (cd "{{toolsDir}}/metagoofil" 2>/dev/null && "{{toolsDir}}/metagoofil/venv/bin/python3" metagoofil.py -d {{Target}} -t pdf,docx,xlsx -l 10 -w -o "{{Output}}/.tmp/metagoofil_{{TargetSpace}}/" 2>/dev/null || true) && exiftool -r "{{Output}}/.tmp/metagoofil_{{TargetSpace}}" 2>/dev/null | egrep -i "Author|Creator|Email|Producer|Template" | sort -u > {{metagoofilOutput}} || true'
+    command: 'mkdir -p {{Output}}/.tmp/metagoofil_{{TargetSpace}} && (cd "{{toolsDir}}/metagoofil" 2>/dev/null && timeout --foreground -k 10s {{osintExternalTimeout}} "{{toolsDir}}/metagoofil/venv/bin/python3" metagoofil.py -d {{Target}} -t pdf,docx,xlsx -l 10 -w -o "{{Output}}/.tmp/metagoofil_{{TargetSpace}}/" 2>/dev/null || true) && exiftool -r "{{Output}}/.tmp/metagoofil_{{TargetSpace}}" 2>/dev/null | egrep -i "Author|Creator|Email|Producer|Template" | sort -u > {{metagoofilOutput}} || true'
     on_error:
       - action: continue
 
@@ -416,7 +425,19 @@ steps:
     type: bash
     log: "Searching GitHub-wide for leaked secrets with ghleaks"
     pre_condition: "{{enableGithubLeaks}}"
-    command: '{{toolsDir}}/ghleaks/ghleaks -q {{Target}} --threads 5 --report {{githubLeaksOutput}} --no-banner'
+    command: |
+      GHLEAKS_BIN=$(command -v ghleaks 2>/dev/null || true)
+      if [ -z "$GHLEAKS_BIN" ] && [ -x "{{toolsDir}}/ghleaks/ghleaks" ]; then
+        GHLEAKS_BIN="{{toolsDir}}/ghleaks/ghleaks"
+      fi
+      if [ -z "$GHLEAKS_BIN" ] && [ -x "/root/Tools/ghleaks/ghleaks" ]; then
+        GHLEAKS_BIN="/root/Tools/ghleaks/ghleaks"
+      fi
+      if [ -n "$GHLEAKS_BIN" ]; then
+        "$GHLEAKS_BIN" -q {{Target}} --threads 5 --report {{githubLeaksOutput}} --no-banner 2>/dev/null || true
+      else
+        : > {{githubLeaksOutput}}
+      fi
     on_error:
       - action: continue
 
@@ -459,8 +480,8 @@ steps:
     pre_condition: "{{enableDomainInfo}}"
     functions:
       - 'exec_cmd(": > {{domainInfoOutput}}")'
-      - 'exec_cmd("if [ -x \"{{toolsDir}}/msftrecon/venv/bin/python3\" ]; then \"{{toolsDir}}/msftrecon/venv/bin/python3\" \"{{toolsDir}}/msftrecon/msftrecon/msftrecon.py\" -d {{Target}} 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
-      - 'exec_cmd("COMPANY=$(echo \"{{Target}}\" | unfurl format %r 2>/dev/null || echo \"{{Target}}\") && if [ -f \"{{toolsDir}}/Scopify/scopify.py\" ]; then python3 \"{{toolsDir}}/Scopify/scopify.py\" -c \"$COMPANY\" 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
+      - 'exec_cmd("if [ -x \"{{toolsDir}}/msftrecon/venv/bin/python3\" ]; then timeout --foreground -k 10s {{osintExternalTimeout}} \"{{toolsDir}}/msftrecon/venv/bin/python3\" \"{{toolsDir}}/msftrecon/msftrecon/msftrecon.py\" -d {{Target}} 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
+      - 'exec_cmd("COMPANY=$(echo \"{{Target}}\" | unfurl format %r 2>/dev/null || echo \"{{Target}}\") && if [ -f \"{{toolsDir}}/Scopify/scopify.py\" ]; then timeout --foreground -k 10s {{osintExternalTimeout}} python3 \"{{toolsDir}}/Scopify/scopify.py\" -c \"$COMPANY\" 2>/dev/null >> {{domainInfoOutput}} || true; fi")'
       - 'exec_cmd("if [ ! -s \"{{domainInfoOutput}}\" ]; then echo \"No additional domain info found\" > {{domainInfoOutput}}; fi")'
     on_error:
       - action: continue
@@ -483,7 +504,7 @@ steps:
     type: bash
     log: "Checking for spoofable domains"
     pre_condition: "{{enableSpoof}}"
-    command: 'if [ -x "{{toolsDir}}/Spoofy/venv/bin/python3" ] && [ -f "{{toolsDir}}/Spoofy/spoofy.py" ]; then (cd "{{toolsDir}}/Spoofy" && "{{toolsDir}}/Spoofy/venv/bin/python3" spoofy.py -d {{Target}} 2>/dev/null > {{spoofOutput}}); fi'
+    command: 'if [ -x "{{toolsDir}}/Spoofy/venv/bin/python3" ] && [ -f "{{toolsDir}}/Spoofy/spoofy.py" ]; then (cd "{{toolsDir}}/Spoofy" && timeout --foreground -k 10s {{osintExternalTimeout}} "{{toolsDir}}/Spoofy/venv/bin/python3" spoofy.py -d {{Target}} 2>/dev/null > {{spoofOutput}}); fi'
     on_error:
       - action: continue
 
@@ -505,7 +526,7 @@ steps:
     type: bash
     log: "Scanning Postman public API leaks with porch-pirate"
     pre_condition: "{{enableApiKeyLeaks}}"
-    command: 'porch-pirate -s {{Target}} -l 25 --dump 2>/dev/null > {{outputDir}}/postman_leaks.txt || porch-pirate -s {{Target}} -l 25 2>/dev/null > {{outputDir}}/postman_leaks.txt || : > {{outputDir}}/postman_leaks.txt'
+    command: 'timeout --foreground -k 10s {{osintExternalTimeout}} porch-pirate -s {{Target}} -l 25 --dump 2>/dev/null > {{outputDir}}/postman_leaks.txt || timeout --foreground -k 10s {{osintExternalTimeout}} porch-pirate -s {{Target}} -l 25 2>/dev/null > {{outputDir}}/postman_leaks.txt || : > {{outputDir}}/postman_leaks.txt'
     on_error:
       - action: continue
 
@@ -513,7 +534,7 @@ steps:
     type: bash
     log: "Scanning Swagger/OpenAPI leaks with SwaggerSpy"
     pre_condition: "{{enableApiKeyLeaks}}"
-    command: '(cd "{{toolsDir}}/SwaggerSpy" 2>/dev/null && "{{toolsDir}}/SwaggerSpy/venv/bin/python3" swaggerspy.py {{Target}} 2>/dev/null || true) | grep -i "[*]\|URL" > {{outputDir}}/swagger_leaks.txt || : > {{outputDir}}/swagger_leaks.txt'
+    command: '(cd "{{toolsDir}}/SwaggerSpy" 2>/dev/null && timeout --foreground -k 10s {{osintExternalTimeout}} "{{toolsDir}}/SwaggerSpy/venv/bin/python3" swaggerspy.py {{Target}} 2>/dev/null || true) | grep -i "[*]\|URL" > {{outputDir}}/swagger_leaks.txt || : > {{outputDir}}/swagger_leaks.txt'
     on_error:
       - action: continue
 
@@ -521,7 +542,7 @@ steps:
     type: bash
     log: "Enhancing Postman leaks with postleaksNg"
     pre_condition: "{{enableApiKeyLeaks}} && {{enablePostleaksNg}}"
-    command: 'mkdir -p {{outputDir}}/postleaks_results && postleaksNg -k {{Target}} --output {{outputDir}}/postleaks_results -t 10 2>/dev/null || true; if ls {{outputDir}}/postleaks_results/*.json 1>/dev/null 2>&1; then jq -r ".url // empty" {{outputDir}}/postleaks_results/*.json 2>/dev/null | grep -aE "^https?://" >> {{outputDir}}/postman_leaks.txt || true; fi'
+    command: 'mkdir -p {{outputDir}}/postleaks_results && timeout --foreground -k 10s {{osintExternalTimeout}} postleaksNg -k {{Target}} --output {{outputDir}}/postleaks_results -t 10 2>/dev/null || true; if ls {{outputDir}}/postleaks_results/*.json 1>/dev/null 2>&1; then jq -r ".url // empty" {{outputDir}}/postleaks_results/*.json 2>/dev/null | grep -aE "^https?://" >> {{outputDir}}/postman_leaks.txt || true; fi'
     on_error:
       - action: continue
 
@@ -531,6 +552,8 @@ steps:
     pre_condition: "{{enableApiKeyLeaks}}"
     functions:
       - 'exec_cmd(": > {{apiLeaksOutput}}")'
+      - 'exec_cmd(": > {{outputDir}}/postman_leaks_trufflehog.json")'
+      - 'exec_cmd(": > {{outputDir}}/swagger_leaks_trufflehog.json")'
       - 'exec_cmd("if [ -s \"{{outputDir}}/postman_leaks.txt\" ]; then trufflehog filesystem {{outputDir}}/postman_leaks.txt -j 2>/dev/null | jq -c 2>/dev/null >> {{outputDir}}/postman_leaks_trufflehog.json || true; fi")'
       - 'exec_cmd("if [ -s \"{{outputDir}}/swagger_leaks.txt\" ]; then trufflehog filesystem {{outputDir}}/swagger_leaks.txt -j 2>/dev/null | jq -c 2>/dev/null >> {{outputDir}}/swagger_leaks_trufflehog.json || true; fi")'
       - 'append_file("{{apiLeaksOutput}}", "{{outputDir}}/postman_leaks_trufflehog.json")'
@@ -552,10 +575,9 @@ steps:
       FUZZ_FILE="{{cloudenumDir}}/enum_tools/fuzz.txt"
 
       # 确定 -m/-b 参数
+      MUTATIONS=""
       if [ -f "$FUZZ_FILE" ]; then
         MUTATIONS="-m $FUZZ_FILE -b $FUZZ_FILE"
-      else
-        MUTATIONS="-m {{cloudenumDir}}/cloud_enum.py -b {{cloudenumDir}}/cloud_enum.py"
       fi
 
       # Quickscan 参数
@@ -563,7 +585,12 @@ steps:
       [ "{{cloudenumQuickscan}}" = "true" ] && QS_FLAG="-qs"
 
       # 运行 cloud_enum (JSON 输出)
-      cloud_enum  -k "$COMPANY" -k "{{Target}}" -k "$PREFIX" -t {{cloudenumThreads}} $MUTATIONS $QS_FLAG -f json -l {{cloudEnumJsonOutput}} 2>/dev/null || true
+      CLOUD_ENUM_BIN=$(command -v cloud_enum 2>/dev/null || true)
+      if [ -n "$CLOUD_ENUM_BIN" ]; then
+        timeout --foreground -k 10s {{osintExternalTimeout}} "$CLOUD_ENUM_BIN" -k "$COMPANY" -k "{{Target}}" -k "$PREFIX" -t {{cloudenumThreads}} $MUTATIONS $QS_FLAG -f json -l {{cloudEnumJsonOutput}} 2>/dev/null || true
+      else
+        : > {{cloudEnumJsonOutput}}
+      fi
     on_error:
       - action: continue
 
@@ -600,8 +627,15 @@ steps:
         bucket_host="${target#http://}"
         bucket_host="${bucket_host#https://}"
         bucket_host="${bucket_host%%/*}"
-        if [[ "$bucket_host" =~ ^([^.]+)\.s3([.-][^.]+)?\.amazonaws\.com$ ]]; then
-          bucket_name="${BASH_REMATCH[1]}"
+        case "$bucket_host" in
+          *.s3.amazonaws.com|*.s3-*.amazonaws.com|*.s3.*.amazonaws.com)
+            bucket_name="${bucket_host%%.s3*}"
+            ;;
+          *)
+            bucket_name=""
+            ;;
+        esac
+        if [ -n "$bucket_name" ]; then
           trufflehog s3 --bucket="$bucket_name" -j 2>/dev/null | jq -c 2>/dev/null >> {{cloudTrufflehogOutput}} || true
         fi
       done
@@ -629,5 +663,6 @@ steps:
     type: function
     log: "OSINT summary"
     functions:
-      - 'db_total_assets("{{emailsOutput}}")'
-      - 'db_total_assets("{{passwordsOutput}}")'
+      - 'log_info("OSINT summary complete for {{Target}}")'
+      - 'log_info("Collected email records: {{file_length(emailsOutput)}}")'
+      - 'log_info("Collected leaked password records: {{file_length(passwordsOutput)}}")'

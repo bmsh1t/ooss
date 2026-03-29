@@ -191,6 +191,6 @@ steps:
     type: function
     log: "URL pattern classification completed"
     functions:
-      - 'db_total_assets("{{outputDir}}")'
+      - 'log_info("URL pattern classification completed for {{Target}}")'
     on_error:
       - action: continue

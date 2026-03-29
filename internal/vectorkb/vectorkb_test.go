@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
+	"github.com/j3ssie/osmedeus/v5/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -276,6 +276,8 @@ func TestDoctorAndPurgeDetectAndCleanStaleData(t *testing.T) {
 	report, err := Doctor(ctx, cfg, DoctorOptions{Workspace: "acme"})
 	require.NoError(t, err)
 	require.False(t, report.Healthy)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "consistency_issues", report.SemanticStatus)
 	require.GreaterOrEqual(t, report.StaleDocuments, 1)
 	require.Equal(t, 1, report.OrphanChunks)
 	require.Equal(t, 1, report.OrphanEmbeddings)
@@ -289,6 +291,76 @@ func TestDoctorAndPurgeDetectAndCleanStaleData(t *testing.T) {
 	reportAfter, err := Doctor(ctx, cfg, DoctorOptions{Workspace: "acme"})
 	require.NoError(t, err)
 	require.True(t, reportAfter.Healthy)
+	require.True(t, reportAfter.SemanticSearchReady)
+	require.Equal(t, "ready", reportAfter.SemanticStatus)
+}
+
+func TestDoctorReportsProviderNotConfigured(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	cfg.KnowledgeVector.DefaultProvider = ""
+
+	report, err := Doctor(context.Background(), cfg, DoctorOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "provider_not_configured", report.SemanticStatus)
+	require.Contains(t, report.SemanticStatusMessage, "default_provider")
+	require.Contains(t, report.AvailableProviders, "openai")
+}
+
+func TestDoctorReportsModelNotBound(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	cfg.KnowledgeVector.DefaultModel = ""
+	cfg.LLM.LLMProviders[0].Model = ""
+
+	report, err := Doctor(context.Background(), cfg, DoctorOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "model_not_bound", report.SemanticStatus)
+	require.Contains(t, report.SemanticStatusMessage, "default_model")
+}
+
+func TestDoctorReportsIndexMissingWhenMainDocsAreNotIndexed(t *testing.T) {
+	cfg, cleanup := setupVectorKBTestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/acme-playbook.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "Acme Playbook",
+		ContentHash: "doc-hash-index-missing",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Auth",
+		Content:     "Authentication bypass review on admin entry points.",
+		ContentHash: "chunk-hash-index-missing",
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	report, err := Doctor(ctx, cfg, DoctorOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "index_missing", report.SemanticStatus)
+	require.Equal(t, 1, report.MissingDocuments)
+	require.Equal(t, 0, report.SelectedEmbeddings)
 }
 
 func TestRebuildWorkspaceRemovesOldDataAndReindexes(t *testing.T) {
@@ -415,7 +487,7 @@ func TestSyncPurgesStaleDataAndIndexesCurrentDocuments(t *testing.T) {
 
 func TestVectorKBUsesExplicitConfiguredProvider(t *testing.T) {
 	var wrongRequests int32
-	wrongServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	wrongServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&wrongRequests, 1)
 		type embeddingRequest struct {
 			Input []string `json:"input"`
@@ -457,7 +529,7 @@ func TestVectorKBUsesExplicitConfiguredProvider(t *testing.T) {
 	defer wrongServer.Close()
 
 	var vectorRequests int32
-	vectorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	vectorServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&vectorRequests, 1)
 		type embeddingRequest struct {
 			Input []string `json:"input"`
@@ -572,6 +644,248 @@ func TestVectorKBUsesExplicitConfiguredProvider(t *testing.T) {
 	require.Equal(t, "vector-provider", results[0].Provider)
 	require.EqualValues(t, 0, atomic.LoadInt32(&wrongRequests))
 	require.EqualValues(t, 2, atomic.LoadInt32(&vectorRequests))
+}
+
+func TestVectorKBUsesDedicatedEmbeddingsConfigWithoutLLMProviders(t *testing.T) {
+	var embeddingRequests int32
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&embeddingRequests, 1)
+		type embeddingRequest struct {
+			Input []string `json:"input"`
+			Model string   `json:"model"`
+		}
+		var req embeddingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		require.Equal(t, "jina-embeddings-v5-text-small", req.Model)
+
+		type embeddingData struct {
+			Object    string    `json:"object"`
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		}
+		resp := struct {
+			Object string          `json:"object"`
+			Data   []embeddingData `json:"data"`
+			Model  string          `json:"model"`
+		}{
+			Object: "list",
+			Data:   make([]embeddingData, 0, len(req.Input)),
+			Model:  "jina-embeddings-v5-text-small",
+		}
+		for i, input := range req.Input {
+			text := strings.ToLower(input)
+			resp.Data = append(resp.Data, embeddingData{
+				Object:    "embedding",
+				Index:     i,
+				Embedding: []float64{scoreTerm(text, "cwe", "session"), scoreTerm(text, "login", "auth"), scoreTerm(text, "xss", "script")},
+			})
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer embeddingServer.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:            filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			BatchSize:         8,
+			MaxIndexingChunks: 100,
+			TopK:              10,
+			HybridWeight:      0.7,
+			KeywordWeight:     0.3,
+		},
+		Embeddings: config.EmbeddingsConfig{
+			Enabled:  testBoolPtr(true),
+			Provider: "jina",
+			Jina: config.EmbeddingsProviderConfig{
+				APIURL: embeddingServer.URL + "/embeddings",
+				Model:  "jina-embeddings-v5-text-small",
+				APIKey: "test-jina-key",
+			},
+		},
+		LLM: config.LLMConfig{
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/cwe-playbook.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "CWE Notes",
+		ContentHash: "doc-hash-cwe",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Session",
+		Content:     "CWE session fixation and login boundary review guidance.",
+		ContentHash: "chunk-hash-cwe",
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	reportBefore, err := Doctor(ctx, cfg, DoctorOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, "jina", reportBefore.Provider)
+	require.Equal(t, "jina-embeddings-v5-text-small", reportBefore.Model)
+	require.Contains(t, reportBefore.AvailableProviders, "jina")
+
+	summary, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, 1, summary.DocumentsIndexed)
+	require.Equal(t, 1, summary.ChunksEmbedded)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     5,
+	}, "session fixation login")
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, "jina", results[0].Provider)
+	require.EqualValues(t, 2, atomic.LoadInt32(&embeddingRequests))
+}
+
+func TestIndexWorkspaceRetriesEmbeddingRateLimit(t *testing.T) {
+	var embeddingRequests int32
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := atomic.AddInt32(&embeddingRequests, 1)
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "rate limit exceeded",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit",
+				},
+			}))
+			return
+		}
+
+		type embeddingRequest struct {
+			Input []string `json:"input"`
+			Model string   `json:"model"`
+		}
+		var req embeddingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		type embeddingData struct {
+			Object    string    `json:"object"`
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		}
+		resp := struct {
+			Object string          `json:"object"`
+			Data   []embeddingData `json:"data"`
+			Model  string          `json:"model"`
+		}{
+			Object: "list",
+			Data:   make([]embeddingData, 0, len(req.Input)),
+			Model:  "test-embedding-3-small",
+		}
+		for i, input := range req.Input {
+			text := strings.ToLower(input)
+			resp.Data = append(resp.Data, embeddingData{
+				Object:    "embedding",
+				Index:     i,
+				Embedding: []float64{scoreTerm(text, "auth", "login"), scoreTerm(text, "sql", "union"), scoreTerm(text, "xss", "script")},
+			})
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer embeddingServer.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:            filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			DefaultProvider:   "openai",
+			DefaultModel:      "test-embedding-3-small",
+			BatchSize:         8,
+			MaxIndexingChunks: 100,
+			TopK:              10,
+			HybridWeight:      0.7,
+			KeywordWeight:     0.3,
+		},
+		LLM: config.LLMConfig{
+			LLMProviders: []config.LLMProvider{
+				{
+					Provider: "openai",
+					BaseURL:  embeddingServer.URL + "/embeddings",
+					Model:    "test-embedding-3-small",
+				},
+			},
+			MaxRetries:   2,
+			RetryDelay:   "1ms",
+			RetryBackoff: false,
+			Timeout:      "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/rate-limit.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "Rate Limit Retry",
+		ContentHash: "doc-hash-rate-limit",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "Auth",
+		Content:     "Review login and auth choke points after rate limit recovery.",
+		ContentHash: "chunk-hash-rate-limit",
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	summary, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, 1, summary.DocumentsIndexed)
+	require.EqualValues(t, 2, atomic.LoadInt32(&embeddingRequests))
 }
 
 func TestSearchIncludesPublicLayerFallbackAndMetadata(t *testing.T) {
@@ -854,7 +1168,7 @@ func TestSearchPrefersOperationalPlaybookForOperationalQuery(t *testing.T) {
 func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {
 	t.Helper()
 
-	embeddingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		type embeddingRequest struct {
 			Input []string `json:"input"`
 			Model string   `json:"model"`
@@ -926,6 +1240,10 @@ func setupVectorKBTestEnv(t *testing.T) (*config.Config, func()) {
 		_ = database.Close()
 		database.SetDB(nil)
 	}
+}
+
+func testBoolPtr(value bool) *bool {
+	return &value
 }
 
 func scoreTerm(text string, terms ...string) float64 {

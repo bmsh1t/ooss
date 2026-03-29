@@ -15,6 +15,8 @@ params:
   - name: enableKnowledgeLearning
     type: bool
     default: true
+  - name: knowledgeLearningWorkspace
+    default: "{{TargetSpace}}"
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
   - name: knowledgeScope
@@ -46,7 +48,7 @@ steps:
     pre_condition: "{{enableKnowledgeLearning}}"
     functions:
       - 'create_folder("{{Output}}/ai-analysis")'
-      - 'log_info("Preparing knowledge auto-learning for {{knowledgeWorkspace}}")'
+      - 'log_info("Preparing knowledge auto-learning for source {{knowledgeLearningWorkspace}} (retrieval workspace {{knowledgeWorkspace}})")'
 
   - name: build-knowledge-learning-context
     type: bash
@@ -189,7 +191,9 @@ steps:
 
       jq -n \
         --arg generated_at "$(date -Iseconds)" \
-        --arg workspace "{{knowledgeWorkspace}}" \
+        --arg workspace "{{knowledgeLearningWorkspace}}" \
+        --arg learning_workspace "{{knowledgeLearningWorkspace}}" \
+        --arg retrieval_workspace "{{knowledgeWorkspace}}" \
         --arg target "{{Target}}" \
         --arg scope "{{knowledgeScope}}" \
         --arg applied_profile "$APPLIED_PROFILE" \
@@ -233,6 +237,8 @@ steps:
           generated_at: $generated_at,
           source: "ai-knowledge-autolearn",
           workspace: $workspace,
+          learning_workspace: $learning_workspace,
+          retrieval_workspace: $retrieval_workspace,
           target: $target,
           scope: $scope,
           applied_decision: {
@@ -293,7 +299,7 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      OSM_BIN="{{OsmedeusExec}}"
+      OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
@@ -308,7 +314,10 @@ steps:
 
       {
         echo "[Knowledge Learn] Binary: $OSM_BIN"
-        echo "[Knowledge Learn] Workspace: {{knowledgeWorkspace}}"
+        echo "[Knowledge Learn] Base folder: {{BaseFolder}}"
+        echo "[Knowledge Learn] Workflows: {{Workflows}}"
+        echo "[Knowledge Learn] Learning workspace: {{knowledgeLearningWorkspace}}"
+        echo "[Knowledge Learn] Retrieval workspace: {{knowledgeWorkspace}}"
         echo "[Knowledge Learn] Scope: {{knowledgeScope}}"
         if [ -f "{{knowledgeLearnContextFile}}" ] && jq empty "{{knowledgeLearnContextFile}}" 2>/dev/null; then
           echo "[Knowledge Learn] Context artifact: {{knowledgeLearnContextFile}}"
@@ -321,7 +330,7 @@ steps:
         fi
         echo "[Knowledge Learn] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
-        "$OSM_BIN" kb learn -w "{{knowledgeWorkspace}}" --scope "{{knowledgeScope}}" --include-ai
+        "$OSM_BIN" --base-folder "{{BaseFolder}}" --workflow-folder "{{Workflows}}" kb learn -w "{{knowledgeLearningWorkspace}}" --scope "{{knowledgeScope}}" --include-ai
       } > "{{knowledgeLearnSummary}}" 2>&1 || true
 
       echo "[Knowledge Learn] Summary saved to {{knowledgeLearnSummary}}"
@@ -330,4 +339,4 @@ steps:
     type: function
     pre_condition: "{{enableKnowledgeLearning}}"
     functions:
-      - 'log_info("Knowledge auto-learning completed for {{knowledgeWorkspace}}")'
+      - 'log_info("Knowledge auto-learning completed for source {{knowledgeLearningWorkspace}}")'

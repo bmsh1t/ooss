@@ -53,6 +53,12 @@ type KnowledgeVectorSearchRequest struct {
 	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
 }
 
+type vectorAutoIndexResult struct {
+	Attempted bool
+	Indexed   bool
+	Error     string
+}
+
 // KnowledgeLearnRequest synthesizes learned knowledge from an existing workspace.
 type KnowledgeLearnRequest struct {
 	Workspace          string `json:"workspace"`
@@ -94,18 +100,10 @@ func IngestKnowledge(cfg *config.Config) fiber.Handler {
 				"data":    summary,
 			})
 		}
-		if err := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "ingest"); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error":   true,
-				"message": err.Error(),
-				"data":    summary,
-			})
-		}
+		autoIndexResult := maybeAutoIndexVectorKnowledge(ctx, cfg, summary.Workspace, "ingest")
+		applyVectorAutoIndexToIngestSummary(summary, autoIndexResult)
 
-		return c.JSON(fiber.Map{
-			"data":    summary,
-			"message": "Knowledge ingestion completed",
-		})
+		return c.JSON(buildKnowledgeWriteResponse("Knowledge ingestion completed", summary, autoIndexResult))
 	}
 }
 
@@ -227,18 +225,10 @@ func LearnKnowledge(cfg *config.Config) fiber.Handler {
 		if indexWorkspace == "" {
 			indexWorkspace = strings.TrimSpace(summary.Workspace)
 		}
-		if err := maybeAutoIndexVectorKnowledge(ctx, cfg, indexWorkspace, "learn"); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error":   true,
-				"message": err.Error(),
-				"data":    summary,
-			})
-		}
+		autoIndexResult := maybeAutoIndexVectorKnowledge(ctx, cfg, indexWorkspace, "learn")
+		applyVectorAutoIndexToLearnSummary(summary, autoIndexResult)
 
-		return c.JSON(fiber.Map{
-			"data":    summary,
-			"message": "Knowledge learning completed",
-		})
+		return c.JSON(buildKnowledgeWriteResponse("Knowledge learning completed", summary, autoIndexResult))
 	}
 }
 
@@ -356,6 +346,28 @@ func VectorKnowledgeStats(cfg *config.Config) fiber.Handler {
 	}
 }
 
+// VectorKnowledgeDoctor reports vector readiness, provider binding, and consistency state.
+func VectorKnowledgeDoctor(cfg *config.Config) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx := context.Background()
+		report, err := vectorkb.Doctor(ctx, cfg, vectorkb.DoctorOptions{
+			Workspace: strings.TrimSpace(c.Query("workspace")),
+			Provider:  strings.TrimSpace(c.Query("provider")),
+			Model:     strings.TrimSpace(c.Query("model")),
+		})
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   true,
+				"message": err.Error(),
+			})
+		}
+
+		return c.JSON(fiber.Map{
+			"data": report,
+		})
+	}
+}
+
 func formatKnowledgeWorkspaceLabel(workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
@@ -364,7 +376,7 @@ func formatKnowledgeWorkspaceLabel(workspace string) string {
 	return workspace
 }
 
-func maybeAutoIndexVectorKnowledge(ctx context.Context, cfg *config.Config, workspace, mode string) error {
+func maybeAutoIndexVectorKnowledge(ctx context.Context, cfg *config.Config, workspace, mode string) *vectorAutoIndexResult {
 	if cfg == nil || !cfg.IsKnowledgeVectorEnabled() {
 		return nil
 	}
@@ -382,11 +394,45 @@ func maybeAutoIndexVectorKnowledge(ctx context.Context, cfg *config.Config, work
 	if workspace == "" {
 		return nil
 	}
+	result := &vectorAutoIndexResult{Attempted: true}
 	_, err := vectorkb.IndexWorkspace(ctx, cfg, vectorkb.IndexOptions{
 		Workspace: workspace,
 	})
 	if err != nil {
-		return fmt.Errorf("knowledge operation succeeded but vector auto-index failed for workspace %s: %w", workspace, err)
+		result.Error = fmt.Sprintf("failed for workspace %s: %v", workspace, err)
+		return result
 	}
-	return nil
+	result.Indexed = true
+	return result
+}
+
+func applyVectorAutoIndexToIngestSummary(summary *knowledge.IngestSummary, result *vectorAutoIndexResult) {
+	if summary == nil || result == nil || !result.Attempted {
+		return
+	}
+	indexed := result.Indexed
+	summary.VectorIndexed = &indexed
+	summary.VectorError = strings.TrimSpace(result.Error)
+}
+
+func applyVectorAutoIndexToLearnSummary(summary *knowledge.LearnSummary, result *vectorAutoIndexResult) {
+	if summary == nil || result == nil || !result.Attempted {
+		return
+	}
+	indexed := result.Indexed
+	summary.VectorIndexed = &indexed
+	summary.VectorError = strings.TrimSpace(result.Error)
+}
+
+func buildKnowledgeWriteResponse(message string, data interface{}, result *vectorAutoIndexResult) fiber.Map {
+	response := fiber.Map{
+		"data":    data,
+		"message": strings.TrimSpace(message),
+	}
+	if result == nil || !result.Attempted || result.Indexed {
+		return response
+	}
+	response["message"] = strings.TrimSpace(message) + " with vector auto-index warning"
+	response["warning"] = "Vector auto-index failed: " + strings.TrimSpace(result.Error)
+	return response
 }

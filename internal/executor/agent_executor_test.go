@@ -15,6 +15,7 @@ import (
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/core"
+	"github.com/j3ssie/osmedeus/v5/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,8 +69,8 @@ func mockLLMToolCallResponse(toolCalls []core.LLMToolCall) ChatCompletionRespons
 
 // newMockLLMServer creates a mock OpenAI-compatible API server.
 // handler is called for each request and should write the response.
-func newMockLLMServer(handler http.HandlerFunc) *httptest.Server {
-	return httptest.NewServer(handler)
+func newMockLLMServer(t testing.TB, handler http.HandlerFunc) *httptest.Server {
+	return testutil.NewLoopbackServer(t, handler)
 }
 
 // newMockConfig creates a config with a mock LLM provider pointing to the given URL
@@ -126,7 +127,7 @@ func TestAgentExecutor_ValidationErrors(t *testing.T) {
 	})
 
 	t.Run("missing query", func(t *testing.T) {
-		server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {})
+		server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {})
 		defer server.Close()
 		cfg := newMockConfig(t, server.URL)
 
@@ -147,7 +148,7 @@ func TestAgentExecutor_ValidationErrors(t *testing.T) {
 	})
 
 	t.Run("missing max_iterations", func(t *testing.T) {
-		server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {})
+		server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {})
 		defer server.Close()
 		cfg := newMockConfig(t, server.URL)
 
@@ -168,7 +169,7 @@ func TestAgentExecutor_ValidationErrors(t *testing.T) {
 	})
 
 	t.Run("missing agent_tools", func(t *testing.T) {
-		server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {})
+		server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {})
 		defer server.Close()
 		cfg := newMockConfig(t, server.URL)
 
@@ -189,7 +190,7 @@ func TestAgentExecutor_ValidationErrors(t *testing.T) {
 	})
 
 	t.Run("unknown preset tool", func(t *testing.T) {
-		server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {})
+		server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {})
 		defer server.Close()
 		cfg := newMockConfig(t, server.URL)
 
@@ -213,7 +214,7 @@ func TestAgentExecutor_ValidationErrors(t *testing.T) {
 
 func TestAgentExecutor_SimpleCompletion(t *testing.T) {
 	// Mock server that responds without tool calls (agent should complete in 1 iteration)
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		resp := mockLLMResponse("The analysis is complete.")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -254,7 +255,7 @@ func TestAgentExecutor_ToolCallLoop(t *testing.T) {
 	// 2nd call: returns final text response
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -308,7 +309,7 @@ func TestAgentExecutor_ToolCallLoop(t *testing.T) {
 
 func TestAgentExecutor_MaxIterationsLimit(t *testing.T) {
 	// Mock server that always returns tool calls (never finishes)
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := mockLLMToolCallResponse([]core.LLMToolCall{
 			{
@@ -352,7 +353,7 @@ func TestAgentExecutor_StopCondition(t *testing.T) {
 	// Mock server: first call returns "checking...", second returns "DONE"
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -408,7 +409,7 @@ func TestAgentExecutor_SystemPrompt(t *testing.T) {
 	// Verify that system prompt is included in the request
 	var receivedMessages []ChatMessage
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -453,7 +454,7 @@ func TestAgentExecutor_ToolsInRequest(t *testing.T) {
 	// Verify that tools are included in the LLM request
 	var receivedTools []core.LLMTool
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -501,7 +502,7 @@ func TestAgentExecutor_ToolsInRequest(t *testing.T) {
 }
 
 func TestAgentExecutor_MemoryPersist(t *testing.T) {
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := mockLLMResponse("Persisted response")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -559,7 +560,7 @@ func TestAgentExecutor_MemoryResume(t *testing.T) {
 
 	var receivedMessages []ChatMessage
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -610,7 +611,7 @@ func TestAgentExecutor_CustomToolHandler(t *testing.T) {
 	// First call returns a tool call for "custom_tool", second returns final answer
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -669,7 +670,7 @@ func TestAgentExecutor_CustomToolHandler(t *testing.T) {
 }
 
 func TestAgentExecutor_ContextCancellation(t *testing.T) {
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		// This should not be reached because context is already cancelled
 		w.Header().Set("Content-Type", "application/json")
 		resp := mockLLMResponse("Should not reach")
@@ -705,7 +706,7 @@ func TestAgentExecutor_MultipleToolCalls(t *testing.T) {
 	// Mock server: first call returns 2 tool calls, second returns final answer
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -959,7 +960,7 @@ func TestGetStringArg(t *testing.T) {
 func TestExecutor_AgentStep_FullIntegration(t *testing.T) {
 	// Mock LLM server that simulates a tool call loop
 	var callCount int32
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1047,7 +1048,7 @@ func TestAgentExecutor_PlanningStage(t *testing.T) {
 	var callCount int32
 	var receivedMessages [][]ChatMessage
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1120,7 +1121,7 @@ func TestAgentExecutor_PlanningStage(t *testing.T) {
 }
 
 func TestAgentExecutor_PlanningStage_WithMaxTokens(t *testing.T) {
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		body, _ := io.ReadAll(r.Body)
@@ -1173,7 +1174,7 @@ func TestAgentExecutor_MultiGoal(t *testing.T) {
 	// Mock server: responds to each query with a unique response
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1218,7 +1219,7 @@ func TestAgentExecutor_MultiGoal(t *testing.T) {
 }
 
 func TestAgentExecutor_QueryAndQueriesMutualExclusion(t *testing.T) {
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {})
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {})
 	defer server.Close()
 	cfg := newMockConfig(t, server.URL)
 
@@ -1247,7 +1248,7 @@ func TestAgentExecutor_MultiGoal_SharedConversation(t *testing.T) {
 	// Verify subsequent goals see messages from previous goals
 	var receivedMessages [][]ChatMessage
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		body, _ := io.ReadAll(r.Body)
@@ -1294,7 +1295,7 @@ func TestAgentExecutor_MultiGoal_SharedConversation(t *testing.T) {
 func TestAgentExecutor_ModelFallback(t *testing.T) {
 	var receivedModels []string
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		body, _ := io.ReadAll(r.Body)
@@ -1354,7 +1355,7 @@ func TestAgentExecutor_ModelFallback(t *testing.T) {
 func TestAgentExecutor_StructuredOutput(t *testing.T) {
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1403,7 +1404,7 @@ func TestAgentExecutor_StructuredOutput(t *testing.T) {
 
 func TestAgentExecutor_StructuredOutput_AlreadyJSON(t *testing.T) {
 	// If the agent already returns valid JSON, no extra call should be made
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := mockLLMResponse(`{"results":["a","b"]}`)
 		_ = json.NewEncoder(w).Encode(resp)
@@ -1442,7 +1443,7 @@ func TestAgentExecutor_StructuredOutput_AlreadyJSON(t *testing.T) {
 func TestAgentExecutor_TracingHooks(t *testing.T) {
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1493,7 +1494,7 @@ func TestAgentExecutor_TracingHooks(t *testing.T) {
 
 func TestAgentExecutor_TracingHooks_EmptyHooks(t *testing.T) {
 	// Verify hooks are no-ops when empty strings
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := mockLLMResponse("No hooks")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -1535,7 +1536,7 @@ func TestAgentExecutor_SubAgentSpawn(t *testing.T) {
 	// 3rd call (parent): returns parent final response using child result
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1608,7 +1609,7 @@ func TestAgentExecutor_SubAgentDepthLimit(t *testing.T) {
 	// Mock server: parent calls spawn_agent which tries to exceed depth
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1677,7 +1678,7 @@ func TestAgentExecutor_SubAgentFailure(t *testing.T) {
 	// Mock server: child agent fails (e.g., config not available or bad response)
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1754,7 +1755,7 @@ func TestAgentExecutor_SubAgentRecursive(t *testing.T) {
 	// 5. Parent returns using child result
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1869,7 +1870,7 @@ func TestAgentExecutor_MessageWindowWithSummary(t *testing.T) {
 	// Also handles summarization request.
 	var callCount int32
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 

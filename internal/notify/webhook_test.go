@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
+	"github.com/j3ssie/osmedeus/v5/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,7 +48,7 @@ func (rr *requestRecorder) getRequests() ([]*http.Request, [][]byte) {
 }
 
 func setupMockServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
-	server := httptest.NewServer(handler)
+	server := testutil.NewLoopbackServer(t, handler)
 	t.Cleanup(server.Close)
 	return server
 }

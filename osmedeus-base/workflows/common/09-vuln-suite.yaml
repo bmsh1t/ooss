@@ -98,10 +98,16 @@ params:
   - name: llmFilteredOutput
     default: "{{vulnSuiteDir}}/nuclei-filtered-{{TargetSpace}}.jsonl"
     description: "Nuclei results after LLM false positive filtering"
+  - name: llmFalsePositiveReviewOutput
+    default: "{{vulnSuiteDir}}/llm-false-positive-review-{{TargetSpace}}.json"
+    description: "LLM false-positive review output"
   - name: llmRiskPrioritization
     type: bool
     default: true
     description: "Use LLM to prioritize vulnerabilities by business risk"
+  - name: llmPrioritizationOutput
+    default: "{{vulnSuiteDir}}/llm-priority-{{TargetSpace}}.json"
+    description: "LLM vulnerability prioritization output"
 
   # Nuclei 扫描配置
   - name: nucleiOutputJsonl
@@ -111,7 +117,7 @@ params:
   - name: nucleiMarkdownReport
     default: "{{Output}}/vulnscan/nuclei-overview-report-{{TargetSpace}}.md"
   - name: nucleiTemplateConfig
-    default: "~/nuclei-templates/"
+    default: "$HOME/nuclei-templates/"
   - name: nucleiTimeout
     default: "8h"
   - name: nucleiSeverity
@@ -124,6 +130,8 @@ params:
     default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
   - name: subdomainFile
     default: "{{Output}}/probing/nonwild-{{TargetSpace}}.txt"
+  - name: fingerprintFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: jsUrlsFile
     default: "{{Output}}/content-analysis/js-urls-{{TargetSpace}}.txt"
   - name: urlExtractFile
@@ -234,7 +242,7 @@ params:
     default: 500
     description: "Maximum URLs to test with Fray"
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
   - name: defaultUA
     default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
@@ -423,6 +431,7 @@ steps:
       - 'create_folder("{{vulnSuiteDir}}/sqlmap")'
       - 'create_folder("{{vulnSuiteDir}}/commix")'
       - 'create_folder("{{Output}}/vulnscan")'
+      - 'exec_cmd(": > {{nucleiOutputJsonl}} && : > {{nucleiCleanOutputJsonl}} && : > {{nucleiMarkdownReport}}")'
 
   # ===========================================================================
   # Phase 0a: WAF-Aware Scan Adjustment (实战优化)
@@ -644,10 +653,20 @@ steps:
       
       # 资产优先级扫描
       SCAN_FILE="{{httpFile}}"
+      NUCLEI_LOG="{{vulnSuiteDir}}/nuclei-run-{{TargetSpace}}.log"
+      : > "$NUCLEI_LOG"
+      PRIORITY_RC=0
+      MAIN_RC=0
+
+      if [ ! -s "$SCAN_FILE" ]; then
+        echo "[NUCLEI] Input target file is empty: $SCAN_FILE"
+        exit 0
+      fi
+
       if [ "{{enableAssetPrioritization}}" = "true" ] && [ -f "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
         # 先扫描高优先级资产
         echo "[NUCLEI] Scanning high-priority assets first..."
-        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1 || true
+        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>>"$NUCLEI_LOG" || PRIORITY_RC=$?
         SCAN_FILE="{{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt"
         echo "[NUCLEI] Now scanning remaining assets..."
       fi
@@ -659,12 +678,22 @@ steps:
       fi
       
       # 执行扫描
-      timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>&1
+      if [ -s "$SCAN_FILE" ]; then
+        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>>"$NUCLEI_LOG" || MAIN_RC=$?
+      else
+        echo "[NUCLEI] No remaining targets for main scan: $SCAN_FILE"
+      fi
       
       # 合并结果
       if [ -f "{{nucleiOutputJsonl}}.priority" ]; then
         cat {{nucleiOutputJsonl}}.priority >> {{nucleiOutputJsonl}} 2>/dev/null || true
         rm -f {{nucleiOutputJsonl}}.priority
+      fi
+
+      if [ "$PRIORITY_RC" -ne 0 ] || [ "$MAIN_RC" -ne 0 ]; then
+        echo "[NUCLEI] Scan command failed. See $NUCLEI_LOG for details." >&2
+        [ "$MAIN_RC" -ne 0 ] && exit "$MAIN_RC"
+        exit "$PRIORITY_RC"
       fi
     on_error:
       - action: continue
@@ -1007,7 +1036,7 @@ steps:
         exit 0
       fi
 
-      if [ "{{sprayingEngine}}" == "brutus" ]; then
+      if [ "{{sprayingEngine}}" = "brutus" ]; then
         brutus_input=""
         if [ -s "{{Output}}/ipspace/service_fingerprints.jsonl" ]; then
           brutus_input="{{Output}}/ipspace/service_fingerprints.jsonl"
@@ -1065,7 +1094,7 @@ steps:
           - Critical/High severity findings that need immediate attention
           - Potential false positives based on the target context
           - Recommended remediation order
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not emit moustache-style placeholders or template markers in your response.
     exports:
       analysis: "{{llm_vuln_analysis_content}}"
 
@@ -1074,13 +1103,23 @@ steps:
     pre_condition: "{{enableLlmAnalysis}}"
     log: "Saving LLM analysis report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{analysis}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmAnalysisOutput}} 2>/dev/null || true
+        echo "No LLM vulnerability analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       echo "# LLM Vulnerability Analysis Report" > {{llmAnalysisOutput}}
       echo "" >> {{llmAnalysisOutput}}
       echo "**Target:** {{Target}}" >> {{llmAnalysisOutput}}
       echo "**Generated:** $(date)" >> {{llmAnalysisOutput}}
       echo "" >> {{llmAnalysisOutput}}
-      echo "{{analysis}}" >> {{llmAnalysisOutput}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmAnalysisOutput}}
     on_error:
       - action: continue
 
@@ -1108,6 +1147,26 @@ steps:
     exports:
       fp_filter: "{{llm_false_positive_filter_content}}"
 
+  - name: save-llm-false-positive-filter
+    type: bash
+    pre_condition: '{{enableLlmAnalysis}} && {{llmFalsePositiveFilter}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    log: "Saving LLM false-positive review output"
+    command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{fp_filter}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmFalsePositiveReviewOutput}} 2>/dev/null || true
+        echo "No LLM false-positive review available; skipping output write."
+        exit 0
+      fi
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      printf '%s\n' "$REPORT_CONTENT" > {{llmFalsePositiveReviewOutput}}
+    on_error:
+      - action: continue
+
   - name: llm-risk-prioritization
     type: llm
     pre_condition: '{{enableLlmAnalysis}} && {{llmRiskPrioritization}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
@@ -1134,6 +1193,26 @@ steps:
       type: json_object
     exports:
       priority: "{{llm_risk_prioritization_content}}"
+
+  - name: save-llm-risk-prioritization
+    type: bash
+    pre_condition: '{{enableLlmAnalysis}} && {{llmRiskPrioritization}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    log: "Saving LLM vulnerability prioritization output"
+    command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{priority}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmPrioritizationOutput}} 2>/dev/null || true
+        echo "No LLM prioritization output available; skipping output write."
+        exit 0
+      fi
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      printf '%s\n' "$REPORT_CONTENT" > {{llmPrioritizationOutput}}
+    on_error:
+      - action: continue
 
   # ===========================================================================
   # Phase 16: LLM WAF Bypass Strategy (P2)
@@ -1186,7 +1265,7 @@ steps:
           {{readFile("{{nucleiOutputJsonl}}")}}
           
           Provide specific bypass techniques and security recommendations for this target.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not emit moustache-style placeholders or template markers in your response.
     exports:
       waf_bypass_strategy: "{{llm_waf_bypass_strategy_content}}"
 
@@ -1195,12 +1274,22 @@ steps:
     pre_condition: "{{enableLlmWafBypass}}"
     log: "Saving LLM WAF bypass strategy report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{waf_bypass_strategy}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmWafBypassReport}} 2>/dev/null || true
+        echo "No LLM WAF bypass assessment available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       echo "# WAF Bypass Strategy - {{Target}}" > {{llmWafBypassReport}}
       echo "" >> {{llmWafBypassReport}}
       echo "**Generated:** $(date)" >> {{llmWafBypassReport}}
       echo "" >> {{llmWafBypassReport}}
-      echo "{{waf_bypass_strategy}}" >> {{llmWafBypassReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmWafBypassReport}}
     on_error:
       - action: continue
 
@@ -1211,4 +1300,4 @@ steps:
     type: function
     log: "Vulnerability Suite Scan Summary"
     functions:
-      - 'db_total_assets("{{nucleiOutputJsonl}}")'
+      - 'log_info("Vulnerability suite summary complete for {{Target}}")'

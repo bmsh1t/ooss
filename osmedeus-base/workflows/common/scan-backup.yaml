@@ -66,9 +66,9 @@ params:
   # Tool paths
   # =========================
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
   - name: backupScannerDir
-    default: "/root/Tools/ihoneyBakFileScan_Modify"
+    default: "{{toolsDir}}/ihoneyBakFileScan_Modify"
   - name: backupScannerPath
     default: "{{backupScannerDir}}/ihoneyBakFileScan_Modify.py"
 
@@ -270,7 +270,7 @@ steps:
     type: function
     log: "Backup scan summary"
     functions:
-      - 'db_total_assets("{{backupResultFile}}")'
+      - 'log_info("Backup scan summary complete for {{Target}}")'
 
   # ===========================================================================
   # Cleanup

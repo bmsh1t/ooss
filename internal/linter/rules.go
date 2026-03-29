@@ -234,9 +234,10 @@ func (r *UndefinedVariableRule) Check(wast *WorkflowAST) []LintIssue {
 	// Check each step for undefined variables
 	for i, step := range w.Steps {
 		stepPrefix := fmt.Sprintf("steps[%d]", i)
+		stepAutoDefined := autoDefinedVariablesForStep(&step)
 
 		// Check all fields of this step
-		checkStepFieldsForUndefinedVars(&step, stepPrefix, defined, triggerVars, hasEventTrigger, wast, r, &issues)
+		checkStepFieldsForUndefinedVars(&step, stepPrefix, defined, stepAutoDefined, triggerVars, hasEventTrigger, wast, r, &issues)
 
 		// Recurse into foreach inner step with scoped defined copy
 		if step.Step != nil {
@@ -246,17 +247,20 @@ func (r *UndefinedVariableRule) Check(wast *WorkflowAST) []LintIssue {
 			}
 			// _id_ is always available in foreach inner steps
 			innerDefined["_id_"] = true
-			checkStepFieldsForUndefinedVars(step.Step, stepPrefix+".step", innerDefined, triggerVars, hasEventTrigger, wast, r, &issues)
+			checkStepFieldsForUndefinedVars(step.Step, stepPrefix+".step", innerDefined, autoDefinedVariablesForStep(step.Step), triggerVars, hasEventTrigger, wast, r, &issues)
 		}
 
 		// Recurse into parallel_steps
 		for j := range step.ParallelSteps {
-			checkStepFieldsForUndefinedVars(&step.ParallelSteps[j], fmt.Sprintf("%s.parallel_steps[%d]", stepPrefix, j), defined, triggerVars, hasEventTrigger, wast, r, &issues)
+			checkStepFieldsForUndefinedVars(&step.ParallelSteps[j], fmt.Sprintf("%s.parallel_steps[%d]", stepPrefix, j), defined, autoDefinedVariablesForStep(&step.ParallelSteps[j]), triggerVars, hasEventTrigger, wast, r, &issues)
 		}
 
 		// After processing this step, add its exports to defined
 		for exportName := range step.Exports {
 			defined[exportName] = true
+		}
+		for autoName := range stepAutoDefined {
+			defined[autoName] = true
 		}
 
 		// Add foreach variable to defined for subsequent steps
@@ -724,9 +728,59 @@ func copyDefinedMap(m map[string]bool) map[string]bool {
 	return cp
 }
 
+func sanitizeAutoExportStepName(name string) string {
+	return strings.ReplaceAll(name, "-", "_")
+}
+
+func autoDefinedVariablesForStep(step *core.Step) map[string]bool {
+	autoDefined := make(map[string]bool)
+	if step == nil {
+		return autoDefined
+	}
+
+	switch step.Type {
+	case core.StepTypeHTTP:
+		if step.Name != "" {
+			autoDefined[sanitizeAutoExportStepName(step.Name)+"_http_resp"] = true
+		}
+	case core.StepTypeLLM:
+		if step.Name != "" {
+			sanitized := sanitizeAutoExportStepName(step.Name)
+			autoDefined[sanitized+"_llm_resp"] = true
+			if len(step.Messages) > 0 {
+				autoDefined[sanitized+"_content"] = true
+			}
+		}
+	case core.StepTypeAgent:
+		for _, name := range []string{
+			"agent_content",
+			"agent_history",
+			"agent_iterations",
+			"agent_total_tokens",
+			"agent_prompt_tokens",
+			"agent_completion_tokens",
+			"agent_tool_results",
+		} {
+			autoDefined[name] = true
+		}
+		if step.PlanPrompt != "" {
+			autoDefined["agent_plan"] = true
+		}
+		if len(step.Queries) > 1 {
+			autoDefined["agent_goal_results"] = true
+		}
+	case core.StepTypeAgentACP:
+		autoDefined["acp_output"] = true
+		autoDefined["acp_stderr"] = true
+		autoDefined["acp_agent"] = true
+	}
+
+	return autoDefined
+}
+
 // checkStepFieldsForUndefinedVars checks ALL template-renderable fields of a single step.
 // stepPrefix is the field path prefix (e.g. "steps[0]" or "steps[0].step").
-func checkStepFieldsForUndefinedVars(step *core.Step, stepPrefix string, defined map[string]bool, triggerVars map[string]bool, hasEventTrigger bool, wast *WorkflowAST, rule *UndefinedVariableRule, issues *[]LintIssue) {
+func checkStepFieldsForUndefinedVars(step *core.Step, stepPrefix string, defined map[string]bool, stepAutoDefined map[string]bool, triggerVars map[string]bool, hasEventTrigger bool, wast *WorkflowAST, rule *UndefinedVariableRule, issues *[]LintIssue) {
 	check := func(s, field string) {
 		checkStringForUndefinedVars(s, field, defined, triggerVars, hasEventTrigger, wast, rule, issues)
 	}
@@ -734,6 +788,13 @@ func checkStepFieldsForUndefinedVars(step *core.Step, stepPrefix string, defined
 		for j, s := range slice {
 			check(s, fmt.Sprintf("%s[%d]", fieldBase, j))
 		}
+	}
+	checkExport := func(s, field string) {
+		exportDefined := copyDefinedMap(defined)
+		for name := range stepAutoDefined {
+			exportDefined[name] = true
+		}
+		checkStringForUndefinedVars(s, field, exportDefined, triggerVars, hasEventTrigger, wast, rule, issues)
 	}
 
 	// Bash fields
@@ -795,7 +856,7 @@ func checkStepFieldsForUndefinedVars(step *core.Step, stepPrefix string, defined
 
 	// Export values
 	for exportName, exportValue := range step.Exports {
-		check(exportValue, fmt.Sprintf("%s.exports.%s", stepPrefix, exportName))
+		checkExport(exportValue, fmt.Sprintf("%s.exports.%s", stepPrefix, exportName))
 	}
 
 	// Decision fields

@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,11 +12,15 @@ import (
 	htmlstd "html"
 	"io"
 	"io/fs"
+	"mime"
+	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,19 +30,32 @@ import (
 )
 
 const (
-	maxChunkChars = 1200
-	minChunkChars = 120
+	maxChunkChars        = 1200
+	minChunkChars        = 120
+	maxFetchURLBytes     = 2 * 1024 * 1024
+	maxFetchURLRedirects = 4
+	fetchURLTimeout      = 15 * time.Second
+
+	urlPreviewFormatKind    = "osmedeus-url-preview"
+	urlPreviewFormatVersion = 1
+
+	urlPreviewMetaBeginMarker    = "<!-- OSMEDEUS_URL_PREVIEW_META_BEGIN"
+	urlPreviewMetaEndMarker      = "OSMEDEUS_URL_PREVIEW_META_END -->"
+	urlPreviewArticleBeginMarker = "<!-- OSMEDEUS_URL_PREVIEW_ARTICLE_BEGIN -->"
+	urlPreviewArticleEndMarker   = "<!-- OSMEDEUS_URL_PREVIEW_ARTICLE_END -->"
 )
 
 // IngestSummary reports the outcome of a knowledge import job.
 type IngestSummary struct {
-	Workspace string   `json:"workspace"`
-	RootPath  string   `json:"root_path"`
-	Documents int      `json:"documents"`
-	Chunks    int      `json:"chunks"`
-	Skipped   int      `json:"skipped"`
-	Failed    int      `json:"failed"`
-	Errors    []string `json:"errors,omitempty"`
+	Workspace     string   `json:"workspace"`
+	RootPath      string   `json:"root_path"`
+	Documents     int      `json:"documents"`
+	Chunks        int      `json:"chunks"`
+	Skipped       int      `json:"skipped"`
+	Failed        int      `json:"failed"`
+	Errors        []string `json:"errors,omitempty"`
+	VectorIndexed *bool    `json:"vector_indexed,omitempty"`
+	VectorError   string   `json:"vector_error,omitempty"`
 }
 
 type extractedDocument struct {
@@ -50,6 +68,74 @@ type extractedDocument struct {
 type extractedChunk struct {
 	Section string
 	Content string
+}
+
+// URLFetchPreview is a non-persistent preview of a fetched article page.
+type URLFetchPreview struct {
+	URL                       string   `json:"url"`
+	FinalURL                  string   `json:"final_url"`
+	Title                     string   `json:"title"`
+	Content                   string   `json:"content"`
+	Markdown                  string   `json:"markdown"`
+	ContentType               string   `json:"content_type"`
+	StatusCode                int      `json:"status_code"`
+	TotalBytes                int      `json:"total_bytes"`
+	FetchedAt                 string   `json:"fetched_at"`
+	Paragraphs                int      `json:"paragraphs"`
+	QualityScore              int      `json:"quality_score"`
+	Warnings                  []string `json:"warnings,omitempty"`
+	SuggestedSampleType       string   `json:"suggested_sample_type,omitempty"`
+	SuggestedSourceConfidence float64  `json:"suggested_source_confidence,omitempty"`
+	SuggestedLabels           []string `json:"suggested_labels,omitempty"`
+	SuggestedTargetTypes      []string `json:"suggested_target_types,omitempty"`
+}
+
+// URLPreviewIngestSummary reports the result of confirming a fetched preview into the KB.
+type URLPreviewIngestSummary struct {
+	Workspace                 string   `json:"workspace"`
+	PreviewPath               string   `json:"preview_path"`
+	SourcePath                string   `json:"source_path"`
+	SourceType                string   `json:"source_type"`
+	DocType                   string   `json:"doc_type"`
+	Title                     string   `json:"title"`
+	Documents                 int      `json:"documents"`
+	Chunks                    int      `json:"chunks"`
+	SuggestedSampleType       string   `json:"suggested_sample_type,omitempty"`
+	SuggestedSourceConfidence float64  `json:"suggested_source_confidence,omitempty"`
+	SuggestedLabels           []string `json:"suggested_labels,omitempty"`
+	SuggestedTargetTypes      []string `json:"suggested_target_types,omitempty"`
+	VectorIndexed             *bool    `json:"vector_indexed,omitempty"`
+	VectorError               string   `json:"vector_error,omitempty"`
+}
+
+type urlPreviewSuggestion struct {
+	SampleType       string
+	SourceConfidence float64
+	Labels           []string
+	TargetTypes      []string
+}
+
+type urlPreviewManifest struct {
+	Kind                      string   `json:"kind"`
+	Version                   int      `json:"version"`
+	Title                     string   `json:"title,omitempty"`
+	SourceURL                 string   `json:"source_url"`
+	FinalURL                  string   `json:"final_url,omitempty"`
+	FetchedAt                 string   `json:"fetched_at,omitempty"`
+	ContentType               string   `json:"content_type,omitempty"`
+	Paragraphs                int      `json:"paragraphs,omitempty"`
+	QualityScore              int      `json:"quality_score,omitempty"`
+	Warnings                  []string `json:"warnings,omitempty"`
+	SuggestedSampleType       string   `json:"suggested_sample_type,omitempty"`
+	SuggestedSourceConfidence float64  `json:"suggested_source_confidence,omitempty"`
+	SuggestedLabels           []string `json:"suggested_labels,omitempty"`
+	SuggestedTargetTypes      []string `json:"suggested_target_types,omitempty"`
+}
+
+type parsedURLPreview struct {
+	Title    string
+	Content  string
+	Manifest urlPreviewManifest
 }
 
 // SearchOptions controls layered knowledge retrieval.
@@ -102,6 +188,193 @@ func IngestPath(ctx context.Context, cfg *config.Config, rootPath, workspace str
 		summary.Errors = append(summary.Errors, err.Error())
 	}
 	return summary, nil
+}
+
+// IngestURLPreview confirms a generated URL preview markdown file into the knowledge base.
+func IngestURLPreview(ctx context.Context, previewPath, workspace string) (*URLPreviewIngestSummary, error) {
+	previewPath = strings.TrimSpace(previewPath)
+	if previewPath == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+
+	absPath, err := filepath.Abs(previewPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read preview file: %w", err)
+	}
+
+	parsed, err := parseURLPreviewMarkdown(string(content))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", absPath, err)
+	}
+
+	sourcePath := strings.TrimSpace(parsed.Manifest.FinalURL)
+	if sourcePath == "" {
+		sourcePath = strings.TrimSpace(parsed.Manifest.SourceURL)
+	}
+	if sourcePath == "" {
+		return nil, fmt.Errorf("%s: source url is required", absPath)
+	}
+
+	metadata := map[string]interface{}{
+		"source":                  "url-preview",
+		"source_url":              strings.TrimSpace(parsed.Manifest.SourceURL),
+		"final_url":               strings.TrimSpace(parsed.Manifest.FinalURL),
+		"fetched_at":              strings.TrimSpace(parsed.Manifest.FetchedAt),
+		"content_type":            strings.TrimSpace(parsed.Manifest.ContentType),
+		"paragraphs":              parsed.Manifest.Paragraphs,
+		"quality_score":           parsed.Manifest.QualityScore,
+		"warnings":                append([]string(nil), parsed.Manifest.Warnings...),
+		"preview_path":            absPath,
+		"preview_kind":            urlPreviewFormatKind,
+		"preview_version":         urlPreviewFormatVersion,
+		"sample_type":             strings.TrimSpace(parsed.Manifest.SuggestedSampleType),
+		"source_confidence":       clampURLPreviewConfidence(parsed.Manifest.SuggestedSourceConfidence),
+		"labels":                  normalizeURLPreviewSuggestionTokens(parsed.Manifest.SuggestedLabels...),
+		"target_types":            normalizeURLPreviewSuggestionTokens(parsed.Manifest.SuggestedTargetTypes...),
+		"retrieval_fingerprint":   buildURLPreviewRetrievalFingerprint(sourcePath, parsed.Title, parsed.Content),
+		"confidence_observed_at":  strings.TrimSpace(parsed.Manifest.FetchedAt),
+		"ingest_confirmation_via": "kb-ingest-preview",
+	}
+
+	chunkCount, err := saveKnowledgeContent(ctx, workspace, sourcePath, "url-preview", "web-article", parsed.Title, parsed.Content, metadata, true)
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to save preview document: %w", absPath, err)
+	}
+
+	return &URLPreviewIngestSummary{
+		Workspace:                 normalizeWorkspace(workspace),
+		PreviewPath:               absPath,
+		SourcePath:                sourcePath,
+		SourceType:                "url-preview",
+		DocType:                   "web-article",
+		Title:                     parsed.Title,
+		Documents:                 1,
+		Chunks:                    chunkCount,
+		SuggestedSampleType:       strings.TrimSpace(parsed.Manifest.SuggestedSampleType),
+		SuggestedSourceConfidence: clampURLPreviewConfidence(parsed.Manifest.SuggestedSourceConfidence),
+		SuggestedLabels:           normalizeURLPreviewSuggestionTokens(parsed.Manifest.SuggestedLabels...),
+		SuggestedTargetTypes:      normalizeURLPreviewSuggestionTokens(parsed.Manifest.SuggestedTargetTypes...),
+	}, nil
+}
+
+// FetchURLPreview fetches a public HTML article page and returns a reviewable preview.
+func FetchURLPreview(ctx context.Context, rawURL string) (*URLFetchPreview, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, fmt.Errorf("url is required")
+	}
+
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported url scheme: %s", parsed.Scheme)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nil, fmt.Errorf("url host is required")
+	}
+
+	client := &http.Client{
+		Timeout: fetchURLTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxFetchURLRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxFetchURLRedirects)
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("User-Agent", "OsmedeusKBFetcher/1.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch url: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("unexpected http status: %d", resp.StatusCode)
+	}
+
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	mediaType := ""
+	if contentType != "" {
+		parsedType, _, err := mime.ParseMediaType(contentType)
+		if err == nil {
+			mediaType = strings.TrimSpace(parsedType)
+		}
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchURLBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if len(body) > maxFetchURLBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxFetchURLBytes)
+	}
+
+	if mediaType != "" && mediaType != "text/html" && mediaType != "application/xhtml+xml" {
+		return nil, fmt.Errorf("unsupported content type: %s", mediaType)
+	}
+
+	htmlInput := string(body)
+	if mediaType == "" && !looksLikeHTMLDocument(htmlInput) {
+		return nil, fmt.Errorf("response does not look like html content")
+	}
+
+	content := extractTextFromHTML(htmlInput)
+	content = normalizeContent(content)
+	content = cleanURLPreviewContent(content)
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("extracted content is empty")
+	}
+
+	title := extractHTMLDocumentTitle(htmlInput)
+	if strings.TrimSpace(title) == "" {
+		title = inferTitle(parsed.Path, content)
+	}
+	if strings.TrimSpace(title) == "" {
+		title = strings.TrimSpace(parsed.Host)
+	}
+
+	paragraphs := countURLPreviewParagraphs(content)
+	qualityScore, warnings, badReason := evaluateURLPreviewQuality(title, content, htmlInput, resp.Request.URL.String(), paragraphs)
+	if badReason != "" {
+		return nil, fmt.Errorf("%s", badReason)
+	}
+
+	fetchedAt := time.Now().UTC().Format(time.RFC3339)
+	preview := &URLFetchPreview{
+		URL:          rawURL,
+		FinalURL:     resp.Request.URL.String(),
+		Title:        title,
+		Content:      content,
+		ContentType:  normalizeFetchedContentType(contentType, mediaType),
+		StatusCode:   resp.StatusCode,
+		TotalBytes:   len(body),
+		FetchedAt:    fetchedAt,
+		Paragraphs:   paragraphs,
+		QualityScore: qualityScore,
+		Warnings:     warnings,
+	}
+	suggestion := resolveURLPreviewSuggestion(preview)
+	preview.SuggestedSampleType = suggestion.SampleType
+	preview.SuggestedSourceConfidence = suggestion.SourceConfidence
+	preview.SuggestedLabels = suggestion.Labels
+	preview.SuggestedTargetTypes = suggestion.TargetTypes
+	preview.Markdown = RenderURLPreviewMarkdown(preview)
+	return preview, nil
 }
 
 func ingestDirectory(ctx context.Context, rootPath string, summary *IngestSummary, recursive bool) error {
@@ -161,56 +434,76 @@ func ingestFile(ctx context.Context, path string, summary *IngestSummary) error 
 		return fmt.Errorf("%s: extracted content is empty", path)
 	}
 
-	chunks := chunkContent(content)
-	if len(chunks) == 0 {
-		summary.Skipped++
-		return fmt.Errorf("%s: no searchable chunks generated", path)
+	chunkCount, err := saveKnowledgeContent(ctx, summary.Workspace, path, "file", doc.DocType, doc.Title, content, doc.Metadata, false)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 
-	metadataJSON := marshalMetadata(doc.Metadata)
-	contentHash := hashString(content)
+	summary.Documents++
+	summary.Chunks += chunkCount
+	return nil
+}
 
+func saveKnowledgeContent(ctx context.Context, workspace, sourcePath, sourceType, docType, title, content string, metadata map[string]interface{}, includeMetadataInChunks bool) (int, error) {
+	content = normalizeContent(content)
+	if strings.TrimSpace(content) == "" {
+		return 0, fmt.Errorf("extracted content is empty")
+	}
+
+	chunks := chunkContent(content)
+	if len(chunks) == 0 {
+		return 0, fmt.Errorf("no searchable chunks generated")
+	}
+
+	now := time.Now()
 	record := &database.KnowledgeDocument{
-		Workspace:   summary.Workspace,
-		SourcePath:  path,
-		SourceType:  "file",
-		DocType:     doc.DocType,
-		Title:       doc.Title,
-		ContentHash: contentHash,
+		Workspace:   normalizeWorkspace(workspace),
+		SourcePath:  strings.TrimSpace(sourcePath),
+		SourceType:  strings.TrimSpace(sourceType),
+		DocType:     strings.TrimSpace(docType),
+		Title:       strings.TrimSpace(title),
+		ContentHash: hashString(content),
 		Status:      "ready",
 		ChunkCount:  len(chunks),
 		TotalBytes:  int64(len(content)),
-		Metadata:    metadataJSON,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Metadata:    marshalMetadata(metadata),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if record.SourceType == "" {
+		record.SourceType = "file"
 	}
 
 	chunkRows := make([]database.KnowledgeChunk, 0, len(chunks))
 	for i, chunk := range chunks {
 		chunkMeta := map[string]interface{}{
-			"source_path":   path,
+			"source_path":   record.SourcePath,
 			"section":       chunk.Section,
 			"chunk_index":   i,
-			"document_type": doc.DocType,
+			"document_type": record.DocType,
+			"doc_type":      record.DocType,
+		}
+		if includeMetadataInChunks {
+			for key, value := range metadata {
+				chunkMeta[key] = value
+			}
 		}
 		chunkRows = append(chunkRows, database.KnowledgeChunk{
-			Workspace:   summary.Workspace,
+			Workspace:   record.Workspace,
 			ChunkIndex:  i,
 			Section:     chunk.Section,
 			Content:     chunk.Content,
 			ContentHash: hashString(chunk.Content),
 			Metadata:    marshalMetadata(chunkMeta),
-			CreatedAt:   time.Now(),
+			CreatedAt:   now,
 		})
 	}
 
 	if err := database.UpsertKnowledgeDocument(ctx, record, chunkRows); err != nil {
-		return fmt.Errorf("%s: failed to save document: %w", path, err)
+		return 0, fmt.Errorf("failed to save document: %w", err)
 	}
 
-	summary.Documents++
-	summary.Chunks += len(chunkRows)
-	return nil
+	return len(chunkRows), nil
 }
 
 func extractDocument(ctx context.Context, path string) (*extractedDocument, error) {
@@ -711,6 +1004,10 @@ func mergeOrderedEPUBNames(ordered, discovered []string) []string {
 }
 
 func extractTextFromHTML(input string) string {
+	if focused := extractFocusedHTMLText(input); focused != "" {
+		return focused
+	}
+
 	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
 	var builder strings.Builder
 	skipDepth := 0
@@ -755,6 +1052,985 @@ func extractTextFromHTML(input string) string {
 			builder.WriteString(text)
 		}
 	}
+}
+
+func extractFocusedHTMLText(input string) string {
+	root, err := xhtml.Parse(strings.NewReader(input))
+	if err != nil {
+		return ""
+	}
+
+	target := findPreferredHTMLContentNode(root)
+	if target == nil {
+		return ""
+	}
+
+	var rendered bytes.Buffer
+	if err := xhtml.Render(&rendered, target); err != nil {
+		return ""
+	}
+	text := normalizeHTMLText(extractTokenizerText(rendered.String()))
+	if len(text) < 280 {
+		return ""
+	}
+	return text
+}
+
+func extractTokenizerText(input string) string {
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
+	var builder strings.Builder
+	skipDepth := 0
+
+	for {
+		tokenType := tokenizer.Next()
+		switch tokenType {
+		case xhtml.ErrorToken:
+			if tokenizer.Err() == io.EOF {
+				return builder.String()
+			}
+			return builder.String()
+		case xhtml.StartTagToken:
+			token := tokenizer.Token()
+			switch token.Data {
+			case "script", "style", "noscript":
+				skipDepth++
+			case "p", "div", "section", "article", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6":
+				builder.WriteString("\n")
+			}
+		case xhtml.EndTagToken:
+			token := tokenizer.Token()
+			switch token.Data {
+			case "script", "style", "noscript":
+				if skipDepth > 0 {
+					skipDepth--
+				}
+			case "p", "div", "section", "article", "li", "h1", "h2", "h3", "h4", "h5", "h6":
+				builder.WriteString("\n")
+			}
+		case xhtml.TextToken:
+			if skipDepth > 0 {
+				continue
+			}
+			text := strings.TrimSpace(htmlstd.UnescapeString(string(tokenizer.Text())))
+			if text == "" {
+				continue
+			}
+			if builder.Len() > 0 {
+				builder.WriteString(" ")
+			}
+			builder.WriteString(text)
+		}
+	}
+}
+
+func findPreferredHTMLContentNode(root *xhtml.Node) *xhtml.Node {
+	for _, selector := range []func(*xhtml.Node) bool{
+		func(node *xhtml.Node) bool { return node.Type == xhtml.ElementNode && node.Data == "article" },
+		func(node *xhtml.Node) bool { return node.Type == xhtml.ElementNode && node.Data == "main" },
+		func(node *xhtml.Node) bool {
+			return node.Type == xhtml.ElementNode && hasHTMLAttrValue(node, "role", "main")
+		},
+	} {
+		if node := walkHTMLNode(root, selector); node != nil {
+			return node
+		}
+	}
+	return nil
+}
+
+func walkHTMLNode(node *xhtml.Node, match func(*xhtml.Node) bool) *xhtml.Node {
+	if node == nil {
+		return nil
+	}
+	if match(node) {
+		return node
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if found := walkHTMLNode(child, match); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func hasHTMLAttrValue(node *xhtml.Node, key, expected string) bool {
+	if node == nil {
+		return false
+	}
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	for _, attr := range node.Attr {
+		if strings.ToLower(strings.TrimSpace(attr.Key)) != key {
+			continue
+		}
+		return strings.ToLower(strings.TrimSpace(attr.Val)) == expected
+	}
+	return false
+}
+
+func extractHTMLDocumentTitle(input string) string {
+	tokenizer := xhtml.NewTokenizer(strings.NewReader(input))
+	inTitle := false
+
+	for {
+		switch tokenizer.Next() {
+		case xhtml.ErrorToken:
+			return ""
+		case xhtml.StartTagToken:
+			token := tokenizer.Token()
+			if token.Data == "title" {
+				inTitle = true
+			}
+		case xhtml.EndTagToken:
+			token := tokenizer.Token()
+			if token.Data == "title" {
+				inTitle = false
+			}
+		case xhtml.TextToken:
+			if !inTitle {
+				continue
+			}
+			title := strings.Join(strings.Fields(htmlstd.UnescapeString(string(tokenizer.Text()))), " ")
+			return strings.TrimSpace(title)
+		}
+	}
+}
+
+func looksLikeHTMLDocument(input string) bool {
+	lower := strings.ToLower(input)
+	for _, marker := range []string{"<html", "<body", "<article", "<main", "<title"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeFetchedContentType(headerValue, mediaType string) string {
+	if strings.TrimSpace(headerValue) != "" {
+		return strings.TrimSpace(headerValue)
+	}
+	if strings.TrimSpace(mediaType) != "" {
+		return strings.TrimSpace(mediaType)
+	}
+	return "text/html"
+}
+
+func countURLPreviewParagraphs(content string) int {
+	parts := strings.Split(strings.TrimSpace(content), "\n\n")
+	count := 0
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func cleanURLPreviewContent(content string) string {
+	lines := strings.Split(content, "\n")
+	clean := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			clean = append(clean, "")
+			continue
+		}
+		if shouldDropURLPreviewLine(line) {
+			continue
+		}
+		clean = append(clean, line)
+	}
+	return normalizeContent(strings.Join(clean, "\n"))
+}
+
+func shouldDropURLPreviewLine(line string) bool {
+	normalized := normalizeURLPreviewText(line)
+	if normalized == "" {
+		return false
+	}
+
+	exactDrops := map[string]struct{}{
+		"admin": {},
+		"点赞":    {},
+		"微信扫一扫": {},
+		"左青龙":   {},
+		"右白虎":   {},
+		"复制链接":  {},
+		"移动安全":  {},
+	}
+	if _, ok := exactDrops[normalized]; ok {
+		return true
+	}
+
+	prefixDrops := []string{
+		"免责声明",
+		"原文始发于微信公众号",
+		"下方可添加作者微信",
+	}
+	for _, prefix := range prefixDrops {
+		if strings.HasPrefix(normalized, normalizeURLPreviewText(prefix)) {
+			return true
+		}
+	}
+
+	if len([]rune(line)) <= 120 {
+		metaHints := 0
+		for _, token := range []string{"文章", "评论", "views", "阅读模式", "字数", "复制链接", "微信扫一扫"} {
+			if strings.Contains(line, token) {
+				metaHints++
+			}
+		}
+		if metaHints >= 2 {
+			return true
+		}
+	}
+	if strings.Contains(line, "复制链接") {
+		return true
+	}
+	if len([]rune(line)) <= 40 {
+		hasDigit := false
+		for _, r := range line {
+			if r >= '0' && r <= '9' {
+				hasDigit = true
+				break
+			}
+		}
+		if hasDigit {
+			for _, token := range []string{"文章", "评论", "views"} {
+				if strings.Contains(line, token) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func evaluateURLPreviewQuality(title, content, htmlInput, finalURL string, paragraphs int) (int, []string, string) {
+	if reason := detectBlockedURLPage(title, content, htmlInput); reason != "" {
+		return 0, nil, reason
+	}
+
+	warnings := make([]string, 0, 3)
+	score := 35
+	if strings.TrimSpace(title) != "" {
+		score += 10
+	} else {
+		warnings = append(warnings, "missing page title")
+	}
+
+	contentLength := len([]rune(content))
+	switch {
+	case contentLength >= 1600:
+		score += 35
+	case contentLength >= 900:
+		score += 25
+	case contentLength >= 500:
+		score += 15
+	case contentLength >= 220:
+		// Concise writeups with a few dense paragraphs are still usable KB material.
+		score += 15
+	default:
+		warnings = append(warnings, "content body is short")
+	}
+
+	switch {
+	case paragraphs >= 5:
+		score += 15
+	case paragraphs >= 3:
+		score += 10
+	case paragraphs >= 2:
+		score += 5
+	default:
+		warnings = append(warnings, "few content sections detected")
+	}
+
+	if looksLikeURLPreviewIndexPage(title, content, finalURL, paragraphs) {
+		score -= 20
+		warnings = append(warnings, "content resembles an index or navigation page")
+	}
+
+	if contentLength < 120 && paragraphs <= 1 {
+		return 0, nil, "page content is too short to be a stable article preview"
+	}
+
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	return score, uniqueLearnedStrings(warnings), ""
+}
+
+func detectBlockedURLPage(title, content, htmlInput string) string {
+	titleNorm := normalizeURLPreviewText(title)
+	contentNorm := normalizeURLPreviewText(content)
+	htmlNorm := normalizeURLPreviewText(htmlInput)
+
+	titleMarkers := []string{
+		"just a moment",
+		"attention required",
+		"access denied",
+		"security check",
+		"captcha",
+		"verify you are human",
+		"安全验证",
+		"访问受限",
+	}
+	for _, marker := range titleMarkers {
+		if strings.Contains(titleNorm, normalizeURLPreviewText(marker)) {
+			return "page appears to be a bot-check or access-control page"
+		}
+	}
+
+	contentMarkers := []string{
+		"enable javascript and cookies to continue",
+		"please enable javascript",
+		"verify you are human",
+		"checking your browser before accessing",
+		"complete the security check",
+		"ray id",
+		"cloudflare",
+		"captcha",
+		"ddos protection",
+		"验证您是真人",
+		"请开启 javascript",
+	}
+
+	hits := 0
+	for _, marker := range contentMarkers {
+		token := normalizeURLPreviewText(marker)
+		if strings.Contains(contentNorm, token) || strings.Contains(htmlNorm, token) {
+			hits++
+		}
+	}
+
+	if hits >= 2 && len([]rune(content)) < 900 {
+		return "page appears to be a bot-check or access-control page"
+	}
+	return ""
+}
+
+func looksLikeURLPreviewIndexPage(title, content, finalURL string, paragraphs int) bool {
+	if paragraphs > 2 || len([]rune(content)) > 1200 {
+		return false
+	}
+
+	combined := normalizeURLPreviewText(title + "\n" + content + "\n" + finalURL)
+	navTokens := []string{
+		"home", "archive", "archives", "category", "categories", "tag", "tags", "search",
+		"menu", "login", "register", "related", "previous", "next", "comments",
+		"首页", "归档", "分类", "标签", "搜索", "菜单", "上一篇", "下一篇", "评论",
+	}
+
+	hits := 0
+	for _, token := range navTokens {
+		if strings.Contains(combined, normalizeURLPreviewText(token)) {
+			hits++
+		}
+	}
+	return hits >= 4
+}
+
+func normalizeURLPreviewText(input string) string {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("\n", " ", "\t", " ", "_", " ", "-", " ", "/", " ", ":", " ")
+	input = replacer.Replace(input)
+	return strings.Join(strings.Fields(input), " ")
+}
+
+// RenderURLPreviewMarkdown converts a fetched webpage preview into a reviewable markdown file.
+func RenderURLPreviewMarkdown(preview *URLFetchPreview) string {
+	if preview == nil {
+		return ""
+	}
+
+	manifest := buildURLPreviewManifest(preview)
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		manifestJSON = []byte("{}")
+	}
+
+	var builder strings.Builder
+	title := strings.TrimSpace(preview.Title)
+	if title == "" {
+		title = "Fetched Article"
+	}
+
+	builder.WriteString("# ")
+	builder.WriteString(title)
+	builder.WriteString("\n\n")
+	builder.WriteString(urlPreviewMetaBeginMarker)
+	builder.WriteString("\n")
+	builder.Write(manifestJSON)
+	builder.WriteString("\n")
+	builder.WriteString(urlPreviewMetaEndMarker)
+	builder.WriteString("\n\n")
+	builder.WriteString("- Source URL: ")
+	builder.WriteString(strings.TrimSpace(manifest.SourceURL))
+	builder.WriteString("\n")
+	if finalURL := strings.TrimSpace(manifest.FinalURL); finalURL != "" && finalURL != strings.TrimSpace(manifest.SourceURL) {
+		builder.WriteString("- Final URL: ")
+		builder.WriteString(finalURL)
+		builder.WriteString("\n")
+	}
+	if fetchedAt := strings.TrimSpace(manifest.FetchedAt); fetchedAt != "" {
+		builder.WriteString("- Fetched At: ")
+		builder.WriteString(fetchedAt)
+		builder.WriteString("\n")
+	}
+	if contentType := strings.TrimSpace(manifest.ContentType); contentType != "" {
+		builder.WriteString("- Content Type: ")
+		builder.WriteString(contentType)
+		builder.WriteString("\n")
+	}
+	if manifest.Paragraphs > 0 {
+		builder.WriteString("- Paragraphs: ")
+		builder.WriteString(fmt.Sprintf("%d", manifest.Paragraphs))
+		builder.WriteString("\n")
+	}
+	if manifest.QualityScore > 0 {
+		builder.WriteString("- Quality Score: ")
+		builder.WriteString(fmt.Sprintf("%d", manifest.QualityScore))
+		builder.WriteString("\n")
+	}
+	if len(manifest.Warnings) > 0 {
+		builder.WriteString("- Warnings: ")
+		builder.WriteString(strings.Join(manifest.Warnings, "; "))
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n## Suggested Metadata\n\n")
+	if sampleType := strings.TrimSpace(manifest.SuggestedSampleType); sampleType != "" {
+		builder.WriteString("- Sample Type: ")
+		builder.WriteString(sampleType)
+		builder.WriteString("\n")
+	}
+	if manifest.SuggestedSourceConfidence > 0 {
+		builder.WriteString("- Source Confidence: ")
+		builder.WriteString(fmt.Sprintf("%.2f", manifest.SuggestedSourceConfidence))
+		builder.WriteString("\n")
+	}
+	if len(manifest.SuggestedLabels) > 0 {
+		builder.WriteString("- Labels: ")
+		builder.WriteString(strings.Join(manifest.SuggestedLabels, ", "))
+		builder.WriteString("\n")
+	}
+	if len(manifest.SuggestedTargetTypes) > 0 {
+		builder.WriteString("- Target Types: ")
+		builder.WriteString(strings.Join(manifest.SuggestedTargetTypes, ", "))
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n## Article\n\n")
+	builder.WriteString(urlPreviewArticleBeginMarker)
+	builder.WriteString("\n")
+	builder.WriteString(strings.TrimSpace(preview.Content))
+	builder.WriteString("\n")
+	builder.WriteString(urlPreviewArticleEndMarker)
+	builder.WriteString("\n")
+	return builder.String()
+}
+
+func buildURLPreviewManifest(preview *URLFetchPreview) urlPreviewManifest {
+	suggestion := resolveURLPreviewSuggestion(preview)
+	return urlPreviewManifest{
+		Kind:                      urlPreviewFormatKind,
+		Version:                   urlPreviewFormatVersion,
+		Title:                     strings.TrimSpace(preview.Title),
+		SourceURL:                 strings.TrimSpace(preview.URL),
+		FinalURL:                  strings.TrimSpace(preview.FinalURL),
+		FetchedAt:                 strings.TrimSpace(preview.FetchedAt),
+		ContentType:               strings.TrimSpace(preview.ContentType),
+		Paragraphs:                preview.Paragraphs,
+		QualityScore:              preview.QualityScore,
+		Warnings:                  append([]string(nil), preview.Warnings...),
+		SuggestedSampleType:       suggestion.SampleType,
+		SuggestedSourceConfidence: suggestion.SourceConfidence,
+		SuggestedLabels:           append([]string(nil), suggestion.Labels...),
+		SuggestedTargetTypes:      append([]string(nil), suggestion.TargetTypes...),
+	}
+}
+
+func resolveURLPreviewSuggestion(preview *URLFetchPreview) urlPreviewSuggestion {
+	base := suggestURLPreviewMetadata(preview)
+	if preview == nil {
+		return base
+	}
+
+	resolved := urlPreviewSuggestion{
+		SampleType:       strings.TrimSpace(preview.SuggestedSampleType),
+		SourceConfidence: clampURLPreviewConfidence(preview.SuggestedSourceConfidence),
+		Labels:           normalizeURLPreviewSuggestionTokens(preview.SuggestedLabels...),
+		TargetTypes:      normalizeURLPreviewSuggestionTokens(preview.SuggestedTargetTypes...),
+	}
+	if resolved.SampleType == "" {
+		resolved.SampleType = base.SampleType
+	}
+	if resolved.SourceConfidence == 0 {
+		resolved.SourceConfidence = base.SourceConfidence
+	}
+	if len(resolved.Labels) == 0 {
+		resolved.Labels = base.Labels
+	}
+	if len(resolved.TargetTypes) == 0 {
+		resolved.TargetTypes = base.TargetTypes
+	}
+	return resolved
+}
+
+func suggestURLPreviewMetadata(preview *URLFetchPreview) urlPreviewSuggestion {
+	suggestion := urlPreviewSuggestion{
+		SampleType: "public-reference",
+		Labels:     []string{"url-preview", "external-reference", "web-article"},
+		TargetTypes: []string{
+			"url",
+			"web",
+		},
+	}
+	if preview == nil {
+		suggestion.SourceConfidence = 0.55
+		return suggestion
+	}
+
+	combined := strings.ToLower(strings.Join([]string{
+		strings.TrimSpace(preview.Title),
+		strings.TrimSpace(preview.Content),
+		strings.TrimSpace(preview.FinalURL),
+		strings.TrimSpace(preview.URL),
+	}, "\n"))
+
+	securitySignal := urlPreviewContainsAny(combined,
+		"vulnerability", "漏洞", "渗透", "security", "攻防", "poc", "writeup", "exploit", "cve", "bypass", "复现",
+	)
+	if securitySignal {
+		suggestion.Labels = append(suggestion.Labels, "security-reference")
+	}
+	if urlPreviewContainsAny(combined, "writeup", "渗透", "复现", "实战", "poc", "walkthrough") {
+		suggestion.Labels = append(suggestion.Labels, "pentest-writeup")
+	}
+	if urlPreviewContainsAny(combined, "auth", "authentication", "登录", "认证", "jwt", "token", "session", "oauth", "sso") {
+		suggestion.Labels = append(suggestion.Labels, "auth")
+	}
+	if urlPreviewContainsAny(combined, "access control", "privilege", "权限", "越权", "admin", "idor") {
+		suggestion.Labels = append(suggestion.Labels, "access-control")
+	}
+	if urlPreviewContainsAny(combined, "sqli", "sql injection", "sql注入", "联合注入", "布尔注入") {
+		suggestion.Labels = append(suggestion.Labels, "sqli")
+	}
+	if urlPreviewContainsAny(combined, "xss", "cross site scripting", "跨站") {
+		suggestion.Labels = append(suggestion.Labels, "xss")
+	}
+	if urlPreviewContainsAny(combined, "ssrf", "服务端请求伪造") {
+		suggestion.Labels = append(suggestion.Labels, "ssrf")
+	}
+	if urlPreviewContainsAny(combined, "rce", "remote code execution", "命令执行", "代码执行", "远程执行") {
+		suggestion.Labels = append(suggestion.Labels, "rce")
+	}
+	if urlPreviewContainsAny(combined, "waf", "绕过", "bypass") {
+		suggestion.Labels = append(suggestion.Labels, "waf-bypass")
+	}
+	if urlPreviewContainsAny(combined, "upload", "文件上传") {
+		suggestion.Labels = append(suggestion.Labels, "file-upload")
+	}
+	if urlPreviewContainsAny(combined, "lfi", "path traversal", "目录遍历", "文件包含") {
+		suggestion.Labels = append(suggestion.Labels, "path-traversal")
+	}
+
+	if urlPreviewContainsAny(combined, "app", "android", "ios", "apk", "ipa", "小程序") {
+		suggestion.TargetTypes = append(suggestion.TargetTypes, "app")
+		suggestion.Labels = append(suggestion.Labels, "app-security")
+	}
+	if urlPreviewContainsAny(combined, "api", "graphql", "rest") {
+		suggestion.TargetTypes = append(suggestion.TargetTypes, "api")
+	}
+
+	quality := preview.QualityScore
+	if quality < 0 {
+		quality = 0
+	}
+	if quality > 100 {
+		quality = 100
+	}
+
+	confidence := 0.42 + (float64(quality) / 350.0)
+	if preview.Paragraphs >= 6 {
+		confidence += 0.04
+	}
+	if preview.Paragraphs >= 12 {
+		confidence += 0.04
+	}
+	if securitySignal {
+		confidence += 0.03
+	}
+	confidence -= float64(len(preview.Warnings)) * 0.04
+	if confidence < 0.35 {
+		confidence = 0.35
+	}
+	suggestion.SourceConfidence = clampURLPreviewConfidence(confidence)
+	suggestion.Labels = normalizeURLPreviewSuggestionTokens(suggestion.Labels...)
+	suggestion.TargetTypes = normalizeURLPreviewSuggestionTokens(suggestion.TargetTypes...)
+	return suggestion
+}
+
+func parseURLPreviewMarkdown(markdown string) (*parsedURLPreview, error) {
+	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
+	markdown = strings.TrimSpace(markdown)
+	if markdown == "" {
+		return nil, fmt.Errorf("preview file is empty")
+	}
+
+	var manifest urlPreviewManifest
+	if metaJSON, ok := extractURLPreviewMetaJSON(markdown); ok {
+		if err := json.Unmarshal([]byte(metaJSON), &manifest); err != nil {
+			return nil, fmt.Errorf("failed to parse preview metadata: %w", err)
+		}
+		if strings.TrimSpace(manifest.Kind) != "" && strings.TrimSpace(manifest.Kind) != urlPreviewFormatKind {
+			return nil, fmt.Errorf("unsupported preview kind: %s", manifest.Kind)
+		}
+	}
+
+	title := extractURLPreviewTitle(markdown)
+	if title == "" {
+		title = strings.TrimSpace(manifest.Title)
+	}
+
+	readVisibleURLPreviewMetadata(markdown, &manifest)
+	applyURLPreviewSuggestedOverrides(markdown, &manifest)
+
+	content, ok := extractURLPreviewArticleContent(markdown)
+	if !ok {
+		return nil, fmt.Errorf("not a generated osmedeus url preview: missing article section")
+	}
+	content = normalizeContent(content)
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("preview article content is empty")
+	}
+
+	if strings.TrimSpace(manifest.SourceURL) == "" {
+		return nil, fmt.Errorf("not a generated osmedeus url preview: missing source url")
+	}
+	if strings.TrimSpace(title) == "" {
+		title = strings.TrimSpace(manifest.SourceURL)
+	}
+
+	manifest.SourceURL = strings.TrimSpace(manifest.SourceURL)
+	manifest.FinalURL = strings.TrimSpace(manifest.FinalURL)
+	manifest.Title = title
+	manifest.SuggestedSampleType = strings.TrimSpace(manifest.SuggestedSampleType)
+	manifest.SuggestedLabels = normalizeURLPreviewSuggestionTokens(manifest.SuggestedLabels...)
+	manifest.SuggestedTargetTypes = normalizeURLPreviewSuggestionTokens(manifest.SuggestedTargetTypes...)
+	manifest.SuggestedSourceConfidence = clampURLPreviewConfidence(manifest.SuggestedSourceConfidence)
+
+	suggestion := resolveURLPreviewSuggestion(&URLFetchPreview{
+		URL:                       manifest.SourceURL,
+		FinalURL:                  manifest.FinalURL,
+		Title:                     title,
+		Content:                   content,
+		ContentType:               manifest.ContentType,
+		FetchedAt:                 manifest.FetchedAt,
+		Paragraphs:                manifest.Paragraphs,
+		QualityScore:              manifest.QualityScore,
+		Warnings:                  append([]string(nil), manifest.Warnings...),
+		SuggestedSampleType:       manifest.SuggestedSampleType,
+		SuggestedSourceConfidence: manifest.SuggestedSourceConfidence,
+		SuggestedLabels:           append([]string(nil), manifest.SuggestedLabels...),
+		SuggestedTargetTypes:      append([]string(nil), manifest.SuggestedTargetTypes...),
+	})
+	manifest.SuggestedSampleType = suggestion.SampleType
+	manifest.SuggestedSourceConfidence = suggestion.SourceConfidence
+	manifest.SuggestedLabels = suggestion.Labels
+	manifest.SuggestedTargetTypes = suggestion.TargetTypes
+
+	return &parsedURLPreview{
+		Title:    title,
+		Content:  content,
+		Manifest: manifest,
+	}, nil
+}
+
+func extractURLPreviewMetaJSON(markdown string) (string, bool) {
+	start := strings.Index(markdown, urlPreviewMetaBeginMarker)
+	if start < 0 {
+		return "", false
+	}
+	start += len(urlPreviewMetaBeginMarker)
+	end := strings.Index(markdown[start:], urlPreviewMetaEndMarker)
+	if end < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(markdown[start : start+end]), true
+}
+
+func extractURLPreviewTitle(markdown string) string {
+	for _, line := range strings.Split(markdown, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "# "))
+		}
+	}
+	return ""
+}
+
+func readVisibleURLPreviewMetadata(markdown string, manifest *urlPreviewManifest) {
+	if manifest == nil {
+		return
+	}
+
+	lines := strings.Split(markdown, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "## Suggested Metadata" || line == "## Article" {
+			break
+		}
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		key, value, ok := parseURLPreviewKeyValueLine(line)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "source url":
+			if manifest.SourceURL == "" {
+				manifest.SourceURL = value
+			}
+		case "final url":
+			if manifest.FinalURL == "" {
+				manifest.FinalURL = value
+			}
+		case "fetched at":
+			if manifest.FetchedAt == "" {
+				manifest.FetchedAt = value
+			}
+		case "content type":
+			if manifest.ContentType == "" {
+				manifest.ContentType = value
+			}
+		case "paragraphs":
+			if manifest.Paragraphs == 0 {
+				manifest.Paragraphs = parseURLPreviewInt(value)
+			}
+		case "quality score":
+			if manifest.QualityScore == 0 {
+				manifest.QualityScore = parseURLPreviewInt(value)
+			}
+		case "warnings":
+			if len(manifest.Warnings) == 0 {
+				manifest.Warnings = splitURLPreviewWarnings(value)
+			}
+		}
+	}
+}
+
+func applyURLPreviewSuggestedOverrides(markdown string, manifest *urlPreviewManifest) {
+	if manifest == nil {
+		return
+	}
+	section := extractURLPreviewSuggestedSection(markdown)
+	if strings.TrimSpace(section) == "" {
+		return
+	}
+
+	for _, line := range strings.Split(section, "\n") {
+		key, value, ok := parseURLPreviewKeyValueLine(strings.TrimSpace(line))
+		if !ok {
+			continue
+		}
+		switch key {
+		case "sample type":
+			if strings.TrimSpace(value) != "" {
+				manifest.SuggestedSampleType = strings.TrimSpace(value)
+			}
+		case "source confidence":
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
+				manifest.SuggestedSourceConfidence = clampURLPreviewConfidence(parsed)
+			}
+		case "labels":
+			manifest.SuggestedLabels = normalizeURLPreviewSuggestionTokens(splitURLPreviewCSV(value)...)
+		case "target types":
+			manifest.SuggestedTargetTypes = normalizeURLPreviewSuggestionTokens(splitURLPreviewCSV(value)...)
+		}
+	}
+}
+
+func extractURLPreviewSuggestedSection(markdown string) string {
+	lines := strings.Split(markdown, "\n")
+	inSection := false
+	var collected []string
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "## Suggested Metadata" {
+			inSection = true
+			continue
+		}
+		if inSection && strings.HasPrefix(line, "## ") {
+			break
+		}
+		if inSection {
+			collected = append(collected, rawLine)
+		}
+	}
+	return strings.TrimSpace(strings.Join(collected, "\n"))
+}
+
+func extractURLPreviewArticleContent(markdown string) (string, bool) {
+	if content, ok := extractURLPreviewArticleContentFromMarkers(markdown); ok {
+		return content, true
+	}
+	return extractURLPreviewLegacyArticleContent(markdown)
+}
+
+func extractURLPreviewArticleContentFromMarkers(markdown string) (string, bool) {
+	start := strings.Index(markdown, urlPreviewArticleBeginMarker)
+	if start < 0 {
+		return "", false
+	}
+	start += len(urlPreviewArticleBeginMarker)
+	end := strings.Index(markdown[start:], urlPreviewArticleEndMarker)
+	if end < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(markdown[start : start+end]), true
+}
+
+func extractURLPreviewLegacyArticleContent(markdown string) (string, bool) {
+	lines := strings.Split(markdown, "\n")
+	inArticle := false
+	var collected []string
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "## Article" {
+			inArticle = true
+			continue
+		}
+		if inArticle {
+			collected = append(collected, rawLine)
+		}
+	}
+	if !inArticle {
+		return "", false
+	}
+	return strings.TrimSpace(strings.Join(collected, "\n")), true
+}
+
+func parseURLPreviewKeyValueLine(line string) (string, string, bool) {
+	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+	if line == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return strings.ToLower(strings.TrimSpace(parts[0])), strings.TrimSpace(parts[1]), true
+}
+
+func parseURLPreviewInt(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func splitURLPreviewWarnings(value string) []string {
+	parts := strings.Split(strings.TrimSpace(value), ";")
+	results := make([]string, 0, len(parts))
+	for _, item := range parts {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			results = append(results, item)
+		}
+	}
+	return results
+}
+
+func splitURLPreviewCSV(value string) []string {
+	parts := strings.Split(strings.TrimSpace(value), ",")
+	results := make([]string, 0, len(parts))
+	for _, item := range parts {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			results = append(results, item)
+		}
+	}
+	return results
+}
+
+func urlPreviewContainsAny(input string, needles ...string) bool {
+	for _, needle := range needles {
+		if needle != "" && strings.Contains(input, strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeURLPreviewSuggestionTokens(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	results := make([]string, 0, len(values))
+	for _, value := range values {
+		token := normalizeURLPreviewSuggestionToken(value)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		results = append(results, token)
+	}
+	return results
+}
+
+func normalizeURLPreviewSuggestionToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			lastDash = false
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		default:
+			if lastDash {
+				continue
+			}
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func clampURLPreviewConfidence(value float64) float64 {
+	if value < 0 {
+		value = 0
+	}
+	if value > 1 {
+		value = 1
+	}
+	return float64(int((value*100)+0.5)) / 100
+}
+
+func buildURLPreviewRetrievalFingerprint(sourcePath, title, content string) string {
+	return hashString(strings.Join([]string{
+		"url-preview",
+		normalizeURLPreviewText(sourcePath),
+		normalizeURLPreviewText(title),
+		hashString(normalizeContent(content)),
+	}, "::"))
 }
 
 func normalizeHTMLText(input string) string {

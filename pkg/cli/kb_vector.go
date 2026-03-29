@@ -272,9 +272,26 @@ func runKBVectorDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Path:                       %s\n", report.Path)
 	fmt.Printf("Workspace:                  %s\n", formatKnowledgeWorkspaceLabel(report.Workspace))
+	fmt.Printf("Vector enabled:             %t\n", report.VectorEnabled)
+	fmt.Printf("DB path exists/writable:    %t / %t\n", report.DBPathExists, report.DBPathWritable)
 	fmt.Printf("Provider/Model:             %s / %s\n", report.Provider, report.Model)
+	fmt.Printf("Provider configured/live:   %t / %t\n", report.ProviderConfigured, report.ProviderAvailable)
+	if strings.TrimSpace(report.ProviderEndpoint) != "" {
+		fmt.Printf("Provider endpoint:          %s\n", report.ProviderEndpoint)
+	}
+	if len(report.AvailableProviders) > 0 {
+		fmt.Printf("Configured providers:       %s\n", strings.Join(report.AvailableProviders, ", "))
+	}
+	if len(report.AvailableProviderModels) > 0 {
+		fmt.Printf("Configured provider-models: %s\n", strings.Join(report.AvailableProviderModels, ", "))
+	}
+	fmt.Printf("Semantic status:            %s\n", report.SemanticStatus)
+	if strings.TrimSpace(report.SemanticStatusMessage) != "" {
+		fmt.Printf("Status reason:              %s\n", report.SemanticStatusMessage)
+	}
 	fmt.Printf("Main documents/chunks:      %d / %d\n", report.MainDocuments, report.MainChunks)
 	fmt.Printf("Vector docs/chunks/embed:   %d / %d / %d\n", report.VectorDocuments, report.VectorChunks, report.VectorEmbeddings)
+	fmt.Printf("Selected embeddings:        %d\n", report.SelectedEmbeddings)
 	fmt.Printf("Missing documents:          %d\n", report.MissingDocuments)
 	fmt.Printf("Stale documents:            %d\n", report.StaleDocuments)
 	fmt.Printf("Embedding mismatches:       %d\n", report.DocumentsMissingEmbeddings)
@@ -283,7 +300,7 @@ func runKBVectorDoctor(cmd *cobra.Command, args []string) error {
 		terminal.NewPrinter().Success("Vector knowledge DB is healthy")
 		return nil
 	}
-	terminal.NewPrinter().Warning("Vector knowledge DB has consistency issues")
+	terminal.NewPrinter().Warning("Vector knowledge DB is not fully ready")
 	for _, issue := range report.Issues {
 		fmt.Printf("- [%s] %s", issue.Type, issue.Message)
 		if issue.SourcePath != "" {

@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -92,7 +93,11 @@ database:
 # =============================================================================
 # Independent Vector Knowledge DB
 # =============================================================================
-# Stores vectorized knowledge in a standalone SQLite file for reusable semantic search
+# Stores vectorized knowledge in a standalone SQLite file for reusable semantic search.
+# If default_provider/default_model are left empty, Osmedeus will fall back to
+# embeddings_config.provider and that provider's configured model.
+# There is no separate semantic_search_config block; AI semantic retrieval is
+# controlled by workflows plus knowledge_vector/embeddings_config.
 knowledge_vector:
   # Enable the independent vector knowledge DB
   enabled: true
@@ -101,11 +106,11 @@ knowledge_vector:
   db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
 
   # Default embedding provider/model used for indexing and search
-  default_provider: openai
-  default_model: text-embedding-3-small
+  default_provider: ""
+  default_model: ""
 
   # Informational settings for current implementation
-  dimension: 1536
+  dimension: 1024
   metric: cosine
 
   # Hybrid retrieval tuning
@@ -378,6 +383,15 @@ llm_config:
   # Maximum number of retries for failed requests
   max_retries: 3
 
+  # Delay between retries
+  retry_delay: 1s
+
+  # Enable exponential backoff for retries
+  retry_backoff: true
+
+  # Delay between outbound requests (useful for embedding rate limits)
+  request_delay: 2s
+
   # Timeout for API requests
   timeout: 120s
 
@@ -392,6 +406,48 @@ llm_config:
 
   # Custom headers for API requests
   custom_headers: ""
+
+# =============================================================================
+# Embeddings Configuration (Optional)
+# =============================================================================
+# Dedicated embeddings provider settings for vectorkb / semantic KB indexing.
+# This is separate from llm_config so chat models and embedding models can be
+# configured independently.
+embeddings_config:
+  enabled: false
+
+  # Embeddings provider: "jina", "openai", "azure", "ollama"
+  provider: ""
+
+  # Jina AI example
+  jina:
+    api_url: "https://api.jina.ai/v1/embeddings"
+    model: "jina-embeddings-v3"
+    api_key: ""
+
+  # OpenAI-compatible embeddings example
+  openai:
+    api_url: "https://api.openai.com/v1/embeddings"
+    model: "text-embedding-3-small"
+    api_key: ""
+
+  # Azure OpenAI embeddings example
+  azure:
+    api_url: ""
+    model: ""
+    api_key: ""
+
+  # Ollama local embeddings example
+  ollama:
+    api_url: "http://localhost:11434/api/embeddings"
+    model: "nomic-embed-text"
+    api_key: ""
+
+  batch_size: 32
+  max_input_length: 8000
+  dimension: 1024
+  min_relevance_score: 0.7
+  max_search_results: 10
 `)
 
 // generateRandomString generates a random alphanumeric string of the given length
@@ -442,6 +498,7 @@ type Config struct {
 	Environments    EnvironmentConfig     `yaml:"environments"`
 	Database        DatabaseConfig        `yaml:"database"`
 	KnowledgeVector KnowledgeVectorConfig `yaml:"knowledge_vector"`
+	Embeddings      EmbeddingsConfig      `yaml:"embeddings_config"`
 	Server          ServerConfig          `yaml:"server"`
 	ScanTactic      ScanTacticConfig      `yaml:"scan_tactic"`
 	Redis           RedisConfig           `yaml:"redis"`
@@ -505,6 +562,28 @@ type KnowledgeVectorConfig struct {
 	AutoIndexOnLearn  *bool   `yaml:"auto_index_on_learn,omitempty"`
 	BatchSize         int     `yaml:"batch_size"`
 	MaxIndexingChunks int     `yaml:"max_indexing_chunks"`
+}
+
+// EmbeddingsProviderConfig holds endpoint details for a dedicated embeddings provider.
+type EmbeddingsProviderConfig struct {
+	APIURL string `yaml:"api_url"`
+	Model  string `yaml:"model"`
+	APIKey string `yaml:"api_key"`
+}
+
+// EmbeddingsConfig holds optional dedicated embeddings configuration for vectorkb.
+type EmbeddingsConfig struct {
+	Enabled           *bool                    `yaml:"enabled,omitempty"`
+	Provider          string                   `yaml:"provider"`
+	Jina              EmbeddingsProviderConfig `yaml:"jina"`
+	OpenAI            EmbeddingsProviderConfig `yaml:"openai"`
+	Azure             EmbeddingsProviderConfig `yaml:"azure"`
+	Ollama            EmbeddingsProviderConfig `yaml:"ollama"`
+	BatchSize         int                      `yaml:"batch_size"`
+	MaxInputLength    int                      `yaml:"max_input_length"`
+	Dimension         int                      `yaml:"dimension"`
+	MinRelevanceScore float64                  `yaml:"min_relevance_score"`
+	MaxSearchResults  int                      `yaml:"max_search_results"`
 }
 
 // ServerConfig holds API server settings
@@ -823,6 +902,9 @@ type LLMConfig struct {
 	TopP                 float64       `yaml:"top_p"`                  // Top-p sampling
 	N                    int           `yaml:"n"`                      // Number of completions to generate
 	MaxRetries           int           `yaml:"max_retries"`            // Maximum number of retries for failed requests
+	RetryDelay           string        `yaml:"retry_delay"`            // Delay between retries (Go duration format)
+	RetryBackoff         bool          `yaml:"retry_backoff"`          // Enable exponential backoff between retries
+	RequestDelay         string        `yaml:"request_delay"`          // Delay between outbound requests (Go duration format)
 	Timeout              string        `yaml:"timeout"`                // Timeout for API requests
 	Stream               bool          `yaml:"stream"`                 // Enable streaming responses
 	StructuredJSONFormat bool          `yaml:"structured_json_format"` // Enable structured JSON output format
@@ -867,12 +949,22 @@ func LoadFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 
-	return ParseConfig(data)
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ResolvePaths()
+	return cfg, nil
 }
 
 // LoadFromBytes loads configuration from raw YAML bytes
 func LoadFromBytes(data []byte) (*Config, error) {
-	return ParseConfig(data)
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ResolvePaths()
+	return cfg, nil
 }
 
 // ResolvePaths resolves template variables in environment paths.
@@ -972,6 +1064,60 @@ func (c *Config) IsKnowledgeVectorEnabled() bool {
 	return *c.KnowledgeVector.Enabled
 }
 
+// IsEmbeddingsConfigEnabled returns true if the dedicated embeddings config should be used.
+func (c *Config) IsEmbeddingsConfigEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.Embeddings.Enabled != nil {
+		return *c.Embeddings.Enabled
+	}
+	if strings.TrimSpace(c.Embeddings.Provider) != "" {
+		return true
+	}
+	for _, name := range []string{"jina", "openai", "azure", "ollama"} {
+		if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
+			if strings.TrimSpace(provider.APIURL) != "" || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIKey) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// GetKnowledgeVectorProvider returns the configured vector provider, falling back to embeddings_config.provider.
+func (c *Config) GetKnowledgeVectorProvider() string {
+	if c == nil {
+		return ""
+	}
+	if provider := strings.TrimSpace(c.KnowledgeVector.DefaultProvider); provider != "" {
+		return provider
+	}
+	if c.IsEmbeddingsConfigEnabled() {
+		return strings.TrimSpace(c.Embeddings.Provider)
+	}
+	return ""
+}
+
+// GetKnowledgeVectorModel returns the configured vector model, falling back to embeddings_config or provider defaults.
+func (c *Config) GetKnowledgeVectorModel(provider string) string {
+	if c == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(c.KnowledgeVector.DefaultModel); model != "" {
+		return model
+	}
+	resolvedProvider := strings.TrimSpace(provider)
+	if resolvedProvider == "" {
+		resolvedProvider = c.GetKnowledgeVectorProvider()
+	}
+	spec, _, err := c.ResolveEmbeddingProvider(resolvedProvider)
+	if err != nil || spec == nil {
+		return ""
+	}
+	return strings.TrimSpace(spec.Model)
+}
+
 // IsKnowledgeVectorAutoIndexOnIngest returns true if ingest should auto-index into vector DB.
 func (c *Config) IsKnowledgeVectorAutoIndexOnIngest() bool {
 	if c.KnowledgeVector.AutoIndexOnIngest == nil {
@@ -999,6 +1145,9 @@ func (c *Config) GetKnowledgeVectorTopK() int {
 // GetKnowledgeVectorBatchSize returns the configured indexing batch size with a safe default.
 func (c *Config) GetKnowledgeVectorBatchSize() int {
 	if c.KnowledgeVector.BatchSize <= 0 {
+		if c.Embeddings.BatchSize > 0 {
+			return c.Embeddings.BatchSize
+		}
 		return 32
 	}
 	return c.KnowledgeVector.BatchSize
@@ -1019,6 +1168,146 @@ func (c *Config) GetKnowledgeVectorHybridWeights() (float64, float64) {
 		return 0.7, 0.3
 	}
 	return hybrid / total, keyword / total
+}
+
+// ResolveEmbeddingProvider resolves an embedding provider from embeddings_config first, then llm_config.llm_providers.
+// The returned source is either "embeddings_config" or "llm_config.llm_providers".
+func (c *Config) ResolveEmbeddingProvider(providerName string) (*LLMProvider, string, error) {
+	name := strings.TrimSpace(providerName)
+	if name == "" {
+		return nil, "", fmt.Errorf("provider is required")
+	}
+
+	if c.IsEmbeddingsConfigEnabled() {
+		if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
+			spec := &LLMProvider{
+				Provider:  name,
+				BaseURL:   strings.TrimSpace(provider.APIURL),
+				AuthToken: strings.TrimSpace(provider.APIKey),
+				Model:     strings.TrimSpace(provider.Model),
+			}
+			if spec.BaseURL != "" || spec.Model != "" || spec.AuthToken != "" {
+				return spec, "embeddings_config", nil
+			}
+		}
+	}
+
+	var match *LLMProvider
+	for i := range c.LLM.LLMProviders {
+		provider := &c.LLM.LLMProviders[i]
+		if !strings.EqualFold(strings.TrimSpace(provider.Provider), name) {
+			continue
+		}
+		if match != nil {
+			return nil, "", fmt.Errorf("multiple LLM providers match %q; provider names must be unique for embeddings", name)
+		}
+		match = provider
+	}
+	if match == nil {
+		return nil, "", fmt.Errorf("embedding provider %q is not configured (available: %s)", name, strings.Join(c.ListEmbeddingProviders(), ", "))
+	}
+	return match, "llm_config.llm_providers", nil
+}
+
+// ListEmbeddingProviders returns the unique provider names available for embedding generation.
+func (c *Config) ListEmbeddingProviders() []string {
+	if c == nil {
+		return []string{"none"}
+	}
+
+	seen := make(map[string]struct{})
+	results := make([]string, 0, len(c.LLM.LLMProviders)+4)
+	if c.IsEmbeddingsConfigEnabled() {
+		for _, name := range []string{"jina", "openai", "azure", "ollama"} {
+			if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
+				if strings.TrimSpace(provider.APIURL) == "" && strings.TrimSpace(provider.Model) == "" && strings.TrimSpace(provider.APIKey) == "" {
+					continue
+				}
+				if _, ok := seen[name]; ok {
+					continue
+				}
+				seen[name] = struct{}{}
+				results = append(results, name)
+			}
+		}
+	}
+	for _, provider := range c.LLM.LLMProviders {
+		name := strings.TrimSpace(provider.Provider)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		results = append(results, name)
+	}
+	sort.Strings(results)
+	if len(results) == 0 {
+		return []string{"none"}
+	}
+	return results
+}
+
+// ListEmbeddingProviderModels returns unique provider:model combinations available for embeddings.
+func (c *Config) ListEmbeddingProviderModels() []string {
+	if c == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	results := make([]string, 0, len(c.LLM.LLMProviders)+4)
+	add := func(name, model string) {
+		name = strings.TrimSpace(name)
+		model = strings.TrimSpace(model)
+		if name == "" {
+			return
+		}
+		key := name
+		if model != "" {
+			key = name + ":" + model
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		results = append(results, key)
+	}
+
+	if c.IsEmbeddingsConfigEnabled() {
+		for _, name := range []string{"jina", "openai", "azure", "ollama"} {
+			if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
+				if strings.TrimSpace(provider.APIURL) == "" && strings.TrimSpace(provider.Model) == "" && strings.TrimSpace(provider.APIKey) == "" {
+					continue
+				}
+				add(name, provider.Model)
+			}
+		}
+	}
+	for _, provider := range c.LLM.LLMProviders {
+		add(provider.Provider, provider.Model)
+	}
+
+	sort.Strings(results)
+	return results
+}
+
+func (c *Config) getEmbeddingsProviderConfig(name string) *EmbeddingsProviderConfig {
+	if c == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "jina":
+		return &c.Embeddings.Jina
+	case "openai":
+		return &c.Embeddings.OpenAI
+	case "azure":
+		return &c.Embeddings.Azure
+	case "ollama":
+		return &c.Embeddings.Ollama
+	default:
+		return nil
+	}
 }
 
 // IsSQLite returns true if the database engine is SQLite
@@ -1366,6 +1655,9 @@ func DefaultConfig() *Config {
 			TopP:                 0.9,
 			N:                    1,
 			MaxRetries:           3,
+			RetryDelay:           "1s",
+			RetryBackoff:         true,
+			RequestDelay:         "2s",
 			Timeout:              "120s",
 			Stream:               false,
 			StructuredJSONFormat: false,

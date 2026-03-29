@@ -135,16 +135,29 @@ type DoctorReport struct {
 	Workspace                  string        `json:"workspace,omitempty"`
 	Provider                   string        `json:"provider"`
 	Model                      string        `json:"model"`
+	VectorEnabled              bool          `json:"vector_enabled"`
+	DBPathExists               bool          `json:"db_path_exists"`
+	DBPathWritable             bool          `json:"db_path_writable"`
+	ProviderConfigured         bool          `json:"provider_configured"`
+	ModelConfigured            bool          `json:"model_configured"`
+	ProviderAvailable          bool          `json:"provider_available"`
+	ProviderEndpoint           string        `json:"provider_endpoint,omitempty"`
+	AvailableProviders         []string      `json:"available_providers,omitempty"`
+	AvailableProviderModels    []string      `json:"available_provider_models,omitempty"`
 	MainDocuments              int           `json:"main_documents"`
 	MainChunks                 int           `json:"main_chunks"`
 	VectorDocuments            int           `json:"vector_documents"`
 	VectorChunks               int           `json:"vector_chunks"`
 	VectorEmbeddings           int           `json:"vector_embeddings"`
+	SelectedEmbeddings         int           `json:"selected_embeddings"`
 	MissingDocuments           int           `json:"missing_documents"`
 	StaleDocuments             int           `json:"stale_documents"`
 	DocumentsMissingEmbeddings int           `json:"documents_missing_embeddings"`
 	OrphanChunks               int           `json:"orphan_chunks"`
 	OrphanEmbeddings           int           `json:"orphan_embeddings"`
+	SemanticSearchReady        bool          `json:"semantic_search_ready"`
+	SemanticStatus             string        `json:"semantic_status"`
+	SemanticStatusMessage      string        `json:"semantic_status_message,omitempty"`
 	Healthy                    bool          `json:"healthy"`
 	Issues                     []DoctorIssue `json:"issues,omitempty"`
 }

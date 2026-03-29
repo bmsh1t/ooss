@@ -25,7 +25,7 @@ Built for both beginners and experts, it delivers powerful, composable automatio
 - **Declarative YAML Workflows** - Define pipelines with hooks, decision routing, module exclusion, and conditional branching across multiple runners (host, Docker, SSH)
 - **Distributed Execution** - Redis-based master-worker pattern with queue system, webhook triggers, and file sync across workers
 - **Rich Function Library** - 80+ utility functions including nmap integration, tmux sessions, SSH execution, TypeScript/Python scripting, SARIF parsing, and CDN/WAF classification
-- **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), search them from CLI/API, and synthesize scan findings back into reusable workspace/public knowledge layers
+- **Local Knowledge Base** - Ingest local documents (`pdf`, `txt`, `md`, `json`, `jsonl`, `html`, `epub`, `docx`, and more), fetch review-first webpage article previews with suggested metadata, search them from CLI/API, and synthesize scan findings back into reusable workspace/public knowledge layers
 - **Independent Vector Knowledge DB** - Store reusable semantic knowledge in a standalone `vector-kb.sqlite`, auto-index on `kb ingest` / `kb learn`, and let workflows query it directly
 - **Campaign Batch Operations** - Create grouped queued runs with shared strategy metadata, aggregated target status, failed-target rerun, and optional high-risk deep-scan escalation
 - **Vulnerability Lifecycle Center** - Manage vulnerabilities through `new`, `triaged`, `verified`, `false_positive`, `retest`, and `closed` states with AI verdicts, analyst notes, retest tasks, workspace risk boards, and evidence/status timelines
@@ -103,10 +103,14 @@ osmedeus worker queue run --concurrency 5              # Process queue
 
 # Local knowledge base
 osmedeus kb ingest --path ./notes -w example.com --recursive
+osmedeus kb fetch-url --url https://example.com/blog/post -o ./article-preview.md
+osmedeus kb fetch-url --url-file ./article-urls.txt --output-dir ./article-previews
+osmedeus kb ingest-preview --path ./article-preview.md -w example.com
 osmedeus kb search --query "jwt bypass" -w example.com
 osmedeus kb docs -w example.com
 osmedeus kb learn -w example.com
 osmedeus kb export -w example.com --output ./knowledge-index.txt
+osmedeus kb bridge-yakrag --path /path/to/mitre_attack_techniques.rag.gz --output ./mitre-attack-techniques.jsonl
 osmedeus kb vector index -w example.com
 osmedeus kb vector search --query "jwt bypass" -w example.com
 osmedeus kb vector stats
@@ -141,6 +145,11 @@ For Docker-free live regressions against a real local `osmedeus serve` / queue-w
 ```bash
 make test-regression-api-ai
 make test-regression-api-knowledge
+make test-regression-api-vector
+make test-regression-ai-workflow-smoke
+make test-regression-ai-semantic-vector-smoke
+make test-regression-scan-content-smoke
+make test-regression-superdomain-lite-smoke
 make test-regression-queue-live
 make test-regression-stable-core
 ```
@@ -151,11 +160,36 @@ make test-regression-stable-core
 - `make test-regression-api-knowledge`
   - verifies `knowledge ingest / documents / search / learn` plus workspace-to-public layered retrieval without requiring a vector provider
   - stores temporary artifacts under `/tmp/osm-api-knowledge-live`
+- `make test-regression-api-vector`
+  - verifies `knowledge vector index / stats / search` plus ingest/learn auto-index with a local mock embeddings endpoint
+  - stores temporary artifacts under `/tmp/osm-api-vector-live`
+- `make test-regression-ai-workflow-smoke`
+  - runs a controlled current-source superdomain-style follow-up chain: `intelligent-analysis -> apply-decision -> retest/operator fallback -> campaign create -> retest queue -> post-followup -> knowledge autolearn`
+  - validates that workflow-internal CLI calls stay bound to the active `base-folder` and `workflow-folder`
+  - stores temporary artifacts under `/tmp/osm-ai-workflow-smoke`
+- `make test-regression-ai-semantic-vector-smoke`
+  - runs a controlled provider-enabled semantic workflow chain against the current source `ai-semantic-search` and `ai-semantic-search-hybrid` fragments using a local mock embeddings endpoint
+  - verifies real `kb ingest`, vectorkb indexing for workspace/shared/global layers, clean `--json` CLI output under an explicit workflow folder, deterministic `enableSemanticAgent=false` execution, live KB hits in both vector and merged semantic artifacts, and stable scan-data fallback
+  - auto-selects the next free local embeddings mock port when the default regression port is already occupied
+  - stores temporary artifacts under `/tmp/osm-ai-semantic-vector-smoke`
+- `make test-regression-scan-content-smoke`
+  - runs the real current-source `scan-content` module against deterministic local mock `deparos`, `ffuf`, and `httpx` binaries
+  - verifies the deparos-success path does not double-run ffuf fallback, and the ffuf fallback path still feeds the downstream fingerprint/import stage
+  - stores temporary artifacts under `/tmp/osm-scan-content-smoke`
+- `make test-regression-superdomain-lite-smoke`
+  - runs the real current-source `superdomain-extensive-ai-lite` flow in a controlled workspace with seeded scan artifacts, live vectorkb retrieval, decision application, follow-up coordination, and knowledge auto-learning enabled
+  - verifies semantic search, decision artifacts, and KB writeback all stay aligned to the active `base-folder` and `workflow-folder`
+  - auto-selects the next free local embeddings mock port when the default regression port is already occupied
+  - stores temporary artifacts under `/tmp/osm-superdomain-lite-flow-smoke`
 - `make test-regression-queue-live`
   - verifies CLI queued runs, vulnerability retest queue consumption, and campaign deep-scan queue consumption against a real worker
   - stores temporary artifacts under `/tmp/osm-queue-live`
 - `make test-regression-stable-core`
-  - runs the core stable-release smoke path serially: superdomain workflow validation plus AI API, knowledge, and queue live regressions
+  - runs the core stable-release smoke path serially: superdomain workflow validation, support/common-module validation (`incremental-check`, `osint`, `scan-content`, `scan-backup`, `scan-vuln`, `url-gf`, `iis-shortname`, `04-http-probe`, `05-fingerprint`, `06-web-crawl`, `07-content-analysis`, `09-vuln-suite`, `10-report`), fragment validation (`do-ai-knowledge-autolearn`, `do-scan-content`), AI follow-up smoke, provider-enabled semantic workflow smoke, deterministic local `scan-content` smoke, controlled current-source `superdomain-extensive-ai-lite` flow smoke, controlled current-source `superdomain-extensive-ai-stable` flow smoke, deterministic local `vuln-suite` Nuclei smoke, AI API, knowledge, vectorkb, and queue live regressions
+  - verifies ACP-timeout fallback closure for vulnerability validation, attack-chain generation, attack-chain visualization, path planning, follow-up packaging, and knowledge auto-learning on the real current-source stable flow
+  - verifies the real `scan-content` workflow keeps deparos-first behavior, avoids redundant ffuf fallback after success, and still closes the fingerprint/import path when ffuf fallback is required
+  - verifies the real `09-vuln-suite` workflow produces a deterministic local Nuclei hit and report output, guarding against command-line regressions in the main Nuclei scan path
+  - keeps the mock embeddings regressions resilient to back-to-back runs by auto-selecting the next free local embeddings port when the default one is occupied
   - stores temporary artifacts under `/tmp/osm-stable-core-*`
 
 If `gotestsum` is noisy or fails to exit cleanly in your environment, you can bypass it with plain Go test entry points:
@@ -189,6 +223,34 @@ The practical storage layout is now split into two layers:
 - `pdf`
 - `pptx`, `xlsx`
 
+### Yakit `.rag/.rag.gz` bridge
+
+If you already imported a Yakit knowledge package into a local Yakit profile DB, Osmedeus can bridge that KB into an open `jsonl` or markdown export without reusing Yakit's private vector format directly.
+
+```bash
+# Auto-detect the local Yakit DB, inspect the package header, and export jsonl
+osmedeus kb bridge-yakrag \
+  --path /home/user/yakit-projects/projects/libs/mitre_attack_techniques.rag.gz \
+  --output ./mitre-attack-techniques.jsonl
+
+# Or export by explicit Yakit DB path and KB name into markdown
+osmedeus kb bridge-yakrag \
+  --db /home/user/yakit-projects/yakit-profile-plugin.db \
+  --kb-name "MITRE ATT&CK Techniques" \
+  --format md \
+  --output ./mitre-attack-techniques.md
+
+# Then ingest the bridged file back into Osmedeus
+osmedeus kb ingest --path ./mitre-attack-techniques.jsonl --workspace global
+```
+
+Notes:
+
+- This is a one-way bridge for already imported Yakit knowledge bases.
+- The command does not reuse Yakit's original embeddings or HNSW index.
+- Osmedeus will re-index the bridged text with your currently configured vector provider/model.
+- Use markdown output when the next step is `osmedeus kb ingest`; `jsonl` is better for interchange, but markdown chunks much better with the current KB splitter.
+
 ### Local dependencies
 
 - `docling`
@@ -198,10 +260,11 @@ The practical storage layout is now split into two layers:
 
 ### Optional dependencies
 
-- at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
+- either a dedicated `embeddings_config` provider, or at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
   - Enables vectorkb indexing/search and AI workflow semantic retrieval
 - a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model`
   - Keeps vectorkb index/search bound to the same provider/model pair unless you override them explicitly
+  - If left empty, Osmedeus now falls back to `embeddings_config.provider` and that provider's configured model
 
 ### Vector knowledge config
 
@@ -211,8 +274,8 @@ Add or verify this section in `~/osmedeus-base/osm-settings.yaml`:
 knowledge_vector:
   enabled: true
   db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
-  default_provider: openai
-  default_model: text-embedding-3-small
+  default_provider: ""
+  default_model: ""
   auto_index_on_ingest: true
   auto_index_on_learn: true
   top_k: 20
@@ -220,7 +283,23 @@ knowledge_vector:
   keyword_weight: 0.3
   batch_size: 32
   max_indexing_chunks: 5000
+
+embeddings_config:
+  enabled: true
+  provider: jina
+  jina:
+    api_url: "https://api.jina.ai/v1/embeddings"
+    model: "jina-embeddings-v5-text-small"
+    api_key: "${JINA_API_KEY}"
+
+llm_config:
+  max_retries: 3
+  retry_delay: 1s
+  retry_backoff: true
+  request_delay: 2s
 ```
+
+There is no separate `semantic_search_config` block anymore. AI semantic retrieval is now driven by workflow parameters plus `knowledge_vector` and `embeddings_config`.
 
 Reference files:
 
@@ -236,6 +315,20 @@ Reference files:
 osmedeus kb ingest --path /data/kb/books --workspace example.com --recursive
 osmedeus kb ingest --path /data/kb/playbook.pdf --workspace example.com
 ```
+
+If the source is a public article page, fetch it into a reviewable markdown file first:
+
+```bash
+osmedeus kb fetch-url --url https://example.com/blog/post --output ./article-preview.md
+osmedeus kb fetch-url --url-file ./article-urls.txt --output-dir ./article-previews
+osmedeus kb ingest-preview --path ./article-preview.md --workspace example.com
+```
+
+The preview file now includes a generated `Suggested Metadata` section plus a stable preview manifest, so you can trim the article body or edit labels/confidence before confirming it into the KB.
+
+If vectorkb auto-index is enabled but the embedding provider is not configured yet, the primary KB write still succeeds and the CLI/API return a warning instead of failing the whole ingest. Keyword search remains available; semantic search becomes available after a later successful reindex.
+
+`osmedeus kb vector doctor --json` now exposes `semantic_status`, `semantic_search_ready`, and `semantic_status_message` so you can distinguish configuration problems (`provider_not_configured`, `model_not_bound`, `provider_not_available`) from data problems such as `index_missing` or stale vector records.
 
 2. Verify the content is searchable:
 
@@ -284,6 +377,8 @@ maxKnowledgeChunks: 400
 osmedeus run -f superdomain-extensive-ai-hybrid -t example.com -P params.yaml
 ```
 
+This only changes semantic retrieval. Post-run `ai-knowledge-autolearn` now defaults to learning from the current target workspace (`knowledgeLearningWorkspace={{TargetSpace}}`), so shared retrieval corpora do not accidentally become the source-of-truth for new learned documents. Only override `knowledgeLearningWorkspace` if you intentionally want to synthesize knowledge from a different workspace.
+
 ### What happens inside the workflow
 
 - `kb export` turns stored knowledge chunks into a line-oriented corpus for retrieval
@@ -319,6 +414,9 @@ curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
 
 curl http://localhost:8002/osm/api/knowledge/vector/stats \
   -H "Authorization: Bearer $TOKEN"
+
+curl "http://localhost:8002/osm/api/knowledge/vector/doctor?workspace=example.com" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Recent Backend Additions
@@ -329,7 +427,8 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - Auto-learn scan results back into the knowledge base for later reuse
   - Maintain a standalone `vector-kb.sqlite` with direct CLI/API semantic search
   - Knowledge search now defaults to `workspace + public` layered recall when a workspace is provided
-  - Learned knowledge now preserves source confidence, sample type, target-type tags, and shared `public` storage
+  - Learned knowledge now preserves source confidence, sample type, target-type tags, shared `public` storage, stable cross-layer fingerprints, and age-aware ranking hints
+  - Default `/osm/api/workspaces` listing now overlays real asset-table counts when available, instead of trusting stale `workspaces.total_assets` blindly
 - **Campaign APIs**
   - `GET /osm/api/campaigns`
   - `POST /osm/api/campaigns`
@@ -375,11 +474,15 @@ curl http://localhost:8002/osm/api/knowledge/vector/stats \
   - Attack-chain ACP input is now pre-curated to prefer verified findings and exclude false-positive nodes from chain generation
 - **Verification snapshot**
   - Current source builds successfully with `make build`
+  - `make test-unit` and `make test-regression-stable-core` pass on the current source
   - focused handler tests now cover vulnerability evidence/timeline enrichment, attack-chain reverse linkage, and campaign attack-chain-aware deep-scan selection
   - focused workflow tests now cover queued `previous_followup_*` recovery across `ai-pre-scan-decision`, `ai-pre-scan-decision-acp`, `ai-apply-decision`, `ai-intelligent-analysis`, and `ai-retest-queue`
   - Local real-API regression passed for campaign, vulnerability, and attack-chain flows on a clean no-auth server instance
+  - controlled current-source `superdomain-extensive-ai-lite` flow smoke now passes with real semantic hits and KB auto-learn writeback
+  - controlled current-source `superdomain-extensive-ai-stable` flow smoke now passes with ACP fallback closure, persisted attack-chain visualization artifacts, follow-up packaging, and KB auto-learn writeback
+  - deterministic local `vuln-suite` smoke now passes with a real Nuclei match and report generated through the current workflow path
   - `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-lite`, and `ai-knowledge-autolearn` all pass workflow validation
-  - Remaining full-suite test blockers are environment-dependent: local socket listeners, usable `tmux`, and local `uv` execution support
+  - Remaining runtime gap is the full provider-backed superdomain chain on real scan tooling, beyond the controlled lite-flow smoke and current stable-core regression path
 
 ## Docker
 

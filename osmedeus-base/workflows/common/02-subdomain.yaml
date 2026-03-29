@@ -71,6 +71,9 @@ params:
     default: "{{ExternalConfigs}}/github_tokens.txt"
   - name: gitlabTokensFile
     default: "{{ExternalConfigs}}/gitlab_tokens.txt"
+  - name: subdomainExternalTimeout
+    default: "5m"
+    description: "Per-tool timeout for external subdomain enumerators"
 
   # 输出文件
   - name: subdomainFile
@@ -92,17 +95,6 @@ params:
 # DEPENDENCIES SECTION
 # -----------------------------------------------------------------------------
 dependencies:
-  commands:
-    - subfinder
-    - findomain
-    - curl
-    - jq
-    - github-subdomains
-    - gitlab-subdomains
-    - dnsx
-    - tlsx
-    - unfurl
-    - anew
   variables:
     - name: Target
       type: string
@@ -134,15 +126,18 @@ steps:
     log: "Creating output folders"
     functions:
       - 'create_folder("{{Output}}/subdomain/")'
+      - 'exec_cmd("printf \"%s\\n\" \"{{Target}}\" > {{subdomainFile}}")'
+      - 'exec_cmd(": > {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt && : > {{Output}}/subdomain/{{TargetSpace}}-amass.txt && : > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt && : > {{Output}}/subdomain/{{TargetSpace}}-findomain.txt && : > {{crtshFile}} && : > {{tlsFile}} && : > {{noerrorFile}} && : > {{recursivePassiveFile}} && : > {{githubSubsFile}} && : > {{gitlabSubsFile}}")'
 
   # ===========================================================================
   # Phase 1: Passive Subdomain Enumeration
   # ===========================================================================
   - name: subfinder-enum
     type: function
+    pre_condition: 'command_exists("subfinder")'
     log: "Running subfinder subdomain enumeration"
     functions:
-      - 'exec_cmd("subfinder -all -d {{Target}} -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt >/dev/null 2>&1")'
+      - 'exec_cmd("timeout --foreground -k 15s {{subdomainExternalTimeout}} subfinder -all -d {{Target}} -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt >/dev/null 2>&1 || true")'
     on_error:
       - action: continue
 
@@ -151,7 +146,7 @@ steps:
     pre_condition: "{{enableAmass}}"
     log: "Running amass subdomain enumeration (This may take a while)"
     functions:
-      - 'exec_cmd("amass enum -active -d {{Target}} -o {{Output}}/subdomain/{{TargetSpace}}-amass.txt >/dev/null 2>&1")'
+      - 'exec_cmd("timeout --foreground -k 15s {{subdomainExternalTimeout}} amass enum -active -d {{Target}} -o {{Output}}/subdomain/{{TargetSpace}}-amass.txt >/dev/null 2>&1 || true")'
     on_error:
       - action: continue
 
@@ -160,10 +155,11 @@ steps:
   # ===========================================================================
   - name: additional-sources
     type: function
+    pre_condition: 'command_exists("findomain") || command_exists("assetfinder")'
     log: "Running assetfinder and findomain"
     functions:
-      - 'exec_cmd("findomain -u {{Output}}/subdomain/{{TargetSpace}}-findomain.txt -t {{Target}} > /dev/null 2>&1")'
-      - 'exec_cmd("assetfinder -subs-only {{Target}} > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+      - 'exec_cmd("if command -v findomain >/dev/null 2>&1; then timeout --foreground -k 15s {{subdomainExternalTimeout}} findomain -u {{Output}}/subdomain/{{TargetSpace}}-findomain.txt -t {{Target}} >/dev/null 2>&1 || true; fi")'
+      - 'exec_cmd("if command -v assetfinder >/dev/null 2>&1; then timeout --foreground -k 15s {{subdomainExternalTimeout}} assetfinder -subs-only {{Target}} > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt 2>/dev/null || true; fi")'
     on_error:
       - action: continue
 
@@ -172,9 +168,9 @@ steps:
   # ===========================================================================
   - name: github-subdomains-enum
     type: bash
-    pre_condition: '{{enableGithubSubs}} && file_exists("{{githubTokensFile}}")'
+    pre_condition: '{{enableGithubSubs}} && file_exists("{{githubTokensFile}}") && command_exists("github-subdomains")'
     log: "Enumerating subdomains from GitHub code search"
-    command: 'github-subdomains -d {{Target}} -k -q -t "{{githubTokensFile}}" -o {{githubSubsFile}} 2>/dev/null || true'
+    command: 'timeout --foreground -k 15s {{subdomainExternalTimeout}} github-subdomains -d {{Target}} -k -q -t "{{githubTokensFile}}" -o {{githubSubsFile}} 2>/dev/null || true'
     on_error:
       - action: continue
 
@@ -183,9 +179,9 @@ steps:
   # ===========================================================================
   - name: gitlab-subdomains-enum
     type: bash
-    pre_condition: '{{enableGitlabSubs}} && file_exists("{{gitlabTokensFile}}")'
+    pre_condition: '{{enableGitlabSubs}} && file_exists("{{gitlabTokensFile}}") && command_exists("gitlab-subdomains")'
     log: "Enumerating subdomains from GitLab"
-    command: 'gitlab-subdomains -d {{Target}} -t "{{gitlabTokensFile}}" 2>/dev/null | tee {{gitlabSubsFile}} >/dev/null || true'
+    command: 'timeout --foreground -k 15s {{subdomainExternalTimeout}} gitlab-subdomains -d {{Target}} -t "{{gitlabTokensFile}}" 2>/dev/null > {{gitlabSubsFile}} || true'
     on_error:
       - action: continue
 
@@ -194,7 +190,7 @@ steps:
   # ===========================================================================
   - name: crtsh-enum
     type: bash
-    pre_condition: '{{enableCrtSearch}}'
+    pre_condition: '{{enableCrtSearch}} && command_exists("curl") && command_exists("jq")'
     log: "Enumerating subdomains via crt.sh certificate transparency"
     command: 'curl -s -m 30 "https://crt.sh/?q={{Target}}&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sed "s/\\n/\n/g" | grep -v "^\*" | sort -u | head -n {{crtLimit}} > {{crtshFile}} || true'
     on_error:
@@ -224,7 +220,7 @@ steps:
   # ===========================================================================
   - name: tls-enum-enhanced
     type: bash
-    pre_condition: '{{enableTlsEnumEnhanced}} && file_exists("{{subdomainFile}}")'
+    pre_condition: 'file_exists("{{subdomainFile}}") && ({{enableTlsEnumEnhanced}} || {{enableTlsEnum}}) && (command_exists("tlsx") || command_exists("openssl"))'
     log: "Enumerating subdomains via TLS certificate scanning (tlsx)"
     command: |
       : > {{tlsFile}}
@@ -232,7 +228,7 @@ steps:
       if [ -s "{{Output}}/subdomain/tlsx_raw.txt" ]; then
         grep -aEo '[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}' {{Output}}/subdomain/tlsx_raw.txt | sort -u > {{tlsFile}} || true
         rm -f {{Output}}/subdomain/tlsx_raw.txt
-      elif [ "{{enableTlsEnum}}" == "true" ]; then
+      elif [ "{{enableTlsEnum}}" = "true" ]; then
         for domain in $(cat {{subdomainFile}} 2>/dev/null | head -100); do
           echo | openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null | openssl x509 -noout -text 2>/dev/null | grep -i "DNS:" | sed "s/DNS:/\n/g" | tr -d ","
         done | sort -u > {{tlsFile}} || true
@@ -245,13 +241,13 @@ steps:
   # ===========================================================================
   - name: noerror-scan
     type: bash
-    pre_condition: '{{enableNoerror}}'
+    pre_condition: '{{enableNoerror}} && command_exists("dnsx") && command_exists("anew")'
     log: "Testing DNS NOERROR responses for subdomain discovery"
     command: |
       : > {{noerrorFile}}
       random_subdomain="${RANDOM}thistotallynotexist${RANDOM}.{{Target}}"
       dns_response=$(echo "$random_subdomain" | dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
-      if [ "$dns_response" == "[NXDOMAIN]" ]; then
+      if [ "$dns_response" = "[NXDOMAIN]" ]; then
         if [ -s "{{noerrorWordlist}}" ]; then
           dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
         else
@@ -289,12 +285,12 @@ steps:
   # ===========================================================================
   - name: recursive-passive-enum
     type: bash
-    pre_condition: '{{enableRecursivePassive}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") <= {{deepLimit}}'
+    pre_condition: '{{enableRecursivePassive}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") <= {{deepLimit}} && command_exists("subfinder")'
     log: "Running recursive passive subdomain enumeration"
     command: |
       dsieve -if {{subdomainFile}} -f 3 -top {{recursivePassiveTop}} > {{Output}}/subdomain/recursive_top.txt 2>/dev/null || head -n {{recursivePassiveTop}} {{subdomainFile}} > {{Output}}/subdomain/recursive_top.txt
       if [ -s "{{Output}}/subdomain/recursive_top.txt" ]; then
-        subfinder -dL {{Output}}/subdomain/recursive_top.txt -silent -o {{Output}}/subdomain/recursive_passive_tmp.txt 2>/dev/null || true
+        timeout --foreground -k 15s {{subdomainExternalTimeout}} subfinder -dL {{Output}}/subdomain/recursive_top.txt -silent -o {{Output}}/subdomain/recursive_passive_tmp.txt 2>/dev/null || true
         if [ -s "{{Output}}/subdomain/recursive_passive_tmp.txt" ]; then
           grep -E "{{Target}}$" {{Output}}/subdomain/recursive_passive_tmp.txt > {{recursivePassiveFile}} 2>/dev/null || true
           cat {{recursivePassiveFile}} >> {{subdomainFile}} 2>/dev/null || true
@@ -323,4 +319,4 @@ steps:
       - 'db_partial_import_asset_file("{{Workspace}}", "subdomain", "{{subdomainFile}}")'
       - 'generate_event_from_file("{{Workspace}}", "discovery", "subdomain-enum", "domain", "{{subdomainFile}}")'
     on_error:
-      - action: continue'
+      - action: continue

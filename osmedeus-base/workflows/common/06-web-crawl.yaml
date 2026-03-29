@@ -136,7 +136,7 @@ params:
   - name: urlfinderTimeout
     default: "2h"
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
   - name: waymoreTimeout
     default: "60m"
   - name: waymoreLimit
@@ -147,6 +147,9 @@ params:
     default: "{{ threads * 1000 }}"
   - name: archiveHttpThreads
     default: "{{ threads * 5 }}"
+  - name: archiveProbeTimeout
+    default: "45m"
+    description: "Overall timeout for archive URL HTTP enrichment"
 
   # =========================
   # Screenshot config
@@ -196,6 +199,9 @@ params:
   - name: passwordDictCewlerDepth
     default: 1
     description: "Cewler crawl depth"
+  - name: passwordDictCewlerTimeout
+    default: "15m"
+    description: "Overall timeout per target for cewler password generation"
   - name: passwordMinLength
     type: integer
     default: 5
@@ -208,6 +214,9 @@ params:
     description: "Enable robots.txt wordlist generation (roboxtractor)"
   - name: robotsWordlistFile
     default: "{{Output}}/wordlist/robots-wordlist-{{TargetSpace}}.txt"
+  - name: robotsWordlistTimeout
+    default: "10m"
+    description: "Overall timeout for robots.txt wordlist extraction"
 
   # =========================
   # JS URL Extraction
@@ -323,6 +332,7 @@ steps:
     functions:
       - 'create_folder("{{Output}}/links")'
       - 'create_folder("{{Output}}/archive")'
+      - 'create_folder("{{Output}}/wordlist")'
       - 'create_folder("{{Output}}/screenshots/{{TargetSpace}}-screenshots")'
       - 'create_folder("{{Output}}/secrets")'
 
@@ -377,7 +387,7 @@ steps:
     type: bash
     log: "Probing archive URLs with httpx"
     pre_condition: "{{enableArchive}} && file_exists(\"{{archiveInterestingUrlFile}}\") && file_length(\"{{archiveInterestingUrlFile}}\") > 0"
-    command: 'cat {{archiveInterestingUrlFile}} | httpx -H "{{defaultUA}}" -timeout 10 -t {{archiveHttpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpArchiveJsonFile}}'
+    command: 'timeout -k 1m {{archiveProbeTimeout}} httpx -l {{archiveInterestingUrlFile}} -H "{{defaultUA}}" -timeout 10 -t {{archiveHttpThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain -o {{httpArchiveJsonFile}} >/dev/null 2>&1 || true'
 
   - name: beautify-archive-results
     type: function
@@ -678,9 +688,10 @@ steps:
     log: "Generating wordlist from robots.txt"
     pre_condition: '{{enableRobotsWordlist}} && file_exists("{{httpFile}}")'
     command: |
+      mkdir -p {{Output}}/wordlist 2>/dev/null || true
       : > {{robotsWordlistFile}}
 
-      roboxtractor -m 1 -wb < {{httpFile}} 2>/dev/null | anew -q {{robotsWordlistFile}} || true
+      timeout -k 30s {{robotsWordlistTimeout}} roboxtractor -m 1 -wb < {{httpFile}} 2>/dev/null | anew -q {{robotsWordlistFile}} || true
 
       if [ -s "{{robotsWordlistFile}}" ]; then
         count=$(wc -l < {{robotsWordlistFile}} 2>/dev/null || echo 0)
@@ -780,8 +791,9 @@ steps:
   - name: web-crawl-summary
     type: function
     log: "Generating web crawl summary"
+    pre_condition: '!{{enableSpider}} && file_exists("{{linkFile}}")'
     functions:
-      - 'db_total_assets("{{linkFile}}")'
+      - 'db_total_links("{{linkFile}}")'
 
   # ===========================================================================
   # Phase 13: LLM Injection Point Analysis (P1)
@@ -835,7 +847,7 @@ steps:
           - Relevant CVEs or security bulletins if known
           - Confidence level (High/Medium/Low)
           
-          Format in plain text with security testing recommendations. Do NOT use any template syntax like {{variable}} in your response.
+          Format in plain text with security testing recommendations. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
           Analyze these URLs with parameters for {{Target}}:
@@ -861,12 +873,22 @@ steps:
     pre_condition: "{{enableLlmInjectionAnalysis}}"
     log: "Saving LLM injection analysis report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{injection_analysis}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmInjectionReport}} {{injectionPointsFile}} 2>/dev/null || true
+        echo "No LLM injection analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{Output}}/links 2>/dev/null || true
       echo "# Injection Point Analysis - {{Target}}" > {{llmInjectionReport}}
       echo "" >> {{llmInjectionReport}}
       echo "**Generated:** $(date)" >> {{llmInjectionReport}}
       echo "" >> {{llmInjectionReport}}
-      echo "{{injection_analysis}}" >> {{llmInjectionReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmInjectionReport}}
       
       # 提取高概率注入点到单独文件供后续测试
       grep -oE 'https?://[^ ]+' {{llmInjectionReport}} 2>/dev/null  | head -100 > {{injectionPointsFile}} || true

@@ -970,7 +970,7 @@ steps:
           3. Business impact assessment
           4. Recommended actions
           
-          Format in plain text, keep it concise for C-level executives. Do NOT use any template syntax like {{variable}} in your response.
+          Format in plain text, keep it concise for C-level executives. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
           Generate an executive summary for security assessment of {{Target}}.
@@ -996,10 +996,20 @@ steps:
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM executive summary"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{executive_summary}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmExecutiveSummary}} 2>/dev/null || true
+        echo "No LLM executive summary available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Executive Summary - {{Target}}" > {{llmExecutiveSummary}}
       echo "" >> {{llmExecutiveSummary}}
-      echo "{{executive_summary}}" >> {{llmExecutiveSummary}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmExecutiveSummary}}
     on_error:
       - action: continue
 
@@ -1020,7 +1030,7 @@ steps:
           3. Threat modeling insights
           4. Risk scoring (CVSS context)
           
-          Format in plain text with clear sections. Do NOT use any template syntax like {{variable}} in your response.
+          Format in plain text with clear sections. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
           Generate risk assessment for {{Target}}:
@@ -1042,10 +1052,20 @@ steps:
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM risk assessment"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{risk_assessment}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmRiskAssessment}} 2>/dev/null || true
+        echo "No LLM risk assessment available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Risk Assessment - {{Target}}" > {{llmRiskAssessment}}
       echo "" >> {{llmRiskAssessment}}
-      echo "{{risk_assessment}}" >> {{llmRiskAssessment}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmRiskAssessment}}
     on_error:
       - action: continue
 
@@ -1066,7 +1086,7 @@ steps:
           3. Long-term security improvements
           
           Include specific steps and code examples where applicable.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
           Generate remediation recommendations for {{Target}}:
@@ -1091,10 +1111,20 @@ steps:
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM recommendations"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{recommendations}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmRecommendations}} 2>/dev/null || true
+        echo "No LLM remediation recommendations available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Remediation Recommendations - {{Target}}" > {{llmRecommendations}}
       echo "" >> {{llmRecommendations}}
-      echo "{{recommendations}}" >> {{llmRecommendations}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmRecommendations}}
     on_error:
       - action: continue
 
@@ -1178,12 +1208,22 @@ steps:
     pre_condition: "{{enableLlmAttackSurface}}"
     log: "Saving LLM attack surface analysis report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{attack_surface}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmAttackSurfaceReport}} 2>/dev/null || true
+        echo "No LLM attack surface analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Attack Surface Analysis - {{Target}}" > {{llmAttackSurfaceReport}}
       echo "" >> {{llmAttackSurfaceReport}}
       echo "**Generated:** $(date)" >> {{llmAttackSurfaceReport}}
       echo "" >> {{llmAttackSurfaceReport}}
-      echo "{{attack_surface}}" >> {{llmAttackSurfaceReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmAttackSurfaceReport}}
     on_error:
       - action: continue
 
@@ -1206,4 +1246,4 @@ steps:
     type: function
     log: "Report generation complete"
     functions:
-      - 'db_total_assets("{{fullReportFile}}")'
+      - 'log_info("Report generation complete for {{Target}}")'

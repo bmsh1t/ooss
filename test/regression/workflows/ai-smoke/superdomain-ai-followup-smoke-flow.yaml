@@ -1,0 +1,60 @@
+kind: flow
+name: superdomain-ai-followup-smoke-flow
+description: Controlled smoke regression for the superdomain AI follow-up chain.
+
+modules:
+  - name: seed-fixtures
+    path: seed-ai-followup-fixtures-module.yaml
+
+  - name: ai-intelligent-analysis
+    path: osmedeus-base/workflows/fragments/do-ai-intelligent-analysis.yaml
+    depends_on: [seed-fixtures]
+
+  - name: ai-apply-decision
+    path: osmedeus-base/workflows/fragments/do-ai-apply-decision.yaml
+    depends_on: [ai-intelligent-analysis]
+
+  - name: ai-retest-planning
+    path: osmedeus-base/workflows/fragments/do-ai-retest-planning.yaml
+    depends_on: [ai-apply-decision]
+    params:
+      retestFlow: "ai-followup-target-module"
+      retestPriority: "critical"
+
+  - name: ai-operator-queue
+    path: osmedeus-base/workflows/fragments/do-ai-operator-queue.yaml
+    depends_on: [ai-retest-planning, ai-apply-decision]
+
+  - name: ai-campaign-handoff
+    path: osmedeus-base/workflows/fragments/do-ai-campaign-handoff.yaml
+    depends_on: [ai-retest-planning, ai-operator-queue, ai-apply-decision]
+    params:
+      enableCampaignCreate: true
+      campaignWorkflow: "ai-followup-target-module"
+      campaignWorkflowKind: "module"
+      campaignPriority: "critical"
+      campaignDeepScanWorkflow: "ai-deep-followup-module"
+      campaignDeepScanWorkflowKind: "module"
+      campaignAutoDeepScan: true
+      campaignHighRiskSeverities: "critical,high"
+
+  - name: ai-retest-queue
+    path: osmedeus-base/workflows/fragments/do-ai-retest-queue.yaml
+    depends_on: [ai-retest-planning, ai-campaign-handoff]
+    params:
+      enableRetestQueue: true
+      retestFlow: "ai-followup-target-module"
+      retestWorkflowKind: "module"
+      retestPriority: "critical"
+      knowledgeWorkspace: "shared-kb"
+
+  - name: ai-post-followup-coordination
+    path: osmedeus-base/workflows/fragments/do-ai-post-followup-coordination.yaml
+    depends_on: [ai-campaign-handoff, ai-retest-queue, ai-operator-queue]
+
+  - name: ai-knowledge-autolearn
+    path: osmedeus-base/workflows/fragments/do-ai-knowledge-autolearn.yaml
+    depends_on: [ai-post-followup-coordination]
+    params:
+      knowledgeWorkspace: "shared-kb"
+      knowledgeScope: "workspace"

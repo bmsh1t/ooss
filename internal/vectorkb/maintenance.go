@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
@@ -34,50 +36,100 @@ func Doctor(ctx context.Context, cfg *config.Config, opts DoctorOptions) (*Docto
 		return nil, fmt.Errorf("database not connected")
 	}
 
-	provider := strings.TrimSpace(opts.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.KnowledgeVector.DefaultProvider)
-	}
-	model := strings.TrimSpace(opts.Model)
-	if model == "" {
-		model = strings.TrimSpace(cfg.KnowledgeVector.DefaultModel)
+	providerConfig := inspectDoctorProviderConfig(cfg, strings.TrimSpace(opts.Provider), strings.TrimSpace(opts.Model))
+	pathState := inspectDoctorDBPath(cfg.GetKnowledgeVectorDBPath())
+
+	report := &DoctorReport{
+		Path:                    cfg.GetKnowledgeVectorDBPath(),
+		Workspace:               strings.TrimSpace(opts.Workspace),
+		Provider:                providerConfig.Provider,
+		Model:                   providerConfig.Model,
+		VectorEnabled:           cfg.IsKnowledgeVectorEnabled(),
+		DBPathExists:            pathState.Exists,
+		DBPathWritable:          pathState.Writable,
+		ProviderConfigured:      providerConfig.ProviderConfigured,
+		ModelConfigured:         providerConfig.ModelConfigured,
+		ProviderAvailable:       providerConfig.ProviderAvailable,
+		ProviderEndpoint:        providerConfig.ProviderEndpoint,
+		AvailableProviders:      providerConfig.AvailableProviders,
+		AvailableProviderModels: providerConfig.AvailableProviderModels,
+		SemanticStatus:          providerConfig.Status,
+		SemanticStatusMessage:   providerConfig.Message,
 	}
 
-	store, err := Open(cfg)
-	if err != nil {
-		return nil, err
+	if !cfg.IsKnowledgeVectorEnabled() {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Type:    "vector_disabled",
+			Message: "knowledge_vector.enabled is false",
+		})
 	}
-	defer func() { _ = store.Close() }()
-	if err := store.Migrate(ctx); err != nil {
-		return nil, err
+	if !pathState.Writable {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Type:    "vector_db_path_unwritable",
+			Message: pathState.Message,
+		})
+		if report.SemanticStatus == "" || report.SemanticStatus == "ready" {
+			report.SemanticStatus = "vector_db_unavailable"
+			report.SemanticStatusMessage = pathState.Message
+		}
+	}
+	if providerConfig.Issue != nil {
+		report.Issues = append(report.Issues, *providerConfig.Issue)
 	}
 
 	mainDocs, err := loadMainKnowledgeDocs(ctx, strings.TrimSpace(opts.Workspace))
 	if err != nil {
 		return nil, err
 	}
-	vectorDocs, err := store.loadVectorDocs(ctx, strings.TrimSpace(opts.Workspace))
-	if err != nil {
-		return nil, err
-	}
-
-	report := &DoctorReport{
-		Path:      store.Path(),
-		Workspace: strings.TrimSpace(opts.Workspace),
-		Provider:  provider,
-		Model:     model,
-	}
 
 	for _, doc := range mainDocs {
 		report.MainDocuments++
 		report.MainChunks += doc.ChunkCount
 	}
+
+	store, err := Open(cfg)
+	if err != nil {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Type:    "vector_db_open_failed",
+			Message: fmt.Sprintf("failed to open vector DB: %v", err),
+		})
+		if report.SemanticStatus == "" || report.SemanticStatus == "ready" {
+			report.SemanticStatus = "vector_db_unavailable"
+			report.SemanticStatusMessage = fmt.Sprintf("failed to open vector DB: %v", err)
+		}
+		finalizeDoctorReport(report)
+		return report, nil
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.Migrate(ctx); err != nil {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Type:    "vector_db_migrate_failed",
+			Message: fmt.Sprintf("failed to migrate vector DB: %v", err),
+		})
+		if report.SemanticStatus == "" || report.SemanticStatus == "ready" {
+			report.SemanticStatus = "vector_db_unavailable"
+			report.SemanticStatusMessage = fmt.Sprintf("failed to migrate vector DB: %v", err)
+		}
+		finalizeDoctorReport(report)
+		return report, nil
+	}
+	report.Path = store.Path()
+
+	vectorDocs, err := store.loadVectorDocs(ctx, strings.TrimSpace(opts.Workspace))
+	if err != nil {
+		return nil, err
+	}
 	for _, doc := range vectorDocs {
 		report.VectorDocuments++
 		report.VectorChunks += doc.ChunkCount
 	}
-	if report.VectorEmbeddings, err = store.countEmbeddings(ctx, strings.TrimSpace(opts.Workspace), provider, model); err != nil {
+	if report.VectorEmbeddings, err = store.countEmbeddingsAll(ctx, strings.TrimSpace(opts.Workspace)); err != nil {
 		return nil, err
+	}
+	if report.ProviderConfigured && report.ModelConfigured && report.ProviderAvailable {
+		if report.SelectedEmbeddings, err = store.countEmbeddings(ctx, strings.TrimSpace(opts.Workspace), report.Provider, report.Model); err != nil {
+			return nil, err
+		}
 	}
 	if report.OrphanChunks, err = store.countOrphanChunks(ctx, strings.TrimSpace(opts.Workspace)); err != nil {
 		return nil, err
@@ -111,18 +163,20 @@ func Doctor(ctx context.Context, cfg *config.Config, opts DoctorOptions) (*Docto
 					Message:    "vector document hash/chunk_count differs from main knowledge DB",
 				})
 			}
-			embedCount, countErr := store.countDocumentEmbeddings(ctx, vectorDoc.ID, provider, model)
-			if countErr != nil {
-				return nil, countErr
-			}
-			if embedCount != doc.ChunkCount {
-				report.DocumentsMissingEmbeddings++
-				report.Issues = append(report.Issues, DoctorIssue{
-					Type:       "embedding_count_mismatch",
-					Workspace:  doc.Workspace,
-					SourcePath: doc.SourcePath,
-					Message:    fmt.Sprintf("expected %d embeddings for %s/%s but found %d", doc.ChunkCount, provider, model, embedCount),
-				})
+			if report.ProviderConfigured && report.ModelConfigured && report.ProviderAvailable {
+				embedCount, countErr := store.countDocumentEmbeddings(ctx, vectorDoc.ID, report.Provider, report.Model)
+				if countErr != nil {
+					return nil, countErr
+				}
+				if embedCount != doc.ChunkCount {
+					report.DocumentsMissingEmbeddings++
+					report.Issues = append(report.Issues, DoctorIssue{
+						Type:       "embedding_count_mismatch",
+						Workspace:  doc.Workspace,
+						SourcePath: doc.SourcePath,
+						Message:    fmt.Sprintf("expected %d embeddings for %s/%s but found %d", doc.ChunkCount, report.Provider, report.Model, embedCount),
+					})
+				}
 			}
 		}
 	}
@@ -152,13 +206,156 @@ func Doctor(ctx context.Context, cfg *config.Config, opts DoctorOptions) (*Docto
 		})
 	}
 
-	report.Healthy = report.MissingDocuments == 0 &&
+	finalizeDoctorReport(report)
+	return report, nil
+}
+
+type doctorProviderConfig struct {
+	Provider                string
+	Model                   string
+	ProviderConfigured      bool
+	ModelConfigured         bool
+	ProviderAvailable       bool
+	ProviderEndpoint        string
+	AvailableProviders      []string
+	AvailableProviderModels []string
+	Status                  string
+	Message                 string
+	Issue                   *DoctorIssue
+}
+
+type doctorPathState struct {
+	Exists   bool
+	Writable bool
+	Message  string
+}
+
+func inspectDoctorProviderConfig(cfg *config.Config, providerOverride, modelOverride string) doctorProviderConfig {
+	result := doctorProviderConfig{
+		Provider:                strings.TrimSpace(providerOverride),
+		Model:                   strings.TrimSpace(modelOverride),
+		AvailableProviders:      listDoctorProviders(cfg),
+		AvailableProviderModels: listDoctorProviderModels(cfg),
+		Status:                  "ready",
+	}
+	if result.Provider == "" {
+		result.Provider = strings.TrimSpace(cfg.GetKnowledgeVectorProvider())
+	}
+	if result.Model == "" {
+		result.Model = strings.TrimSpace(cfg.GetKnowledgeVectorModel(result.Provider))
+	}
+	result.ProviderConfigured = result.Provider != ""
+	result.ModelConfigured = result.Model != ""
+
+	switch {
+	case !result.ProviderConfigured:
+		result.Status = "provider_not_configured"
+		result.Message = "knowledge_vector.default_provider and embeddings_config.provider are empty and no --provider override was supplied"
+		result.Issue = &DoctorIssue{Type: result.Status, Message: result.Message}
+		return result
+	case !result.ModelConfigured:
+		result.Status = "model_not_bound"
+		result.Message = "knowledge_vector.default_model is empty and no provider-specific model could be resolved from embeddings_config or llm.llm_providers"
+		result.Issue = &DoctorIssue{Type: result.Status, Message: result.Message}
+		return result
+	}
+
+	provider, source, err := cfg.ResolveEmbeddingProvider(result.Provider)
+	if err != nil {
+		result.Status = "provider_not_available"
+		result.Message = err.Error()
+		result.Issue = &DoctorIssue{Type: result.Status, Message: result.Message}
+		return result
+	}
+	result.ProviderAvailable = true
+	result.ProviderEndpoint = strings.TrimSpace(provider.BaseURL)
+	if result.ProviderEndpoint == "" {
+		result.Status = "provider_endpoint_missing"
+		result.Message = fmt.Sprintf("embedding provider %q resolved from %s has no base_url/api_url configured", result.Provider, source)
+		result.Issue = &DoctorIssue{Type: result.Status, Message: result.Message}
+		return result
+	}
+
+	result.Message = fmt.Sprintf("provider %s with model %s is configured via %s", result.Provider, result.Model, source)
+	return result
+}
+
+func inspectDoctorDBPath(path string) doctorPathState {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return doctorPathState{
+			Writable: false,
+			Message:  "knowledge_vector.db_path resolves to an empty path",
+		}
+	}
+
+	state := doctorPathState{}
+	if _, err := os.Stat(path); err == nil {
+		state.Exists = true
+	}
+
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		state.Writable = false
+		state.Message = fmt.Sprintf("failed to create vector DB directory %s: %v", dir, err)
+		return state
+	}
+
+	tempFile, err := os.CreateTemp(dir, ".vectorkb-doctor-*")
+	if err != nil {
+		state.Writable = false
+		state.Message = fmt.Sprintf("vector DB directory %s is not writable: %v", dir, err)
+		return state
+	}
+	_ = tempFile.Close()
+	_ = os.Remove(tempFile.Name())
+
+	state.Writable = true
+	state.Message = fmt.Sprintf("vector DB path %s is writable", path)
+	return state
+}
+
+func listDoctorProviders(cfg *config.Config) []string {
+	return cfg.ListEmbeddingProviders()
+}
+
+func listDoctorProviderModels(cfg *config.Config) []string {
+	return cfg.ListEmbeddingProviderModels()
+}
+
+func finalizeDoctorReport(report *DoctorReport) {
+	if report == nil {
+		return
+	}
+	switch {
+	case report.SemanticStatus == "" || report.SemanticStatus == "ready":
+		switch {
+		case report.MainDocuments > 0 && (report.MissingDocuments > 0 || report.DocumentsMissingEmbeddings > 0 || report.SelectedEmbeddings == 0):
+			report.SemanticStatus = "index_missing"
+			report.SemanticStatusMessage = "main knowledge documents exist but the selected provider/model does not have a complete vector index"
+		case report.StaleDocuments > 0 || report.OrphanChunks > 0 || report.OrphanEmbeddings > 0:
+			report.SemanticStatus = "consistency_issues"
+			report.SemanticStatusMessage = "vector DB contains stale or orphaned records"
+		default:
+			report.SemanticStatus = "ready"
+			if report.MainDocuments == 0 {
+				report.SemanticStatusMessage = "vector stack is configured; no main knowledge documents were found for this workspace"
+			} else {
+				report.SemanticStatusMessage = "semantic vector retrieval is ready"
+			}
+		}
+	}
+
+	report.SemanticSearchReady = report.SemanticStatus == "ready"
+	report.Healthy = report.SemanticSearchReady &&
+		report.MissingDocuments == 0 &&
 		report.StaleDocuments == 0 &&
 		report.DocumentsMissingEmbeddings == 0 &&
 		report.OrphanChunks == 0 &&
 		report.OrphanEmbeddings == 0
-
-	return report, nil
 }
 
 func Purge(ctx context.Context, cfg *config.Config, workspace string) (*PurgeSummary, error) {
@@ -346,6 +543,17 @@ func (s *Store) countEmbeddings(ctx context.Context, workspace, provider, model 
 		Join("JOIN vector_documents AS vd ON vd.id = vc.document_id").
 		Where("ve.provider = ?", provider).
 		Where("ve.model = ?", model)
+	if workspace != "" {
+		q = q.Where("vd.workspace = ?", workspace)
+	}
+	return q.Count(ctx)
+}
+
+func (s *Store) countEmbeddingsAll(ctx context.Context, workspace string) (int, error) {
+	q := s.db.NewSelect().
+		TableExpr("vector_embeddings AS ve").
+		Join("JOIN vector_chunks AS vc ON vc.id = ve.chunk_id").
+		Join("JOIN vector_documents AS vd ON vd.id = vc.document_id")
 	if workspace != "" {
 		q = q.Where("vd.workspace = ?", workspace)
 	}

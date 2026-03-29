@@ -1,4 +1,4 @@
-.PHONY: build run test test-plain test-unit test-unit-plain test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-queue-live test-regression-stable-core test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
+.PHONY: build run test test-plain test-unit test-unit-plain test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-api-vector test-regression-ai-workflow-smoke test-regression-ai-semantic-vector-smoke test-regression-scan-content-smoke test-regression-superdomain-lite-smoke test-regression-superdomain-stable-smoke test-regression-queue-live test-regression-stable-core test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
 
 # Go parameters
 GOCMD=go
@@ -224,6 +224,14 @@ test-regression-api-knowledge:
 	@echo "$(PREFIX) Running live knowledge API regression..."
 	@BASE_DIR=/tmp/osm-api-knowledge-live PORT=8907 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/api-knowledge-live.sh
 
+# Live vectorkb regression with a local mock embeddings endpoint
+test-regression-api-vector:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running live vector knowledge API regression..."
+	@BASE_DIR=/tmp/osm-api-vector-live PORT=8909 EMBED_PORT=8910 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/api-vector-knowledge-live.sh
+
 # Live queue-runner regression for CLI queue, vulnerability retest, and campaign deep-scan flows
 test-regression-queue-live:
 	@echo "$(PREFIX) Building local regression binary..."
@@ -232,7 +240,47 @@ test-regression-queue-live:
 	@echo "$(PREFIX) Running live queue regression..."
 	@BASE_DIR=/tmp/osm-queue-live PORT=8908 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/queue-live bash ./test/regression/queue-runner-live.sh
 
-# Stable-core regression: serial workflow lint + AI API + knowledge + queue live regressions
+# Current-source AI follow-up smoke: intelligent-analysis -> apply-decision -> queue/campaign/learn closure
+test-regression-ai-workflow-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running AI workflow smoke regression..."
+	@BASE_DIR=/tmp/osm-ai-workflow-smoke OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/ai-smoke bash ./test/regression/ai-workflow-smoke.sh
+
+# Current-source provider-enabled semantic workflow smoke with a local mock embeddings endpoint
+test-regression-ai-semantic-vector-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running AI semantic vector smoke regression..."
+	@BASE_DIR=/tmp/osm-ai-semantic-vector-smoke EMBED_PORT=8911 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/test/regression/workflows/ai-semantic bash ./test/regression/ai-semantic-vector-smoke.sh
+
+# Current-source scan-content smoke with deterministic deparos success/fallback coverage
+test-regression-scan-content-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running scan-content smoke regression..."
+	@BASE_DIR=/tmp/osm-scan-content-smoke OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/scan-content-smoke.sh
+
+# Current-source superdomain-extensive-ai-lite closure smoke using seeded artifacts and provider-backed KB
+test-regression-superdomain-lite-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running superdomain lite flow smoke regression..."
+	@BASE_DIR=/tmp/osm-superdomain-lite-flow-smoke EMBED_PORT=8913 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/superdomain-lite-flow-smoke.sh
+
+# Current-source superdomain-extensive-ai-stable closure smoke using seeded artifacts, ACP fallbacks, and workbench import
+test-regression-superdomain-stable-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running superdomain stable flow smoke regression..."
+	@BASE_DIR=/tmp/osm-superdomain-stable-flow-smoke EMBED_PORT=8914 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/superdomain-stable-flow-smoke.sh
+
+# Stable-core regression: serial workflow lint + AI follow-up smoke + semantic workflow smoke + superdomain-lite/stable flow smoke + AI API + knowledge + vectorkb + queue live regressions
 test-regression-stable-core:
 	@echo "$(PREFIX) Building local regression binary..."
 	@mkdir -p $(BINARY_DIR)

@@ -235,4 +235,4 @@ steps:
     type: function
     log: "Vulnerability scan summary"
     functions:
-      - 'db_total_assets("{{nucleiOutputJsonl}}")'
+      - 'log_info("Vulnerability scan summary complete for {{Target}}")'

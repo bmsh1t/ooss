@@ -51,8 +51,11 @@ params:
   # 工具参数
   - name: favireconThreads
     default: 50
+  - name: fingerprintExternalTimeout
+    default: "10m"
+    description: "Per-tool timeout for fingerprint helpers"
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
   - name: cmseekPath
     default: "{{toolsDir}}/CMSeeK/cmseek.py"
 
@@ -138,7 +141,7 @@ steps:
     pre_condition: '{{enableFaviconRecon}} && file_exists("{{httpFile}}")'
     log: "Running favicon technology detection"
     functions:
-      - 'exec_cmd("cat {{httpFile}} | favirecon -silent -t {{favireconThreads}} -json -o {{faviconOutput}} 2>/dev/null || true")'
+      - 'exec_cmd("if [ -s \"{{httpFile}}\" ]; then timeout --foreground -k 15s {{fingerprintExternalTimeout}} favirecon -silent -t {{favireconThreads}} -json -o {{faviconOutput}} < {{httpFile}} >/dev/null 2>&1 || true; fi")'
     on_error:
       - action: continue
 
@@ -149,7 +152,7 @@ steps:
     type: bash
     pre_condition: '{{enableWafDetection}} && file_exists("{{httpFile}}")'
     log: "Running WAF detection"
-    command: 'wafw00f -i {{httpFile}} -o {{wafOutput}} 2>/dev/null || true'
+    command: 'timeout --foreground -k 15s {{fingerprintExternalTimeout}} wafw00f -i {{httpFile}} -o {{wafOutput}} >/dev/null 2>&1 || true'
     on_error:
       - action: continue
 
@@ -196,7 +199,7 @@ steps:
     type: bash
     log: "Discovering virtual hosts"
     pre_condition: '{{enableVirtualhosts}} && file_exists("{{ipsFile}}") && file_exists("{{subdomainsFile}}")'
-    command: 'VhostFinder -ips {{ipsFile}} -wordlist {{subdomainsFile}} -verify 2>/dev/null | grep "+" > {{virtualhostsOutput}} || true'
+    command: 'timeout --foreground -k 15s {{fingerprintExternalTimeout}} VhostFinder -ips {{ipsFile}} -wordlist {{subdomainsFile}} -verify 2>/dev/null | grep "+" > {{virtualhostsOutput}} || true'
 
   # ===========================================================================
   # Phase 5: LLM Service Probing
@@ -210,9 +213,9 @@ steps:
       : > {{llmProbeTxtOutput}}
 
       if [ "{{llmProbeAugustus}}" = "true" ]; then
-        julius -o jsonl -q probe --augustus -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
+        timeout --foreground -k 15s {{fingerprintExternalTimeout}} julius -o jsonl -q probe --augustus -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
       else
-        julius -o jsonl -q probe -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
+        timeout --foreground -k 15s {{fingerprintExternalTimeout}} julius -o jsonl -q probe -f {{httpFile}} 2>/dev/null > {{llmProbeOutput}} || true
       fi
 
       if [ -s "{{llmProbeOutput}}" ]; then
@@ -268,7 +271,7 @@ steps:
           {{readFile("{{cmsOutput}}")}}
           
           Provide specific security recommendations with CVEs and hardening techniques.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
     exports:
       tech_attack_suggestions: "{{llm_tech_attack_suggestions_content}}"
 
@@ -277,12 +280,22 @@ steps:
     pre_condition: "{{enableLlmTechAttack}}"
     log: "Saving LLM tech attack suggestions report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{tech_attack_suggestions}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmTechAttackReport}} 2>/dev/null || true
+        echo "No LLM tech attack suggestions available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Tech Stack Attack Suggestions - {{Target}}" > {{llmTechAttackReport}}
       echo "" >> {{llmTechAttackReport}}
       echo "**Generated:** $(date)" >> {{llmTechAttackReport}}
       echo "" >> {{llmTechAttackReport}}
-      echo "{{tech_attack_suggestions}}" >> {{llmTechAttackReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmTechAttackReport}}
     on_error:
       - action: continue
 

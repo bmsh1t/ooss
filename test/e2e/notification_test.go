@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/j3ssie/osmedeus/v5/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +89,11 @@ func (wr *webhookRecorder) retryHandler(failCount int) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok": true}`))
 	}
+}
+
+func newNotificationTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	return testutil.NewLoopbackServer(t, handler)
 }
 
 func (wr *webhookRecorder) getRequests() []webhookRequest {
@@ -318,7 +324,7 @@ func TestE2E_WebhookNotification_SendMessage(t *testing.T) {
 
 	// Start mock webhook server
 	recorder := newWebhookRecorder()
-	server := httptest.NewServer(recorder.handler(http.StatusOK))
+	server := newNotificationTestServer(t, recorder.handler(http.StatusOK))
 	defer server.Close()
 	log.Info("Mock webhook server started at %s", server.URL)
 
@@ -346,7 +352,7 @@ func TestE2E_WebhookNotification_MockServerReceivesRequests(t *testing.T) {
 
 	// Start mock webhook server
 	recorder := newWebhookRecorder()
-	server := httptest.NewServer(recorder.handler(http.StatusOK))
+	server := newNotificationTestServer(t, recorder.handler(http.StatusOK))
 	defer server.Close()
 	log.Info("Mock webhook server started at %s", server.URL)
 
@@ -388,7 +394,7 @@ func TestE2E_WebhookNotification_CustomHeaders(t *testing.T) {
 
 	// Start mock webhook server
 	recorder := newWebhookRecorder()
-	server := httptest.NewServer(recorder.handler(http.StatusOK))
+	server := newNotificationTestServer(t, recorder.handler(http.StatusOK))
 	defer server.Close()
 
 	// Send a request with custom headers
@@ -421,7 +427,7 @@ func TestE2E_WebhookNotification_RetryOnFailure(t *testing.T) {
 
 	// Start mock webhook server that fails first request
 	recorder := newWebhookRecorder()
-	server := httptest.NewServer(recorder.retryHandler(1)) // Fail first request
+	server := newNotificationTestServer(t, recorder.retryHandler(1)) // Fail first request
 	defer server.Close()
 
 	// Send multiple requests to test retry logic
@@ -454,11 +460,11 @@ func TestE2E_WebhookNotification_MultipleWebhooks(t *testing.T) {
 
 	// Start two mock webhook servers
 	recorder1 := newWebhookRecorder()
-	server1 := httptest.NewServer(recorder1.handler(http.StatusOK))
+	server1 := newNotificationTestServer(t, recorder1.handler(http.StatusOK))
 	defer server1.Close()
 
 	recorder2 := newWebhookRecorder()
-	server2 := httptest.NewServer(recorder2.handler(http.StatusOK))
+	server2 := newNotificationTestServer(t, recorder2.handler(http.StatusOK))
 	defer server2.Close()
 
 	log.Info("Started two mock servers at %s and %s", server1.URL, server2.URL)
@@ -488,7 +494,7 @@ func TestE2E_WebhookNotification_PayloadFormat(t *testing.T) {
 	log.Step("Testing webhook payload format")
 
 	recorder := newWebhookRecorder()
-	server := httptest.NewServer(recorder.handler(http.StatusOK))
+	server := newNotificationTestServer(t, recorder.handler(http.StatusOK))
 	defer server.Close()
 
 	// Send structured payload
@@ -534,7 +540,7 @@ func TestE2E_TelegramNotification_MockAPIServer(t *testing.T) {
 
 	// Start mock Telegram API server
 	mock := newTelegramMock()
-	server := httptest.NewServer(mock.handler())
+	server := newNotificationTestServer(t, mock.handler())
 	defer server.Close()
 	log.Info("Mock Telegram API server started at %s", server.URL)
 
@@ -555,7 +561,7 @@ func TestE2E_TelegramNotification_SendMessage(t *testing.T) {
 	log.Step("Testing Telegram sendMessage endpoint")
 
 	mock := newTelegramMock()
-	server := httptest.NewServer(mock.handler())
+	server := newNotificationTestServer(t, mock.handler())
 	defer server.Close()
 
 	// Send a message to mock API
@@ -586,7 +592,7 @@ func TestE2E_TelegramNotification_SendDocument(t *testing.T) {
 	log.Step("Testing Telegram sendDocument endpoint")
 
 	mock := newTelegramMock()
-	server := httptest.NewServer(mock.handler())
+	server := newNotificationTestServer(t, mock.handler())
 	defer server.Close()
 
 	// Create a test file
@@ -633,7 +639,7 @@ func TestE2E_TelegramNotification_MarkdownFormat(t *testing.T) {
 	log.Step("Testing Telegram Markdown format")
 
 	mock := newTelegramMock()
-	server := httptest.NewServer(mock.handler())
+	server := newNotificationTestServer(t, mock.handler())
 	defer server.Close()
 
 	// Send a notification with title and message (formatted as Markdown)

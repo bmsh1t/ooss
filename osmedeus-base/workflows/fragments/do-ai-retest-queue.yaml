@@ -379,7 +379,7 @@ steps:
         exit 0
       fi
 
-      OSM_BIN="{{OsmedeusExec}}"
+      OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
@@ -445,6 +445,7 @@ steps:
           }' > "{{retestQueueSummary}}"
         exit 0
       fi
+      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       WORKFLOW_FLAG="-f"
       if [ "{{retestWorkflowKind}}" = "module" ]; then
@@ -455,6 +456,8 @@ steps:
       {
         echo "[Retest Queue] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "[Retest Queue] Binary: $OSM_BIN"
+        echo "[Retest Queue] Base folder: {{BaseFolder}}"
+        echo "[Retest Queue] Workflows: {{Workflows}}"
         echo "[Retest Queue] Workflow: {{retestFlow}} (kind={{retestWorkflowKind}})"
         echo "[Retest Queue] Priority: {{retestPriority}}"
         echo "[Retest Queue] Source: $TARGET_SOURCE"
@@ -483,7 +486,7 @@ steps:
         [ "${PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS:-0}" -gt 0 ] 2>/dev/null && echo "[Retest Queue] Previous campaign create queued runs: $PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS"
         echo ""
         set -- \
-          "$OSM_BIN" worker queue new "$WORKFLOW_FLAG" "{{retestFlow}}" \
+          "$OSM_BIN" $OSM_CLI_BASE_ARGS worker queue new "$WORKFLOW_FLAG" "{{retestFlow}}" \
           -T "$ACTIVE_TARGET_FILE" \
           -p "knowledgeWorkspace={{knowledgeWorkspace}}" \
           -p "campaign_stage=retest" \

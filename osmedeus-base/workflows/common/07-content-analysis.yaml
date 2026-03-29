@@ -15,7 +15,7 @@ tags: gf, js, param, analysis, patterns, secrets, websocket, graphql
 params:
   # 工具路径
   - name: toolsDir
-    default: "/root/Tools"
+    default: "/home/himan/Tools"
 
   # 功能开关
   - name: enableGfPatterns
@@ -149,6 +149,9 @@ params:
     type: bool
     default: false
     description: "Enable LLM code review for discovered JS files"
+  - name: llmCodeReviewReport
+    default: "{{outputDir}}/llm-code-review-{{TargetSpace}}.md"
+    description: "LLM JavaScript code review report"
   
   # LLM JS API 端点提取配置
   - name: enableLlmJsApiExtract
@@ -668,7 +671,7 @@ steps:
           {{readFile("{{jsSecretsJsmapFile}}")}}
           
           Provide a risk assessment and prioritize findings.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
     exports:
       secrets_analysis: "{{llm_secrets_analysis_content}}"
 
@@ -677,12 +680,22 @@ steps:
     pre_condition: "{{enableLlmSecretsAnalysis}}"
     log: "Saving LLM secrets analysis report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{secrets_analysis}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmSecretsReport}} 2>/dev/null || true
+        echo "No LLM secrets analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Secrets Risk Analysis - {{Target}}" > {{llmSecretsReport}}
       echo "" >> {{llmSecretsReport}}
       echo "**Generated:** $(date)" >> {{llmSecretsReport}}
       echo "" >> {{llmSecretsReport}}
-      echo "{{secrets_analysis}}" >> {{llmSecretsReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmSecretsReport}}
     on_error:
       - action: continue
 
@@ -705,7 +718,7 @@ steps:
           4. Client-side validation weaknesses
           5. DOM manipulation vulnerabilities
           
-          Focus on evidence-based findings only. Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Focus on evidence-based findings only. Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
           Review JavaScript files discovered for {{Target}}:
@@ -716,6 +729,30 @@ steps:
           Provide security findings and recommendations.
     exports:
       code_review: "{{llm_code_review_content}}"
+
+  - name: save-llm-code-review-report
+    type: bash
+    pre_condition: "{{enableLlmCodeReview}}"
+    log: "Saving LLM code review report"
+    command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{code_review}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmCodeReviewReport}} 2>/dev/null || true
+        echo "No LLM code review content available; skipping report write."
+        exit 0
+      fi
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      echo "# JavaScript Code Review - {{Target}}" > {{llmCodeReviewReport}}
+      echo "" >> {{llmCodeReviewReport}}
+      echo "**Generated:** $(date)" >> {{llmCodeReviewReport}}
+      echo "" >> {{llmCodeReviewReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmCodeReviewReport}}
+    on_error:
+      - action: continue
 
   # ===========================================================================
   # Phase 10: LLM JS API Endpoint Extraction (P0)
@@ -762,7 +799,7 @@ steps:
           No params data
           
           Provide actionable API endpoint findings for penetration testing.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
     exports:
       js_api_endpoints: "{{llm_js_api_extraction_content}}"
 
@@ -771,12 +808,22 @@ steps:
     pre_condition: "{{enableLlmJsApiExtract}}"
     log: "Saving LLM JS API extraction report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{js_api_endpoints}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmJsApiReport}} {{jsApiEndpointsFile}} 2>/dev/null || true
+        echo "No LLM JS API endpoint analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# JS API Endpoints Analysis - {{Target}}" > {{llmJsApiReport}}
       echo "" >> {{llmJsApiReport}}
       echo "**Generated:** $(date)" >> {{llmJsApiReport}}
       echo "" >> {{llmJsApiReport}}
-      echo "{{js_api_endpoints}}" >> {{llmJsApiReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmJsApiReport}}
       
       # 提取API端点到单独文件供后续扫描使用
       grep -oE '(https?://[^ ]+|/api/[^ ]+|/v[0-9]+/[^ ]+)' {{llmJsApiReport}} 2>/dev/null  | sort -u > {{jsApiEndpointsFile}} || true
@@ -823,7 +870,7 @@ steps:
           {{readFile("{{jsEndpointsFile}}")}}
           
           Provide a defensive security analysis focusing on remediation steps.
-          Output in plain text only. Do NOT use any template syntax like {{variable}} in your response.
+          Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
     exports:
       sensitive_context: "{{llm_sensitive_context_analysis_content}}"
 
@@ -832,12 +879,22 @@ steps:
     pre_condition: "{{enableLlmSensitiveContext}}"
     log: "Saving LLM sensitive context analysis report"
     command: |
+      REPORT_CONTENT=$(cat <<'EOF'
+      {{sensitive_context}}
+      EOF
+      )
+      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
+      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmSensitiveContextReport}} 2>/dev/null || true
+        echo "No LLM sensitive context analysis available; skipping report write."
+        exit 0
+      fi
       mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Sensitive Context Analysis - {{Target}}" > {{llmSensitiveContextReport}}
       echo "" >> {{llmSensitiveContextReport}}
       echo "**Generated:** $(date)" >> {{llmSensitiveContextReport}}
       echo "" >> {{llmSensitiveContextReport}}
-      echo "{{sensitive_context}}" >> {{llmSensitiveContextReport}}
+      printf '%s\n' "$REPORT_CONTENT" >> {{llmSensitiveContextReport}}
     on_error:
       - action: continue
 
@@ -848,4 +905,4 @@ steps:
     type: function
     log: "Content analysis complete"
     functions:
-      - 'db_total_assets("{{combinedUrlsFile}}")'
+      - 'db_total_urls("{{combinedUrlsFile}}")'

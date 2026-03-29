@@ -112,8 +112,8 @@ func makeStreamToolCallChunk(id, model string, tcIndex int, tcID, tcType, funcNa
 	return string(b)
 }
 
-func newStreamingMockServer(handler http.HandlerFunc) *httptest.Server {
-	return httptest.NewServer(handler)
+func newStreamingMockServer(t testing.TB, handler http.HandlerFunc) *httptest.Server {
+	return newMockLLMServer(t, handler)
 }
 
 // ============================================================================
@@ -122,7 +122,7 @@ func newStreamingMockServer(handler http.HandlerFunc) *httptest.Server {
 
 func TestStreamingSSEParsing(t *testing.T) {
 	// Mock server returns SSE events with content tokens
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -185,7 +185,7 @@ func TestStreamingSSEParsing(t *testing.T) {
 }
 
 func TestStreamingTokenCallback(t *testing.T) {
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "token1"))
@@ -216,7 +216,7 @@ func TestStreamingTokenCallback(t *testing.T) {
 
 func TestStreamingToolCallAccumulation(t *testing.T) {
 	// Simulate streaming tool calls: name arrives in one chunk, arguments split across chunks
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		// First tool call: ID and name
@@ -266,7 +266,7 @@ func TestStreamingToolCallAccumulation(t *testing.T) {
 
 func TestStreamingDoneSignal(t *testing.T) {
 	// Verify data: [DONE] terminates the stream cleanly
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "before done"))
@@ -297,7 +297,7 @@ func TestStreamingDoneSignal(t *testing.T) {
 
 func TestStreamingFallbackOnError(t *testing.T) {
 	// Server returns HTTP 500 — should error gracefully
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
@@ -326,7 +326,7 @@ func TestStreamingFallbackOnError(t *testing.T) {
 
 func TestStreamingErrorInChunk(t *testing.T) {
 	// Server streams normally then sends an error chunk
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "partial "))
@@ -360,7 +360,7 @@ func TestStreamingErrorInChunk(t *testing.T) {
 
 func TestStreamingMalformedSSE(t *testing.T) {
 	// Server sends some malformed data — should skip and continue
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "good"))
@@ -393,7 +393,7 @@ func TestAgentExecutor_StreamFlagInRequest(t *testing.T) {
 	// Verify that Stream is passed through to the LLM request when llmConfig.Stream is true
 	var receivedStream bool
 
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -524,7 +524,7 @@ func TestStepLevelStreamOverride(t *testing.T) {
 
 func TestStreamingDispatchFromSendChatRequest(t *testing.T) {
 	// Verify that sendChatRequest dispatches to streaming when request.Stream is true
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunkWithRole("c1", "m1", "assistant"))
@@ -562,7 +562,7 @@ func TestStreamingDispatchFromSendChatRequest(t *testing.T) {
 
 func TestStreamingEmptyContent(t *testing.T) {
 	// Stream that has no content tokens (e.g., only tool calls or empty response)
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunkWithRole("c1", "m1", "assistant"))
@@ -595,7 +595,7 @@ func TestStreamingEmptyContent(t *testing.T) {
 
 func TestStreamingSSEWithComments(t *testing.T) {
 	// SSE spec allows comment lines starting with ":" — these should be ignored
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		// SSE comment (keep-alive)
@@ -625,7 +625,7 @@ func TestStreamingSSEWithComments(t *testing.T) {
 
 func TestStreamingLLMStepIntegration(t *testing.T) {
 	// Test the full LLM step path with streaming via sendChatRequest dispatch
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -677,7 +677,7 @@ func TestStreamingAuthHeader(t *testing.T) {
 	// Verify auth headers are sent in streaming requests
 	var receivedAuth string
 
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "ok"))
@@ -704,7 +704,7 @@ func TestStreamingCustomHeaders(t *testing.T) {
 	// Verify custom headers are sent in streaming requests
 	var receivedHeaders http.Header
 
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "ok"))
@@ -735,7 +735,7 @@ func TestStreamingCustomHeaders(t *testing.T) {
 
 func TestStreamingNonStreamingFallback(t *testing.T) {
 	// When Stream is false, sendChatRequest should NOT use streaming
-	server := newMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newMockLLMServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -767,7 +767,7 @@ func TestStreamingNonStreamingFallback(t *testing.T) {
 
 func TestStreamingContentWithSpecialChars(t *testing.T) {
 	// Test streaming with content containing special characters, newlines, etc.
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "Hello\n"))
@@ -799,7 +799,7 @@ func TestStreamingAcceptHeader(t *testing.T) {
 	// Verify that streaming requests include Accept: text/event-stream
 	var receivedAccept string
 
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedAccept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "ok"))
@@ -824,7 +824,7 @@ func TestStreamingAcceptHeader(t *testing.T) {
 
 func TestStreamingEmptyDataLines(t *testing.T) {
 	// SSE with blank lines and event: fields (should be ignored, only data: parsed)
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 
 		// Various non-data lines
@@ -891,7 +891,7 @@ func TestStreamingAgentWithToolCalls(t *testing.T) {
 	// Test agent executor with streaming enabled, doing tool call + final response
 	var callCount int32
 
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req ChatCompletionRequest
 		_ = json.Unmarshal(body, &req)
@@ -962,7 +962,7 @@ func TestStreamingRespectsContext(t *testing.T) {
 	// Verify that context cancellation is respected during streaming
 	var _ = strings.NewReader // ensure strings import is used
 
-	server := newStreamingMockServer(func(w http.ResponseWriter, r *http.Request) {
+	server := newStreamingMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		// Send one chunk then block (simulating slow stream)
 		writeSSEChunk(w, makeStreamChunk("c1", "m1", "partial"))

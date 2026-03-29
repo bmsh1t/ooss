@@ -1,0 +1,32 @@
+kind: module
+name: seed-ai-semantic-fixtures-module
+description: Seed deterministic scan artifacts for semantic vector smoke regression.
+
+steps:
+  - name: seed-artifacts
+    type: bash
+    command: |
+      mkdir -p {{Output}}/ai-analysis {{Output}}/subdomain {{Output}}/probing {{Output}}/fingerprint {{Output}}/vulnscan
+
+      cat > {{Output}}/subdomain/subdomain-{{TargetSpace}}.txt <<EOF
+      {{Target}}
+      admin.{{Target}}
+      api.{{Target}}
+      EOF
+
+      cat > {{Output}}/probing/http-{{TargetSpace}}.txt <<EOF
+      https://{{Target}}/login
+      https://{{Target}}/preview
+      https://admin.{{Target}}/console
+      https://api.{{Target}}/graphql
+      EOF
+
+      cat > {{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl <<EOF
+      {"url":"https://{{Target}}/login","tech":["nginx","go","jwt"],"title":"Login Gateway"}
+      {"url":"https://{{Target}}/preview","tech":["nextjs"],"title":"Preview Route"}
+      {"url":"https://api.{{Target}}/graphql","tech":["graphql","go"],"title":"GraphQL API"}
+      EOF
+
+      cat > {{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt <<EOF
+      {"template-id":"jwt-confusion","info":{"name":"JWT Algorithm Confusion","severity":"critical"},"matched-at":"https://{{Target}}/login","host":"https://{{Target}}/login","type":"http"}
+      EOF

@@ -141,6 +141,9 @@ params:
   # 超时
   - name: ipTimeout
     default: "2h"
+  - name: dnsExternalTimeout
+    default: "10m"
+    description: "Per-tool timeout for DNS resolution helpers"
 
   # Shodan
   - name: enableShodanScan
@@ -162,21 +165,6 @@ params:
 # DEPENDENCIES SECTION
 # -----------------------------------------------------------------------------
 dependencies:
-  commands:
-    - puredns
-    - metabigor
-    - jq
-    - subwiz
-    - dnsx
-    - hakip2host
-    - asnmap
-    - gotator
-    - tlsx
-    - anew
-    - unfurl
-    - prips
-    - dsieve
-    - cdncheck
   variables:
     - name: Target
       type: string
@@ -229,16 +217,17 @@ steps:
     functions:
       - 'create_folder("{{Output}}/probing")'
       - 'create_folder("{{Output}}/ipspace")'
+      - 'exec_cmd(": > {{dnsFile}} && : > {{nonwildFile}} && : > {{resolvedFile}} && : > {{ipFile}} && : > {{nonCdnIPFile}} && : > {{axfrOutputFile}} && : > {{wildcardsFile}} && : > {{srvFile}} && : > {{ptrSweepFile}} && : > {{dnsRecordsFile}} && : > {{dnsExtractedSubsFile}} && : > {{recursiveBruteFile}} && : > {{asnAutoFile}} && : > {{nsDelegatedZonesFile}} && : > {{nsAxfrSubsFile}} && : > {{geoInfoFile}} && : > {{shodanOutput}} && : > {{tlsIpCertsFile}} && : > {{tlsIpHostsFile}}")'
 
   # ===========================================================================
   # Phase 1: DNS Resolution
   # ===========================================================================
   - name: resolve-dns
     type: function
-    pre_condition: 'file_exists("{{subdomainFile}}")'
+    pre_condition: 'file_exists("{{subdomainFile}}") && command_exists("puredns")'
     log: "Resolving DNS with puredns"
     functions:
-      - 'exec_cmd("puredns resolve {{subdomainFile}} --write {{nonwildFile}} --write-massdns {{dnsFile}} --write-wildcards {{Output}}/probing/wildcards-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} --rate-limit {{massdnsRateBrute}} --rate-limit-trusted {{massdnsRateBrute}} >/dev/null 2>&1")'
+      - 'exec_cmd("timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{subdomainFile}} --write {{nonwildFile}} --write-massdns {{dnsFile}} --write-wildcards {{Output}}/probing/wildcards-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} --rate-limit {{massdnsRateBrute}} --rate-limit-trusted {{massdnsRateBrute}} >/dev/null 2>&1 || true")'
     on_error:
       - action: continue
 
@@ -247,7 +236,7 @@ steps:
   # ===========================================================================
   - name: deep-wildcard-filter
     type: bash
-    pre_condition: '{{enableDeepWildcardFilter}} && file_exists("{{subdomainFile}}")'
+    pre_condition: '{{enableDeepWildcardFilter}} && file_exists("{{subdomainFile}}") && command_exists("dnsx")'
     log: "Running deep wildcard detection (multi-iteration)"
     command: |
       if [ -s "{{subdomainFile}}" ]; then
@@ -264,9 +253,11 @@ steps:
           while IFS= read -r subdomain; do
             [ "$subdomain" = "{{Target}}" ] && continue
             parent="${subdomain#*.}"
-            if [[ "$parent" == *".{{Target}}" ]] || [ "$parent" = "{{Target}}" ]; then
-              echo "$parent" >> {{Output}}/probing/dwf_parents.txt
-            fi
+            case "$parent" in
+              "{{Target}}"|*".{{Target}}")
+                echo "$parent" >> {{Output}}/probing/dwf_parents.txt
+                ;;
+            esac
           done < {{Output}}/probing/dwf_working.txt
           
           # Get unique parents and remove already known wildcards
@@ -285,7 +276,7 @@ steps:
           
           # Test random probes for wildcard
           if [ -s "{{Output}}/probing/dwf_probes.txt" ]; then
-            dnsx -silent -retry 2 -r {{trustedResolvers}} < {{Output}}/probing/dwf_probes.txt > {{Output}}/probing/dwf_resolved.txt 2>/dev/null || true
+            timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -silent -retry 2 -r {{trustedResolvers}} < {{Output}}/probing/dwf_probes.txt > {{Output}}/probing/dwf_resolved.txt 2>/dev/null || true
             
             if [ -s "{{Output}}/probing/dwf_resolved.txt" ]; then
               while IFS= read -r resolved_probe; do
@@ -320,7 +311,7 @@ steps:
   # ===========================================================================
   - name: dns-zone-transfer
     type: bash
-    pre_condition: '{{enableZoneTransfer}}'
+    pre_condition: '{{enableZoneTransfer}} && command_exists("dig")'
     log: "Checking DNS Zone Transfer (AXFR)"
     command: |
       : > {{axfrOutputFile}}
@@ -346,7 +337,7 @@ steps:
   # ===========================================================================
   - name: ns-delegation-scan
     type: bash
-    pre_condition: '{{enableNsDelegation}} && file_exists("{{subdomainFile}}")'
+    pre_condition: '{{enableNsDelegation}} && file_exists("{{subdomainFile}}") && command_exists("dnsx") && command_exists("jq") && command_exists("dig")'
     log: "Checking NS delegation and attempting AXFR on delegated subdomains"
     command: |
       : > {{nsDelegatedZonesFile}}
@@ -358,7 +349,7 @@ steps:
       
       # Check NS records for each known subdomain using dnsx with JSON output
       if [ -s "{{subdomainFile}}" ]; then
-        dnsx -ns -resp -silent -retry 2 -r {{trustedResolvers}} -json < {{subdomainFile}} 2>/dev/null > {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl || true
+        timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -ns -resp -silent -retry 2 -r {{trustedResolvers}} -json < {{subdomainFile}} 2>/dev/null > {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl || true
         
         if [ -s "{{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl" ]; then
           while IFS= read -r line; do
@@ -379,13 +370,13 @@ steps:
             if [ -n "$ns_list" ] && [ "$ns_list" != "null" ]; then
               echo "$sub" >> {{nsDelegatedZonesFile}}
               # Attempt AXFR on each delegated NS (with 5s timeout per NS)
-              while IFS= read -r ns; do
+              printf '%s\n' "$ns_list" | while IFS= read -r ns; do
                 [ -z "$ns" ] && continue
                 [ "$ns" = "null" ] && continue
                 # Remove trailing dot from NS if present
                 ns="${ns%.}"
                 timeout 5 dig axfr "$sub" @"$ns" +short 2>/dev/null | awk '{print $1}' | sed 's/\.$//' | sed '/^$/d' >> {{nsAxfrSubsFile}} || true
-              done <<< "$ns_list"
+              done
             fi
           done < {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl
           
@@ -411,14 +402,14 @@ steps:
   # ===========================================================================
   - name: geo-info-lookup
     type: bash
-    pre_condition: '{{enableGeoInfo}} && file_exists("{{ipFile}}")'
+    pre_condition: '{{enableGeoInfo}} && file_exists("{{ipFile}}") && command_exists("curl")'
     log: "Looking up GeoIP information for discovered IPs"
     command: |
       : > {{geoInfoFile}}
       
       # Use ipinfo.io API for geo lookup (limit to first 500 IPs, 10 concurrent)
       if [ -s "{{ipFile}}" ]; then
-        head -n 500 {{ipFile}} | xargs -P 10 -I {} curl -s "https://ipinfo.io/widget/demo/{}" 2>/dev/null >> {{geoInfoFile}} || true
+        head -n 500 {{ipFile}} | xargs -P 10 -I {} curl -m 10 -s "https://ipinfo.io/widget/demo/{}" 2>/dev/null >> {{geoInfoFile}} || true
       fi
     on_error:
       - action: continue
@@ -428,10 +419,10 @@ steps:
   # ===========================================================================
   - name: dns-bruteforce
     type: function
-    pre_condition: '{{enableDnsBruteForcing}}'
+    pre_condition: '{{enableDnsBruteForcing}} && command_exists("puredns")'
     log: "Running DNS bruteforce with puredns"
     functions:
-      - 'exec_cmd("puredns bruteforce {{dnsBruteForceWordlist}} {{Target}} --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/subbrute-{{TargetSpace}}.txt >/dev/null 2>&1")'
+      - 'exec_cmd("timeout --foreground -k 15s {{dnsExternalTimeout}} puredns bruteforce {{dnsBruteForceWordlist}} {{Target}} --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/subbrute-{{TargetSpace}}.txt >/dev/null 2>&1 || true")'
     on_error:
       - action: continue
 
@@ -440,12 +431,12 @@ steps:
   # ===========================================================================
   - name: generate-permutations
     type: function
-    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enablePermutation}} && {{enableDnsBruteForcing}}'
+    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enablePermutation}} && {{enableDnsBruteForcing}} && command_exists("alterx") && command_exists("puredns")'
     log: "Generating permutation subdomains"
     functions:
       - 'exec_cmd("cat {{subdomainFile}} | alterx -silent >> {{Output}}/probing/permutation-{{TargetSpace}}.txt")'
       - 'sort_unix("{{Output}}/probing/permutation-{{TargetSpace}}.txt")'
-      - 'exec_cmd("puredns resolve {{Output}}/probing/permutation-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/permutations-{{TargetSpace}}.txt >/dev/null 2>&1")'
+      - 'exec_cmd("timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/probing/permutation-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/permutations-{{TargetSpace}}.txt >/dev/null 2>&1 || true")'
       - 'exec_cmd("rm -rf {{Output}}/probing/permutation-{{TargetSpace}}.txt")'
     on_error:
       - action: continue
@@ -455,11 +446,11 @@ steps:
   # ===========================================================================
   - name: ai-permutations
     type: function
-    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enableIaPermutation}}'
+    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enableIaPermutation}} && command_exists("subwiz") && command_exists("puredns")'
     log: "Generating AI-powered permutation subdomains (subwiz)"
     functions:
-      - 'exec_cmd("subwiz -i {{subdomainFile}} --no-resolve -o {{Output}}/probing/subwiz-{{TargetSpace}}.txt 2>/dev/null")'
-      - 'exec_cmd("if [ -s \"{{Output}}/probing/subwiz-{{TargetSpace}}.txt\" ]; then puredns resolve {{Output}}/probing/subwiz-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/subwiz-resolved-{{TargetSpace}}.txt >/dev/null 2>&1; fi")'
+      - 'exec_cmd("timeout --foreground -k 15s {{dnsExternalTimeout}} subwiz -i {{subdomainFile}} --no-resolve -o {{Output}}/probing/subwiz-{{TargetSpace}}.txt 2>/dev/null || true")'
+      - 'exec_cmd("if [ -s \"{{Output}}/probing/subwiz-{{TargetSpace}}.txt\" ]; then timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/probing/subwiz-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/subwiz-resolved-{{TargetSpace}}.txt >/dev/null 2>&1 || true; fi")'
       - 'exec_cmd("rm -rf {{Output}}/probing/subwiz-{{TargetSpace}}.txt")'
     on_error:
       - action: continue
@@ -469,17 +460,17 @@ steps:
   # ===========================================================================
   - name: regex-permutations
     type: bash
-    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enableRegexPermutation}}'
+    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enableRegexPermutation}} && command_exists("regulator") && command_exists("puredns")'
     log: "Generating regex-based permutation subdomains (regulator)"
     command: |
       : > {{Output}}/probing/regulator-{{TargetSpace}}.txt
       : > {{Output}}/probing/regulator-resolved-{{TargetSpace}}.txt
 
       # Run regulator to generate permutations
-      regulator -t {{Target}} -f {{subdomainFile}} -o {{Output}}/probing/regulator-{{TargetSpace}}.txt 2>/dev/null || true
+      timeout --foreground -k 15s {{dnsExternalTimeout}} regulator -t {{Target}} -f {{subdomainFile}} -o {{Output}}/probing/regulator-{{TargetSpace}}.txt 2>/dev/null || true
 
       if [ -s "{{Output}}/probing/regulator-{{TargetSpace}}.txt" ]; then
-        puredns resolve {{Output}}/probing/regulator-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/regulator-resolved-{{TargetSpace}}.txt >/dev/null 2>&1 || true
+        timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/probing/regulator-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/regulator-resolved-{{TargetSpace}}.txt >/dev/null 2>&1 || true
         count=$(wc -l < {{Output}}/probing/regulator-resolved-{{TargetSpace}}.txt 2>/dev/null || echo 0)
         echo "[REGULATOR] Resolved $count regex-based permutations"
       fi
@@ -496,7 +487,7 @@ steps:
     log: "Merging DNS results"
     functions:
       - 'exec_cmd("cat {{Output}}/probing/subbrute-{{TargetSpace}}.txt {{Output}}/probing/permutations-{{TargetSpace}}.txt {{Output}}/probing/subwiz-resolved-{{TargetSpace}}.txt {{Output}}/probing/regulator-resolved-{{TargetSpace}}.txt 2>/dev/null | sort -u > {{Output}}/probing/brute-perm-{{TargetSpace}}.txt")'
-      - 'exec_cmd("if [ -s \"{{Output}}/probing/brute-perm-{{TargetSpace}}.txt\" ]; then puredns resolve {{Output}}/probing/brute-perm-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/resolved-brute-perm-{{TargetSpace}}.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true; fi")'
+      - 'exec_cmd("if command -v puredns >/dev/null 2>&1 && [ -s \"{{Output}}/probing/brute-perm-{{TargetSpace}}.txt\" ]; then timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/probing/brute-perm-{{TargetSpace}}.txt --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/resolved-brute-perm-{{TargetSpace}}.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true; fi")'
       - 'exec_cmd("cat {{nonwildFile}} {{Output}}/probing/resolved-brute-perm-{{TargetSpace}}.txt 2>/dev/null | sort -u > {{resolvedFile}} || cat {{nonwildFile}} 2>/dev/null > {{resolvedFile}}")'
       - 'sort_unix("{{dnsFile}}")'
     on_error:
@@ -508,7 +499,7 @@ steps:
   - name: asn-discovery
     type: bash
     log: "Discovering ASN and IP ranges based on Organization name"
-    pre_condition: 'typeof Org !== "undefined" && Org !== ""'
+    pre_condition: 'typeof Org !== "undefined" && Org !== "" && command_exists("metabigor")'
     command: |
       echo "{{Org}}" | timeout -k 1m {{ipTimeout}} metabigor net --org -o {{Output}}/ipspace/{{TargetSpace}}-range.txt 2>/dev/null || true
     on_error: 
@@ -516,7 +507,7 @@ steps:
 
   - name: ip-summary
     type: bash
-    pre_condition: 'file_exists("{{dnsFile}}")'
+    pre_condition: 'file_exists("{{dnsFile}}") && command_exists("metabigor")'
     log: "Getting IP summary from discovered hosts"
     command: |
       awk '$2=="A" {print $3}' {{dnsFile}} | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -50 | while read ip; do echo "$ip" | metabigor ipc --json 2>/dev/null >> {{Output}}/ipspace/ip-summary-{{TargetSpace}}.jsonl || true; done
@@ -539,9 +530,9 @@ steps:
   # ===========================================================================
   - name: detect-cdn-providers
     type: bash
-    pre_condition: 'file_exists("{{ipFile}}") && file_length("{{ipFile}}") > 0'
+    pre_condition: 'file_exists("{{ipFile}}") && file_length("{{ipFile}}") > 0 && command_exists("cdncheck")'
     log: "Detecting CDN/WAF providers"
-    command: 'cdncheck -silent -resp -cdn -waf -nc < {{ipFile}} > {{Output}}/ipspace/cdn_providers-{{TargetSpace}}.txt 2>/dev/null || true'
+    command: 'timeout --foreground -k 15s {{dnsExternalTimeout}} cdncheck -silent -resp -cdn -waf -nc < {{ipFile}} > {{Output}}/ipspace/cdn_providers-{{TargetSpace}}.txt 2>/dev/null || true'
     on_error:
       - action: continue
 
@@ -549,7 +540,11 @@ steps:
     type: bash
     pre_condition: 'file_exists("{{ipFile}}") && file_exists("{{Output}}/ipspace/cdn_providers-{{TargetSpace}}.txt")'
     log: "Extracting non-CDN IPs"
-    command: 'comm -23 <(sort -u {{ipFile}}) <(cut -d"[" -f1 {{Output}}/ipspace/cdn_providers-{{TargetSpace}}.txt | sed "s/[[:space:]]*$//" | sort -u) > {{nonCdnIPFile}} 2>/dev/null || true'
+    command: |
+      sort -u {{ipFile}} > {{Output}}/ipspace/ip-sorted-{{TargetSpace}}.txt 2>/dev/null || true
+      cut -d"[" -f1 {{Output}}/ipspace/cdn_providers-{{TargetSpace}}.txt | sed "s/[[:space:]]*$//" | sort -u > {{Output}}/ipspace/cdn-sorted-{{TargetSpace}}.txt 2>/dev/null || true
+      comm -23 {{Output}}/ipspace/ip-sorted-{{TargetSpace}}.txt {{Output}}/ipspace/cdn-sorted-{{TargetSpace}}.txt > {{nonCdnIPFile}} 2>/dev/null || true
+      rm -f {{Output}}/ipspace/ip-sorted-{{TargetSpace}}.txt {{Output}}/ipspace/cdn-sorted-{{TargetSpace}}.txt 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -559,8 +554,8 @@ steps:
   - name: tls-ip-pivots-scan
     type: bash
     log: "Extracting hostnames from TLS certificates on IPs"
-    pre_condition: '{{enableTlsIpPivots}} && file_exists("{{ipFile}}")'
-    command: 'cat {{ipFile}} | tlsx -san -cn -silent -ro -resp-only -p {{tlsIpPorts}} -c {{threads}} -json > {{tlsIpCertsFile}} 2>/dev/null || true'
+    pre_condition: '{{enableTlsIpPivots}} && file_exists("{{ipFile}}") && command_exists("tlsx")'
+    command: 'timeout --foreground -k 15s {{dnsExternalTimeout}} bash -lc ''cat {{ipFile}} | tlsx -san -cn -silent -ro -resp-only -p {{tlsIpPorts}} -c {{threads}} -json > {{tlsIpCertsFile}} 2>/dev/null'' || true'
 
   - name: process-tls-certs
     type: bash
@@ -575,11 +570,11 @@ steps:
   # ===========================================================================
   - name: shodan-port-scan
     type: function
-    pre_condition: "{{enableShodanScan}}"
+    pre_condition: '{{enableShodanScan}} && command_exists("curl")'
     log: "Scanning IPs with Shodan InternetDB"
     functions:
       - 'exec_cmd(": > {{shodanOutput}}")'
-      - 'exec_cmd("if [ -s \"{{ipFile}}\" ]; then cat {{ipFile}} | while read ip; do curl -s \"https://internetdb.shodan.io/${ip}\" 2>/dev/null >> {{shodanOutput}}; echo \"\" >> {{shodanOutput}}; done; fi")'
+      - 'exec_cmd("if [ -s \"{{ipFile}}\" ]; then cat {{ipFile}} | while read ip; do curl -m 10 -s \"https://internetdb.shodan.io/${ip}\" 2>/dev/null >> {{shodanOutput}}; echo \"\" >> {{shodanOutput}}; done; fi")'
     on_error:
       - action: continue
 
@@ -588,7 +583,7 @@ steps:
   # ===========================================================================
   - name: srv-enum
     type: bash
-    pre_condition: '{{enableSrvEnum}}'
+    pre_condition: '{{enableSrvEnum}} && command_exists("dig")'
     log: "Enumerating SRV records for service discovery"
     command: |
       : > {{srvFile}}
@@ -617,7 +612,7 @@ steps:
   # ===========================================================================
   - name: ptr-sweep
     type: bash
-    pre_condition: '{{enablePtrSweep}} && file_exists("{{Output}}/ipspace/{{TargetSpace}}-range.txt")'
+    pre_condition: '{{enablePtrSweep}} && file_exists("{{Output}}/ipspace/{{TargetSpace}}-range.txt") && command_exists("prips") && command_exists("dig")'
     log: "Running PTR sweep over ASN CIDRs (may be slow)"
     command: |
       : > {{ptrSweepFile}}
@@ -657,7 +652,7 @@ steps:
   # ===========================================================================
   - name: dns-record-extraction
     type: bash
-    pre_condition: '{{enableDnsRecordExtract}} && file_exists("{{subdomainFile}}")'
+    pre_condition: '{{enableDnsRecordExtract}} && file_exists("{{subdomainFile}}") && command_exists("dnsx") && command_exists("jq") && command_exists("hakip2host") && command_exists("unfurl") && command_exists("puredns") && command_exists("anew")'
     log: "Extracting DNS records and discovering subdomains from them"
     command: |
       : > {{dnsRecordsFile}}
@@ -665,7 +660,7 @@ steps:
       
       # Query DNS records using dnsx
       if [ -s "{{subdomainFile}}" ]; then
-        dnsx -r {{trustedResolvers}} -recon -silent -retry 3 -json  -o {{dnsRecordsFile}} < {{subdomainFile}} 2>/dev/null || true
+        timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -r {{trustedResolvers}} -recon -silent -retry 3 -json  -o {{dnsRecordsFile}} < {{subdomainFile}} >/dev/null 2>&1 || true
       fi
       
       if [ -s "{{dnsRecordsFile}}" ]; then
@@ -676,15 +671,17 @@ steps:
         jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' {{dnsRecordsFile}} 2>/dev/null  | sort -u | hakip2host 2>/dev/null | awk '{print $3}' | unfurl -u domains | sed -e 's/^\*\.//' -e 's/\.$//' -e '/\./!d' | grep -E "\.{{Target}}$" | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u | anew -q {{dnsExtractedSubsFile}} || true
         
         # Use ip.thc.org API for additional domain discovery
-        jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' {{dnsRecordsFile}} 2>/dev/null  | sort -u | while read ip; do
+          if command -v curl >/dev/null 2>&1; then
+            jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' {{dnsRecordsFile}} 2>/dev/null  | sort -u | while read ip; do
             [ -z "$ip" ] && continue
-            curl -s "https://ip.thc.org/$ip" 2>/dev/null  | grep -E "\.{{Target}}$" | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u | anew -q {{dnsExtractedSubsFile}} || true
-          done
+            curl -m 10 -s "https://ip.thc.org/$ip" 2>/dev/null  | grep -E "\.{{Target}}$" | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u | anew -q {{dnsExtractedSubsFile}} || true
+            done
+          fi
       fi
       
       # Resolve extracted subdomains and merge
       if [ -s "{{dnsExtractedSubsFile}}" ]; then
-        puredns resolve {{dnsExtractedSubsFile}} --wildcard-tests {{wildcardTests}}  -w {{Output}}/subdomain/dns-extracted-resolved-{{TargetSpace}}.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
+        timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{dnsExtractedSubsFile}} --wildcard-tests {{wildcardTests}}  -w {{Output}}/subdomain/dns-extracted-resolved-{{TargetSpace}}.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
         
         if [ -s "{{Output}}/subdomain/dns-extracted-resolved-{{TargetSpace}}.txt" ]; then
           cat {{Output}}/subdomain/dns-extracted-resolved-{{TargetSpace}}.txt >> {{subdomainFile}} 2>/dev/null || true
@@ -700,7 +697,7 @@ steps:
   # ===========================================================================
   - name: recursive-brute
     type: bash
-    pre_condition: '{{enableRecursiveBrute}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") <= {{permLimit}}'
+    pre_condition: '{{enableRecursiveBrute}} && file_exists("{{subdomainFile}}") && file_length("{{subdomainFile}}") <= {{permLimit}} && command_exists("puredns") && command_exists("gotator")'
     log: "Running recursive bruteforce on discovered subdomains"
     command: |
       : > {{recursiveBruteFile}}
@@ -716,7 +713,7 @@ steps:
             # Brute force each subdomain
             while IFS= read -r sub; do
               [ -z "$sub" ] && continue
-              puredns bruteforce {{dnsBruteForceWordlist}} "$sub"  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/brute_recursive_part.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
+              timeout --foreground -k 15s {{dnsExternalTimeout}} puredns bruteforce {{dnsBruteForceWordlist}} "$sub"  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/brute_recursive_part.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
               
               if [ -s "{{Output}}/subdomain/brute_recursive_part.txt" ]; then
                 cat {{Output}}/subdomain/brute_recursive_part.txt >> {{recursiveBruteFile}} 2>/dev/null || true
@@ -728,14 +725,14 @@ steps:
               gotator -sub {{recursiveBruteFile}} -perm {{permWordlists}} -silent 2>/dev/null  | head -c {{permLimit}} > {{Output}}/subdomain/recursive_perm.txt || true
               
               if [ -s "{{Output}}/subdomain/recursive_perm.txt" ]; then
-                puredns resolve {{Output}}/subdomain/recursive_perm.txt  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/recursive_perm_resolved.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
+                timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/subdomain/recursive_perm.txt  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/recursive_perm_resolved.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
                 
                 # Merge all recursive results
                 cat {{recursiveBruteFile}} {{Output}}/subdomain/recursive_perm_resolved.txt 2>/dev/null  | sort -u > {{Output}}/subdomain/recursive_all.txt || true
                 
                 # Final resolve and merge
                 if [ -s "{{Output}}/subdomain/recursive_all.txt" ]; then
-                  puredns resolve {{Output}}/subdomain/recursive_all.txt  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/recursive_final.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
+                  timeout --foreground -k 15s {{dnsExternalTimeout}} puredns resolve {{Output}}/subdomain/recursive_all.txt  --wildcard-tests {{wildcardTests}} -w {{Output}}/subdomain/recursive_final.txt --rate-limit {{massdnsRateBrute}} >/dev/null 2>&1 || true
                   
                   if [ -s "{{Output}}/subdomain/recursive_final.txt" ]; then
                     cat {{Output}}/subdomain/recursive_final.txt >> {{subdomainFile}} 2>/dev/null || true
@@ -758,7 +755,7 @@ steps:
   # ===========================================================================
   - name: asn-auto-discover
     type: bash
-    pre_condition: '{{enableAsnAutoDiscover}}'
+    pre_condition: '{{enableAsnAutoDiscover}} && command_exists("asnmap") && command_exists("jq")'
     log: "Running automatic ASN discovery from domain"
     command: |
       : > {{asnAutoFile}}
@@ -773,7 +770,7 @@ steps:
         jq -r '.domains[]? // empty' {{asnAutoFile}} 2>/dev/null | grep -E "\.{{Target}}$" | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u >> {{subdomainFile}} 2>/dev/null || true
 
         # Use metabigor for additional IP range discovery if Org is set
-        if [ -n "{{Org}}" ] && [ "{{Org}}" != "" ] && [ "{{Org}}" != "nil" ]; then
+        if command -v metabigor >/dev/null 2>&1 && [ -n "{{Org}}" ] && [ "{{Org}}" != "" ] && [ "{{Org}}" != "nil" ]; then
           echo "{{Org}}" | metabigor net --org -o {{Output}}/ipspace/{{TargetSpace}}-range-extra.txt 2>/dev/null || true
           [ -s "{{Output}}/ipspace/{{TargetSpace}}-range-extra.txt" ] && cat {{Output}}/ipspace/{{TargetSpace}}-range-extra.txt >> {{Output}}/ipspace/{{TargetSpace}}-range.txt 2>/dev/null && rm -f {{Output}}/ipspace/{{TargetSpace}}-range-extra.txt
         fi

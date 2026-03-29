@@ -754,18 +754,32 @@ type pythonRunner struct {
 	isUV bool
 }
 
-// findPythonRunner returns the preferred Python runner: uv → python3 → python.
-func findPythonRunner() pythonRunner {
+// findPythonRunners returns Python runners in preference order: uv → python3 → python.
+func findPythonRunners() []pythonRunner {
+	runners := make([]pythonRunner, 0, 3)
+	seen := make(map[string]struct{}, 3)
 	if _, err := exec.LookPath("uv"); err == nil {
-		return pythonRunner{bin: "uv", isUV: true}
+		runners = append(runners, pythonRunner{bin: "uv", isUV: true})
+		seen["uv"] = struct{}{}
 	}
 	if _, err := exec.LookPath("python3"); err == nil {
-		return pythonRunner{bin: "python3"}
+		runners = append(runners, pythonRunner{bin: "python3"})
+		seen["python3"] = struct{}{}
 	}
-	return pythonRunner{bin: "python"}
+	if _, err := exec.LookPath("python"); err == nil {
+		if _, ok := seen["python"]; !ok {
+			runners = append(runners, pythonRunner{bin: "python"})
+			seen["python"] = struct{}{}
+		}
+	}
+	if len(runners) == 0 {
+		runners = append(runners, pythonRunner{bin: "python"})
+	}
+	return runners
 }
 
-// execPython runs inline Python code. Prefers `uv run -` (stdin), falls back to `python3 -c`.
+// execPython runs inline Python code. Prefers `uv run -` (stdin), then falls back
+// to `python3 -c` / `python -c` when uv is unavailable or cannot execute.
 // Usage: exec_python(code) -> string
 func (vf *vmFunc) execPython(call goja.FunctionCall) goja.Value {
 	code := call.Argument(0).String()
@@ -776,27 +790,35 @@ func (vf *vmFunc) execPython(call goja.FunctionCall) goja.Value {
 		return vf.vm.ToValue("")
 	}
 
-	runner := findPythonRunner()
-	// @NOTE: This is intentional - exec_python() is a utility function exposed to workflow
-	// definitions for executing Python code. Input comes from trusted workflow YAML files.
-	var cmd *exec.Cmd
-	if runner.isUV {
-		cmd = exec.Command("uv", "run", "-")
-		cmd.Stdin = strings.NewReader(code)
-	} else {
-		cmd = exec.Command(runner.bin, "-c", code)
-	}
-	output, err := cmd.Output()
-	if err != nil {
-		logger.Get().Warn("execPython: command failed", zap.String("runner", runner.bin), zap.Error(err))
-		return vf.vm.ToValue("")
-	}
+	var lastErr error
+	for _, runner := range findPythonRunners() {
+		// @NOTE: This is intentional - exec_python() is a utility function exposed to workflow
+		// definitions for executing Python code. Input comes from trusted workflow YAML files.
+		var cmd *exec.Cmd
+		if runner.isUV {
+			cmd = exec.Command("uv", "run", "-")
+			cmd.Stdin = strings.NewReader(code)
+		} else {
+			cmd = exec.Command(runner.bin, "-c", code)
+		}
+		output, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+			logger.Get().Warn("execPython: command failed", zap.String("runner", runner.bin), zap.Error(err))
+			continue
+		}
 
-	logger.Get().Debug(terminal.HiGreen("execPython")+" result", zap.Int("outputLength", len(output)))
-	return vf.vm.ToValue(strings.TrimSpace(string(output)))
+		logger.Get().Debug(terminal.HiGreen("execPython")+" result", zap.Int("outputLength", len(output)))
+		return vf.vm.ToValue(strings.TrimSpace(string(output)))
+	}
+	if lastErr != nil {
+		logger.Get().Debug("execPython: all runners failed", zap.Error(lastErr))
+	}
+	return vf.vm.ToValue("")
 }
 
-// execPythonFile runs a Python file. Prefers `uv run <path>`, falls back to `python3 <path>`.
+// execPythonFile runs a Python file. Prefers `uv run <path>`, then falls back to
+// `python3 <path>` / `python <path>` when uv cannot execute.
 // Usage: exec_python_file(path) -> string
 func (vf *vmFunc) execPythonFile(call goja.FunctionCall) goja.Value {
 	path := call.Argument(0).String()
@@ -807,23 +829,30 @@ func (vf *vmFunc) execPythonFile(call goja.FunctionCall) goja.Value {
 		return vf.vm.ToValue("")
 	}
 
-	runner := findPythonRunner()
-	// @NOTE: This is intentional - exec_python_file() is a utility function exposed to workflow
-	// definitions for executing Python files. Input comes from trusted workflow YAML files.
-	var cmd *exec.Cmd
-	if runner.isUV {
-		cmd = exec.Command("uv", "run", path)
-	} else {
-		cmd = exec.Command(runner.bin, path)
-	}
-	output, err := cmd.Output()
-	if err != nil {
-		logger.Get().Warn("execPythonFile: command failed", zap.String("runner", runner.bin), zap.String("path", path), zap.Error(err))
-		return vf.vm.ToValue("")
-	}
+	var lastErr error
+	for _, runner := range findPythonRunners() {
+		// @NOTE: This is intentional - exec_python_file() is a utility function exposed to workflow
+		// definitions for executing Python files. Input comes from trusted workflow YAML files.
+		var cmd *exec.Cmd
+		if runner.isUV {
+			cmd = exec.Command("uv", "run", path)
+		} else {
+			cmd = exec.Command(runner.bin, path)
+		}
+		output, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+			logger.Get().Warn("execPythonFile: command failed", zap.String("runner", runner.bin), zap.String("path", path), zap.Error(err))
+			continue
+		}
 
-	logger.Get().Debug(terminal.HiGreen("execPythonFile")+" result", zap.String("path", path), zap.Int("outputLength", len(output)))
-	return vf.vm.ToValue(strings.TrimSpace(string(output)))
+		logger.Get().Debug(terminal.HiGreen("execPythonFile")+" result", zap.String("path", path), zap.Int("outputLength", len(output)))
+		return vf.vm.ToValue(strings.TrimSpace(string(output)))
+	}
+	if lastErr != nil {
+		logger.Get().Debug("execPythonFile: all runners failed", zap.String("path", path), zap.Error(lastErr))
+	}
+	return vf.vm.ToValue("")
 }
 
 // findBunBin returns "bun" if available in PATH, empty string otherwise.

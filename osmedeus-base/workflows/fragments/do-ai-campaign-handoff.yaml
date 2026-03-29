@@ -370,7 +370,7 @@ steps:
         exit 0
       fi
 
-      OSM_BIN="{{OsmedeusExec}}"
+      OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
@@ -407,6 +407,7 @@ steps:
           }' > "{{campaignCreateOutput}}"
         exit 0
       fi
+      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       WORKFLOW_FLAG="-f"
       if [ "{{campaignWorkflowKind}}" = "module" ]; then
@@ -414,7 +415,10 @@ steps:
       fi
 
       set -- \
-        "$OSM_BIN" --json campaign create \
+        "$OSM_BIN" \
+        --base-folder "{{BaseFolder}}" \
+        --workflow-folder "{{Workflows}}" \
+        --json campaign create \
         --name "{{TargetSpace}}-ai-handoff" \
         "$WORKFLOW_FLAG" "{{campaignWorkflow}}" \
         -T "{{campaignTargetsFile}}" \
@@ -455,6 +459,8 @@ steps:
 
       {
         echo "[Campaign Create] Started: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "[Campaign Create] Base folder: {{BaseFolder}}"
+        echo "[Campaign Create] Workflows: {{Workflows}}"
         echo "[Campaign Create] Workflow: {{campaignWorkflow}} ({{campaignWorkflowKind}})"
         echo "[Campaign Create] Targets: $CAMPAIGN_TARGET_COUNT"
         [ -n "$CAMPAIGN_PRIORITY_MODE" ] && echo "[Campaign Create] Priority mode: $CAMPAIGN_PRIORITY_MODE"
@@ -487,6 +493,7 @@ steps:
           --argjson auto_deep_scan "$AUTO_DEEP_SCAN" \
           --argjson high_risk_severities "$HIGH_RISK_JSON" \
           '($raw[0] // {}) + {
+            status: "created",
             workflow: $workflow,
             workflow_kind: $workflow_kind,
             priority: $priority,

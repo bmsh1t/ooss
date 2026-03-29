@@ -110,6 +110,9 @@ var rootCmd = &cobra.Command{
 			verbose = true
 		}
 
+		// Structured JSON output must stay machine-readable with no logger noise on stdout.
+		suppressConsoleNoise := silent || globalJSON
+
 		// Determine log file path
 		actualLogFile := logFile
 		if logFileTmp && actualLogFile == "" {
@@ -120,7 +123,7 @@ var rootCmd = &cobra.Command{
 
 		// Initialize logger
 		logCfg := logger.DefaultConfig()
-		if silent || disableLogging {
+		if suppressConsoleNoise || disableLogging {
 			logCfg.Level = "error" // Only show errors in silent mode
 			logCfg.Silent = true
 		} else if debug {
@@ -137,7 +140,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to initialize logger: %w", err)
 		}
 
-		if silent {
+		if suppressConsoleNoise {
 			_ = os.Setenv("OSMEDEUS_SILENT", "1")
 		} else {
 			_ = os.Unsetenv("OSMEDEUS_SILENT")

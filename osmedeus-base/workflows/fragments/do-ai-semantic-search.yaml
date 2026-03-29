@@ -35,7 +35,7 @@ params:
   - name: knowledgeSearchOutput
     default: "{{Output}}/ai-analysis/knowledge-search-results-{{TargetSpace}}.json"
   - name: skillsDir
-    default: "{{OsmedeusBase}}/skills"
+    default: "{{Workflows}}/../skills"
   - name: nucleiFile
     default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
   - name: httpFile
@@ -114,15 +114,23 @@ params:
     default: "{{semanticIndexDir}}/vector-embed-input.txt"
   - name: resolvedSearchQueryOutput
     default: "{{semanticIndexDir}}/resolved-search-query.txt"
+  - name: knowledgeSearchQueryOutput
+    default: "{{semanticIndexDir}}/knowledge-search-query.txt"
   - name: searchQueryContextOutput
     default: "{{semanticIndexDir}}/resolved-search-query-context.json"
   - name: searchStage
     default: "auto"
+  - name: semanticSkipFile
+    default: "{{Output}}/ai-analysis/.semantic-search-skip"
 
   # Embeddings API 配置
   - name: enableSemanticSearch
     type: bool
     default: true
+  - name: enableSemanticAgent
+    type: bool
+    default: true
+    description: "Run the agent refinement stage; disable for deterministic smoke/regression checks"
   - name: useVectorSearch
     type: bool
     default: true
@@ -534,10 +542,24 @@ steps:
 
       printf '%s\n' "$RESOLVED_QUERY" > "{{resolvedSearchQueryOutput}}"
 
+      KB_QUERY_BASE="$BASE_QUERY"
+      if [ -z "$KB_QUERY_BASE" ]; then
+        KB_QUERY_BASE="$RESOLVED_QUERY"
+      fi
+      KB_QUERY="$KB_QUERY_BASE"
+      KB_QUERY=$(printf '%s' "$KB_QUERY" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      KB_QUERY_LENGTH=$(printf '%s' "$KB_QUERY" | wc -c | tr -d ' ')
+      if [ "${KB_QUERY_LENGTH:-0}" -gt 320 ] 2>/dev/null; then
+        KB_QUERY=$(printf '%s' "$KB_QUERY" | cut -c1-320)
+      fi
+
+      printf '%s\n' "$KB_QUERY" > "{{knowledgeSearchQueryOutput}}"
+
       jq -n \
         --arg stage "$STAGE" \
         --arg base_query "$BASE_QUERY" \
         --arg resolved_query "$RESOLVED_QUERY" \
+        --arg knowledge_query "$KB_QUERY" \
         --arg technologies "$TECH_HINTS" \
         --arg decision_hints "$DECISION_HINTS" \
         --arg candidate_targets "$TARGET_HINTS" \
@@ -568,6 +590,7 @@ steps:
           stage: $stage,
           base_query: $base_query,
           resolved_query: $resolved_query,
+          knowledge_query: $knowledge_query,
           technologies: (if $technologies == "" then [] else ($technologies | split(", ") | map(select(length > 0))) end),
           decision_hints: (if $decision_hints == "" then [] else ($decision_hints | split(", ") | map(select(length > 0))) end),
           candidate_targets: (if $candidate_targets == "" then [] else ($candidate_targets | split(", ") | map(select(length > 0))) end),
@@ -598,6 +621,7 @@ steps:
 
       echo "[Semantic] Query stage: $STAGE"
       echo "[Semantic] Resolved query: $RESOLVED_QUERY"
+      echo "[Semantic] Knowledge query: $KB_QUERY"
 
   - name: export-knowledge-corpus
     type: bash
@@ -607,7 +631,7 @@ steps:
       mkdir -p "{{semanticIndexDir}}/logs"
       : > "{{knowledgeIndexFile}}"
 
-      OSM_BIN="{{OsmedeusExec}}"
+      OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
@@ -616,6 +640,7 @@ steps:
         echo "[Semantic] osmedeus binary not found, skipping knowledge corpus export"
         exit 0
       fi
+      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -633,20 +658,20 @@ steps:
       : > "$SHARED_LOG"
       : > "$GLOBAL_LOG"
 
-      "$OSM_BIN" kb export \
+      "$OSM_BIN" $OSM_CLI_BASE_ARGS kb export \
         -w "$PRIMARY_WORKSPACE" \
         --limit {{maxKnowledgeChunks}} \
         --output "$PRIMARY_TMP" >"$PRIMARY_LOG" 2>&1 || true
 
       if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
-        "$OSM_BIN" kb export \
+        "$OSM_BIN" $OSM_CLI_BASE_ARGS kb export \
           -w "$SHARED_WORKSPACE" \
           --limit {{maxKnowledgeChunks}} \
           --output "$SHARED_TMP" >"$SHARED_LOG" 2>&1 || true
       fi
 
       if [ -n "$GLOBAL_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$PRIMARY_WORKSPACE" ] && [ "$GLOBAL_WORKSPACE" != "$SHARED_WORKSPACE" ]; then
-        "$OSM_BIN" kb export \
+        "$OSM_BIN" $OSM_CLI_BASE_ARGS kb export \
           -w "$GLOBAL_WORKSPACE" \
           --limit {{maxKnowledgeChunks}} \
           --output "$GLOBAL_TMP" >"$GLOBAL_LOG" 2>&1 || true
@@ -668,11 +693,16 @@ steps:
       if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
         RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
       fi
+      KB_QUERY_FILE="{{knowledgeSearchQueryOutput}}"
+      KB_QUERY="$RESOLVED_QUERY"
+      if [ -f "$KB_QUERY_FILE" ] && [ -s "$KB_QUERY_FILE" ]; then
+        KB_QUERY=$(tr '\n' ' ' < "$KB_QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+      fi
       echo '[]' > "{{knowledgeSearchOutput}}"
       echo '[]' > "{{vectorKnowledgeSearchOutput}}"
-      jq -n --arg query "$RESOLVED_QUERY" '{status:"success",query:$query,provider:"config-default",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
+      jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,provider:"config-default",ready:false,semantic_status:"uninitialized",reason:"semantic vector retrieval not started",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
-      OSM_BIN="{{OsmedeusExec}}"
+      OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
       fi
@@ -681,6 +711,7 @@ steps:
         echo "[Semantic] osmedeus binary not found, skipping knowledge DB search"
         exit 0
       fi
+      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -697,6 +728,8 @@ steps:
       PRIMARY_SEARCH_LOG="{{semanticIndexDir}}/logs/semantic-kb-search-primary.log"
       SHARED_SEARCH_LOG="{{semanticIndexDir}}/logs/semantic-kb-search-shared.log"
       GLOBAL_SEARCH_LOG="{{semanticIndexDir}}/logs/semantic-kb-search-global.log"
+      VECTOR_DOCTOR_JSON="{{semanticIndexDir}}/.knowledge-vector-doctor.json"
+      VECTOR_DOCTOR_LOG="{{semanticIndexDir}}/logs/semantic-kb-vector-doctor.log"
       VECTOR_PROVIDER="{{embeddingsProvider}}"
       VECTOR_MODEL="{{embeddingsModel}}"
       VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
@@ -709,9 +742,15 @@ steps:
       : > "$PRIMARY_SEARCH_LOG"
       : > "$SHARED_SEARCH_LOG"
       : > "$GLOBAL_SEARCH_LOG"
+      echo '{}' > "$VECTOR_DOCTOR_JSON"
       KB_MIN_CONFIDENCE="0.60"
       KB_ALLOW_FALSE_POSITIVE="false"
-      if printf '%s' "$RESOLVED_QUERY" | tr '[:upper:]' '[:lower:]' | grep -Eq 'false[[:space:]-]*positive|误报|noise'; then
+      VECTOR_DOCTOR_READY="false"
+      VECTOR_DOCTOR_STATUS="unknown"
+      VECTOR_DOCTOR_REASON=""
+      VECTOR_FAILURE_STATUS=""
+      VECTOR_FAILURE_REASON=""
+      if printf '%s' "$KB_QUERY" | tr '[:upper:]' '[:lower:]' | grep -Eq 'false[[:space:]-]*positive|误报|noise'; then
         KB_ALLOW_FALSE_POSITIVE="true"
       fi
 
@@ -719,9 +758,9 @@ steps:
         workspace="$1"
         output_file="$2"
         log_file="$3"
-        set -- "$OSM_BIN" --json kb vector search \
+        set -- "$OSM_BIN" --silent $OSM_CLI_BASE_ARGS --json kb vector search \
           -w "$workspace" \
-          --query "$RESOLVED_QUERY" \
+          --query "$KB_QUERY" \
           --limit {{maxSearchResults}}
         if [ -n "$KB_MIN_CONFIDENCE" ]; then
           set -- "$@" --min-confidence "$KB_MIN_CONFIDENCE"
@@ -735,16 +774,27 @@ steps:
         if [ -n "$VECTOR_MODEL" ]; then
           set -- "$@" --model "$VECTOR_MODEL"
         fi
-        "$@" > "$output_file" 2>"$log_file" || echo '[]' > "$output_file"
+        if "$@" > "$output_file" 2>"$log_file"; then
+          return 0
+        fi
+        echo '[]' > "$output_file"
+        if [ -z "$VECTOR_FAILURE_REASON" ]; then
+          VECTOR_FAILURE_STATUS="search_failed"
+          VECTOR_FAILURE_REASON=$(tr '\n' ' ' < "$log_file" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+          if [ -z "$VECTOR_FAILURE_REASON" ]; then
+            VECTOR_FAILURE_REASON="kb vector search failed for workspace $workspace"
+          fi
+        fi
+        return 1
       }
 
       run_keyword_search() {
         workspace="$1"
         output_file="$2"
         log_file="$3"
-        set -- "$OSM_BIN" --json kb search \
+        set -- "$OSM_BIN" --silent $OSM_CLI_BASE_ARGS --json kb search \
           -w "$workspace" \
-          --query "$RESOLVED_QUERY" \
+          --query "$KB_QUERY" \
           --limit {{maxSearchResults}}
         if [ -n "$KB_MIN_CONFIDENCE" ]; then
           set -- "$@" --min-confidence "$KB_MIN_CONFIDENCE"
@@ -759,6 +809,24 @@ steps:
       echo '[]' > "$SHARED_VECTOR_JSON"
       echo '[]' > "$GLOBAL_VECTOR_JSON"
       if [ "{{useVectorKnowledgeDB}}" = "true" ]; then
+        set -- "$OSM_BIN" --silent $OSM_CLI_BASE_ARGS --json kb vector doctor
+        if [ -n "$PRIMARY_WORKSPACE" ]; then
+          set -- "$@" -w "$PRIMARY_WORKSPACE"
+        fi
+        if [ -n "$VECTOR_PROVIDER" ]; then
+          set -- "$@" --provider "$VECTOR_PROVIDER"
+        fi
+        if [ -n "$VECTOR_MODEL" ]; then
+          set -- "$@" --model "$VECTOR_MODEL"
+        fi
+        "$@" > "$VECTOR_DOCTOR_JSON" 2>"$VECTOR_DOCTOR_LOG" || echo '{}' > "$VECTOR_DOCTOR_JSON"
+        VECTOR_DOCTOR_READY=$(jq -r '.semantic_search_ready // false' "$VECTOR_DOCTOR_JSON" 2>/dev/null || echo false)
+        VECTOR_DOCTOR_STATUS=$(jq -r '.semantic_status // "unknown"' "$VECTOR_DOCTOR_JSON" 2>/dev/null || echo unknown)
+        VECTOR_DOCTOR_REASON=$(jq -r '.semantic_status_message // ""' "$VECTOR_DOCTOR_JSON" 2>/dev/null || echo "")
+        if [ "$VECTOR_DOCTOR_READY" != "true" ] && [ -n "$VECTOR_DOCTOR_REASON" ]; then
+          echo "[Semantic] Vector doctor: $VECTOR_DOCTOR_STATUS - $VECTOR_DOCTOR_REASON"
+        fi
+
         run_vector_search "$PRIMARY_WORKSPACE" "$PRIMARY_VECTOR_JSON" "$PRIMARY_VECTOR_LOG"
 
         if [ -n "$SHARED_WORKSPACE" ] && [ "$SHARED_WORKSPACE" != "$PRIMARY_WORKSPACE" ]; then
@@ -825,15 +893,33 @@ steps:
 
       VKB_HITS=$(jq 'length' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo 0)
       KB_HITS=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
+      VECTOR_READY_FLAG="false"
+      VECTOR_STATUS_FLAG="$VECTOR_DOCTOR_STATUS"
+      VECTOR_REASON_FLAG="$VECTOR_DOCTOR_REASON"
+      if [ -n "$VECTOR_FAILURE_REASON" ]; then
+        VECTOR_STATUS_FLAG="$VECTOR_FAILURE_STATUS"
+        VECTOR_REASON_FLAG="$VECTOR_FAILURE_REASON"
+      elif [ "$VECTOR_DOCTOR_READY" = "true" ] || [ "$VKB_HITS" -gt 0 ]; then
+        VECTOR_READY_FLAG="true"
+      fi
+      if [ "$VECTOR_READY_FLAG" = "true" ] && { [ -z "$VECTOR_STATUS_FLAG" ] || [ "$VECTOR_STATUS_FLAG" = "unknown" ]; }; then
+        VECTOR_STATUS_FLAG="ready"
+      fi
 
       jq -n \
-        --arg query "$RESOLVED_QUERY" \
+        --arg query "$KB_QUERY" \
         --arg provider "$VECTOR_PROVIDER_LABEL" \
+        --arg semantic_status "$VECTOR_STATUS_FLAG" \
+        --arg reason "$VECTOR_REASON_FLAG" \
+        --argjson ready "$VECTOR_READY_FLAG" \
         --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
         {
           status: "success",
           query: $query,
           provider: $provider,
+          ready: $ready,
+          semantic_status: $semantic_status,
+          reason: (if ($reason | length) > 0 then $reason else null end),
           total_results: ($hits[0] | length),
           results: (
             $hits[0]
@@ -848,10 +934,13 @@ steps:
                 snippet: (.snippet // .content // "")
               })
           )
-        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || jq -n --arg query "$RESOLVED_QUERY" '{status:"success",query:$query,provider:"config-default",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
+        }' > "{{vectorSearchResultsOutput}}" 2>/dev/null || jq -n --arg query "$RESOLVED_QUERY" '{status:"success",query:$query,provider:"config-default",ready:false,semantic_status:"unknown",reason:"failed to build vector search result summary",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
       echo "[Semantic] Vector KB hits: $VKB_HITS"
       echo "[Semantic] Knowledge DB merged hits: $KB_HITS"
+      if [ "$VECTOR_READY_FLAG" != "true" ] && [ -n "$VECTOR_REASON_FLAG" ]; then
+        echo "[Semantic] Vector retrieval unavailable: $VECTOR_STATUS_FLAG - $VECTOR_REASON_FLAG"
+      fi
 
   - name: index-scan-data
     type: bash
@@ -968,9 +1057,22 @@ steps:
       CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
       echo "[Semantic] Vector corpus prepared: $CORPUS_LINES lines"
 
+  - name: validate-semantic-corpus
+    type: bash
+    pre_condition: "{{enableSemanticSearch}}"
+    command: |
+      CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
+      if [ "$CORPUS_LINES" -eq 0 ]; then
+        echo "[WARN] [Semantic Search] No semantic corpus available, skipping agent refinement"
+        : > {{semanticSkipFile}}
+      else
+        rm -f {{semanticSkipFile}} 2>/dev/null || true
+      fi
+      echo "[INFO] [Semantic Search] Corpus lines available: $CORPUS_LINES"
+
   - name: semantic-search-agent
     type: agent
-    pre_condition: "{{enableSemanticSearch}}"
+    pre_condition: '{{enableSemanticSearch}} && {{enableSemanticAgent}} && !file_exists("{{semanticSkipFile}}")'
     max_iterations: 5
     timeout: 600
     on_error:
@@ -1536,6 +1638,9 @@ steps:
         skill_file="$SKILLS_DIR/$skill_id/SKILL.md"
 
         [ -f "$skill_file" ] || return 0
+        if grep -Fqx "## $title" "$SKILLS_COMBINED" 2>/dev/null; then
+          return 0
+        fi
 
         echo "## $title" >> "$KB_OUTPUT"
         echo "" >> "$KB_OUTPUT"
@@ -1655,12 +1760,14 @@ steps:
       fi
       echo "" >> "$KB_OUTPUT"
       
-      # 生成技能组合文件
-      echo "# Security Testing Skills Library" > "$SKILLS_COMBINED"
-      echo "" >> "$SKILLS_COMBINED"
-      echo "Target: {{Target}}" >> "$SKILLS_COMBINED"
-      echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$SKILLS_COMBINED"
-      echo "" >> "$SKILLS_COMBINED"
+      # 生成或扩展技能组合文件，避免覆盖掉 ai-skills-loader 已经准备好的内容
+      if [ ! -s "$SKILLS_COMBINED" ] || ! grep -q '[^[:space:]]' "$SKILLS_COMBINED" 2>/dev/null; then
+        echo "# Security Testing Skills Library" > "$SKILLS_COMBINED"
+        echo "" >> "$SKILLS_COMBINED"
+        echo "Target: {{Target}}" >> "$SKILLS_COMBINED"
+        echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$SKILLS_COMBINED"
+        echo "" >> "$SKILLS_COMBINED"
+      fi
       
       # 根据检测到的漏洞类型加载对应技能
       for skill_type in $(printf '%s' "$VULN_TYPES_FOUND" | tr ',' '\n' | sed '/^$/d' | sort -u); do

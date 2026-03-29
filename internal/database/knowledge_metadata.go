@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+	"time"
 )
 
 // KnowledgeMetadataSummary is the normalized metadata view attached to
@@ -18,6 +19,7 @@ type KnowledgeMetadataSummary struct {
 	RetrievalFingerprint string   `json:"retrieval_fingerprint,omitempty"`
 	TargetTypes          []string `json:"target_types,omitempty"`
 	Labels               []string `json:"labels,omitempty"`
+	observedAt           time.Time
 }
 
 // IsZero reports whether the metadata summary is effectively empty.
@@ -80,6 +82,11 @@ func ParseKnowledgeMetadata(raw ...string) *KnowledgeMetadataSummary {
 		if len(summary.Labels) == 0 {
 			summary.Labels = parseKnowledgeMetadataStringSlice(parsed["labels"])
 		}
+		if summary.observedAt.IsZero() {
+			summary.observedAt = parseKnowledgeMetadataTime(
+				firstKnowledgeMetadataValue(parsed, "confidence_observed_at", "generated_at", "updated_at", "created_at", "observed_at"),
+			)
+		}
 	}
 
 	if summary.IsZero() {
@@ -91,11 +98,17 @@ func ParseKnowledgeMetadata(raw ...string) *KnowledgeMetadataSummary {
 // ComputeKnowledgeMetadataBoost applies practical retrieval weighting to
 // normalized knowledge metadata so operationally useful memory ranks higher.
 func ComputeKnowledgeMetadataBoost(query string, metadata *KnowledgeMetadataSummary) float64 {
+	return ComputeKnowledgeMetadataBoostAt(query, metadata, time.Now())
+}
+
+// ComputeKnowledgeMetadataBoostAt applies practical retrieval weighting to
+// normalized knowledge metadata at a deterministic reference time.
+func ComputeKnowledgeMetadataBoostAt(query string, metadata *KnowledgeMetadataSummary, now time.Time) float64 {
 	if metadata == nil {
 		return 0
 	}
 
-	boost := metadata.SourceConfidence * 0.18
+	boost := computeKnowledgeObservedConfidence(metadata, now) * 0.18
 	switch normalizeKnowledgeIntentText(metadata.SampleType) {
 	case "verified":
 		boost += 0.22
@@ -229,6 +242,49 @@ func parseKnowledgeMetadataFloat(value interface{}) float64 {
 	}
 }
 
+func parseKnowledgeMetadataTime(value interface{}) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return time.Time{}
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+			if parsed, err := time.Parse(layout, text); err == nil {
+				return parsed.UTC()
+			}
+		}
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(int64(typed), 0).UTC()
+	case float32:
+		number := float64(typed)
+		if math.IsNaN(number) || math.IsInf(number, 0) || number <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(int64(number), 0).UTC()
+	case int:
+		if typed <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(int64(typed), 0).UTC()
+	case int64:
+		if typed <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(typed, 0).UTC()
+	case json.Number:
+		if unix, err := typed.Int64(); err == nil && unix > 0 {
+			return time.Unix(unix, 0).UTC()
+		}
+	}
+	return time.Time{}
+}
+
 func parseKnowledgeMetadataStringSlice(value interface{}) []string {
 	list, ok := value.([]interface{})
 	if !ok {
@@ -249,6 +305,66 @@ func parseKnowledgeMetadataStringSlice(value interface{}) []string {
 		result = append(result, text)
 	}
 	return result
+}
+
+func computeKnowledgeObservedConfidence(metadata *KnowledgeMetadataSummary, now time.Time) float64 {
+	if metadata == nil {
+		return 0
+	}
+
+	base := clampKnowledgeConfidence(metadata.SourceConfidence)
+	if base == 0 {
+		return 0
+	}
+
+	observedAt := metadata.observedAt
+	if observedAt.IsZero() || now.IsZero() || !observedAt.Before(now) {
+		return base
+	}
+
+	ageDays := now.Sub(observedAt).Hours() / 24
+	if ageDays <= 0 {
+		return base
+	}
+
+	halfLifeDays, floorRatio := knowledgeConfidenceDecayPolicy(normalizeKnowledgeIntentText(metadata.SampleType))
+	if halfLifeDays <= 0 {
+		return base
+	}
+
+	decayed := base * math.Pow(0.5, ageDays/halfLifeDays)
+	floor := base * floorRatio
+	if decayed < floor {
+		decayed = floor
+	}
+	return clampKnowledgeConfidence(decayed)
+}
+
+func knowledgeConfidenceDecayPolicy(sampleType string) (halfLifeDays float64, floorRatio float64) {
+	switch sampleType {
+	case "verified":
+		return 240, 0.70
+	case "false positive":
+		return 180, 0.68
+	case "operator followup":
+		return 90, 0.45
+	case "workspace summary":
+		return 120, 0.50
+	case "ai analysis":
+		return 21, 0.18
+	default:
+		return 60, 0.35
+	}
+}
+
+func clampKnowledgeConfidence(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func metadataHasOperationalSignals(metadata *KnowledgeMetadataSummary) bool {

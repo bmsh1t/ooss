@@ -3,7 +3,6 @@ package functions
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,20 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/j3ssie/osmedeus/v5/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newIPv4HTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
-
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	server := httptest.NewUnstartedServer(handler)
-	server.Listener = listener
-	server.Start()
-	return server
+	return testutil.NewLoopbackServer(t, handler)
 }
 
 func TestSortUnix_InPlace(t *testing.T) {

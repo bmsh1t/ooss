@@ -1,0 +1,16 @@
+kind: module
+name: ai-followup-target-module
+description: Minimal follow-up module used by the AI workflow smoke regression.
+
+params:
+  - name: target
+    required: true
+
+steps:
+  - name: write-marker
+    type: bash
+    command: |
+      mkdir -p {{Output}}/regression
+      cat > {{Output}}/regression/ai-followup-target.json <<'EOF'
+      {"workflow":"ai-followup-target-module","target":"{{Target}}"}
+      EOF

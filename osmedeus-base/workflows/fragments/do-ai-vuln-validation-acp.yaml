@@ -25,6 +25,8 @@ params:
     default: "{{Output}}/ai-analysis/false-positives-{{TargetSpace}}.txt"
   - name: manualVerifyCommandsFile
     default: "{{Output}}/ai-analysis/validation/manual-commands.sh"
+  - name: vulnValidationSkipFile
+    default: "{{Output}}/ai-analysis/.vuln-validation-skip"
 
   # 输入文件
   - name: nucleiCriticalFile
@@ -68,6 +70,15 @@ steps:
     pre_condition: "{{enableVulnValidation}}"
     command: |
       echo "[INFO] [Vuln Validation] Checking input data..."
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       # 检查必要的输入文件
       REQUIRED_FILES="{{nucleiCriticalFile}} {{nucleiHighFile}} {{fingerprintFile}}"
@@ -91,14 +102,25 @@ steps:
       fi
       
       # 统计可用数据量
-      if [ -f "{{nucleiCriticalFile}}" ]; then
-        CRIT_COUNT=$(wc -l < "{{nucleiCriticalFile}}" 2>/dev/null || echo 0)
-        echo "[INFO] [Vuln Validation] Critical vulns available: $CRIT_COUNT"
-      fi
-      
-      if [ -f "{{nucleiHighFile}}" ]; then
-        HIGH_COUNT=$(wc -l < "{{nucleiHighFile}}" 2>/dev/null || echo 0)
-        echo "[INFO] [Vuln Validation] High vulns available: $HIGH_COUNT"
+      CRIT_COUNT=$(count_lines "{{nucleiCriticalFile}}")
+      HIGH_COUNT=$(count_lines "{{nucleiHighFile}}")
+      NUCLEI_COUNT=$(count_lines "{{nucleiFile}}")
+      SECRET_COUNT=$(count_lines "{{secretsFile}}")
+      SSRF_COUNT=$(count_lines "{{ssrfFile}}")
+      SSTI_COUNT=$(count_lines "{{sstiFile}}")
+      SQLI_COUNT=$(count_lines "{{sqliFile}}")
+      TAKEOVER_COUNT=$(count_lines "{{takeoverFile}}")
+      FINDING_TOTAL=$((CRIT_COUNT + HIGH_COUNT + NUCLEI_COUNT + SECRET_COUNT + SSRF_COUNT + SSTI_COUNT + SQLI_COUNT + TAKEOVER_COUNT))
+
+      echo "[INFO] [Vuln Validation] Critical vulns available: $CRIT_COUNT"
+      echo "[INFO] [Vuln Validation] High vulns available: $HIGH_COUNT"
+
+      if [ "$FINDING_TOTAL" -eq 0 ]; then
+        echo "[WARN] [Vuln Validation] No findings available, skipping ACP validation"
+        printf '%s\n' '{"status":"no_data","validation_summary":{"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"低"},"total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"risk_level":"低","findings":[],"high_priority_items":[],"verification_commands":[]}' > {{vulnValidationOutput}}
+        : > {{vulnValidationSkipFile}}
+      else
+        rm -f {{vulnValidationSkipFile}} 2>/dev/null || true
       fi
       
       echo "[INFO] [Vuln Validation] Input data check complete"
@@ -107,7 +129,7 @@ steps:
     type: agent-acp
     agent: claude-code
     timeout: "{{agentTimeout}}"
-    pre_condition: "{{enableVulnValidation}}"
+    pre_condition: '{{enableVulnValidation}} && !file_exists("{{vulnValidationSkipFile}}")'
     on_error:
       - action: continue
         log: "Vuln validation failed, continuing with unvalidated data"
@@ -206,10 +228,18 @@ steps:
       RAW_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-acp-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-acp-json-{{TargetSpace}}.json"
       FALLBACK_LINES="{{Output}}/ai-analysis/validation/.vuln-validation-acp-fallback-lines-{{TargetSpace}}.txt"
+      FALLBACK_FINDINGS_JSONL="{{Output}}/ai-analysis/validation/.vuln-validation-acp-fallback-findings-{{TargetSpace}}.jsonl"
 
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{validation_json}}
-      AIEOF
+      if [ -f "{{vulnValidationSkipFile}}" ] && [ -s "{{vulnValidationOutput}}" ] && jq empty {{vulnValidationOutput}} >/dev/null 2>&1; then
+        CONFIRMED=$(jq -r '.confirmed_real // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+        FP=$(jq -r '.false_positives // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+        TOTAL=$(jq -r '.findings | length' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+        echo "[INFO] [Vuln Validation] Using precomputed fallback output"
+        echo "[RESULT] Confirmed: $CONFIRMED, False Positives: $FP, Total: $TOTAL"
+        exit 0
+      fi
+
+      printf '%s\n' "{{validation_json}}" > "$RAW_FILE"
       : > "$JSON_FILE"
 
       awk '
@@ -231,7 +261,7 @@ steps:
         ' "$RAW_FILE" > "$JSON_FILE"
       fi
 
-      if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" >/dev/null 2>&1; then
+      if [ -s "$JSON_FILE" ] && grep -q '[^[:space:]]' "$JSON_FILE" && jq empty "$JSON_FILE" >/dev/null 2>&1; then
         jq '
           def normalize_status:
             if . == "confirmed" then "confirmed"
@@ -269,6 +299,7 @@ steps:
         echo "[WARN] ACP validation JSON extraction failed, generating practical fallback data..."
 
         : > "$FALLBACK_LINES"
+        : > "$FALLBACK_FINDINGS_JSONL"
         collect_lines() {
           source_name="$1"
           severity="$2"
@@ -287,52 +318,128 @@ steps:
         collect_lines "secrets" "medium" "{{secretsFile}}" 6
 
         if [ -s "$FALLBACK_LINES" ]; then
-          jq -R -s '
-            def detect_type($src; $line):
-              ($line | ascii_downcase) as $l
-              | if $src == "sqli" or ($l | test("sql")) then "sql-injection"
-                elif $src == "ssrf" or ($l | test("ssrf")) then "ssrf"
-                elif $src == "ssti" or ($l | test("ssti|template")) then "ssti"
-                elif $src == "takeover" or ($l | test("takeover|dangling")) then "subdomain-takeover"
-                elif $src == "secrets" or ($l | test("secret|token|key|credential")) then "secret-exposure"
-                elif ($l | test("xss")) then "xss"
-                elif ($l | test("rce|command")) then "rce"
-                else "high-risk-finding"
-                end;
-            split("\n")
-            | map(select(length > 0))
-            | map(capture("^(?<src>[^|]+)\\|(?<sev>[^|]+)\\|(?<line>.*)$"))
-            | map(
-                (.line | capture("(?<u>https?://[^[:space:]\"]+)")?.u // "") as $url
-                | {
-                    severity: (.sev | ascii_downcase),
-                    type: detect_type(.src; .line),
-                    url: $url,
-                    status: "needs_manual_verification",
-                    confidence: (if (.sev | ascii_downcase) == "critical" then 0.7 else 0.6 end),
-                    reason: ("ACP validation output parse failed; derived from raw " + .src + " evidence"),
-                    evidence: (.line[0:400]),
-                    verification_command: (if $url != "" then ("curl -skI \"" + $url + "\"") else "printf \"manual review required\\n\"" end)
-                  }
-              ) as $findings
-            | {
-                error: "parse_failed_fallback",
-                risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end),
-                total_validated: ($findings | length),
-                confirmed_real: 0,
-                false_positives: 0,
-                needs_manual_verification: ($findings | length),
-                findings: $findings,
-                high_priority_items: ($findings | map((if (.url // "") != "" then (.url + " - ") else "" end) + (.type // "unknown")) | unique | .[0:10])
-              }
-          ' "$FALLBACK_LINES" > {{vulnValidationOutput}}
+          detect_type() {
+            source_name="$1"
+            raw_line="$2"
+            lower_line=$(printf '%s' "$raw_line" | tr '[:upper:]' '[:lower:]')
+          case "$source_name:$lower_line" in
+              sqli:*|*:sql*) echo "sql-injection" ;;
+              ssrf:*|*:ssrf*) echo "ssrf" ;;
+              ssti:*|*:ssti*|*:template*) echo "ssti" ;;
+              takeover:*|*:takeover*|*:dangling*) echo "subdomain-takeover" ;;
+              secrets:*|*:secret*|*:token*|*:credential*|*:api-key*|*:apikey*) echo "secret-exposure" ;;
+              *:xss*) echo "xss" ;;
+              *:rce*|*:command*) echo "rce" ;;
+              *jwt*) echo "jwt-misconfiguration" ;;
+              *graphql*) echo "graphql-exposure" ;;
+              *) echo "high-risk-finding" ;;
+            esac
+          }
+
+          while IFS='|' read -r source_name severity raw_line; do
+            [ -n "${raw_line:-}" ] || continue
+            clean_line=$(printf '%s' "$raw_line" | tr -d '\r')
+            url=$(printf '%s\n' "$clean_line" | grep -Eo 'https?://[^[:space:]"]+' | head -1 || true)
+            finding=$(printf '%s\n' "$clean_line" \
+              | sed -E 's/^\[[^]]+\][[:space:]]*//' \
+              | sed -E 's/[[:space:]]*-[[:space:]]*https?:\/\/[^[:space:]"]+$//' \
+              | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+            if [ -z "$finding" ]; then
+              finding="${source_name} finding"
+            fi
+            finding_type=$(detect_type "$source_name" "$clean_line")
+            confidence="0.60"
+            if [ "$(printf '%s' "$severity" | tr '[:upper:]' '[:lower:]')" = "critical" ]; then
+              confidence="0.70"
+            fi
+            verification_command='printf "manual review required\n"'
+            if [ -n "$url" ]; then
+              verification_command=$(printf 'curl -skI "%s"' "$url")
+            fi
+            evidence=$(printf '%s' "$clean_line" | cut -c1-400)
+
+            jq -cn \
+              --arg severity "$(printf '%s' "$severity" | tr '[:upper:]' '[:lower:]')" \
+              --arg finding "$finding" \
+              --arg type "$finding_type" \
+              --arg url "$url" \
+              --arg evidence "$evidence" \
+              --arg source_name "$source_name" \
+              --arg verification_command "$verification_command" \
+              --argjson confidence "$confidence" \
+              '{
+                severity: $severity,
+                finding: $finding,
+                type: $type,
+                url: $url,
+                status: "needs_manual_verification",
+                confidence: $confidence,
+                reason: ("ACP validation output parse failed; derived from raw " + $source_name + " evidence"),
+                evidence: $evidence,
+                verification_command: $verification_command,
+                remediation: "Reproduce manually, capture request/response evidence, and tighten exposure or authorization controls"
+              }' >> "$FALLBACK_FINDINGS_JSONL"
+          done < "$FALLBACK_LINES"
+
+          if [ -s "$FALLBACK_FINDINGS_JSONL" ]; then
+            jq -s '
+              . as $findings
+              | {
+                  error: "parse_failed_fallback",
+                  validation_summary: {
+                    total_validated: ($findings | length),
+                    confirmed_real: 0,
+                    false_positives: 0,
+                    needs_manual_verification: ($findings | length),
+                    risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end)
+                  },
+                  total_validated: ($findings | length),
+                  confirmed_real: 0,
+                  false_positives: 0,
+                  needs_manual_verification: ($findings | length),
+                  risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end),
+                  findings: $findings,
+                  high_priority_items: ($findings | map((if (.url // "") != "" then (.url + " - ") else "" end) + (.finding // .type // "unknown")) | unique | .[0:10]),
+                  verification_commands: ($findings | map(.verification_command) | map(select(. != null and . != "")) | unique)
+                }
+            ' "$FALLBACK_FINDINGS_JSONL" > {{vulnValidationOutput}}
+          else
+            echo '{"error":"parse_failed","risk_level":"中","total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"findings":[],"high_priority_items":[]}' > {{vulnValidationOutput}}
+          fi
         else
           echo '{"error":"parse_failed","risk_level":"中","total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"findings":[],"high_priority_items":[]}' > {{vulnValidationOutput}}
         fi
       fi
 
-      if ! jq empty {{vulnValidationOutput}} >/dev/null 2>&1; then
+      if [ ! -s "{{vulnValidationOutput}}" ] || ! jq empty {{vulnValidationOutput}} >/dev/null 2>&1; then
         echo '{"error":"validation_output_invalid","risk_level":"中","total_validated":0,"confirmed_real":0,"false_positives":0,"needs_manual_verification":0,"findings":[],"high_priority_items":[]}' > {{vulnValidationOutput}}
+      fi
+
+      if [ -s "$FALLBACK_FINDINGS_JSONL" ]; then
+        CURRENT_TOTAL=$(jq -r '.total_validated // (.findings | length) // 0' {{vulnValidationOutput}} 2>/dev/null || echo 0)
+        if [ "${CURRENT_TOTAL:-0}" -eq 0 ]; then
+          jq -s '
+            . as $findings
+            | {
+                error: "fallback_findings_recovered",
+                validation_summary: {
+                  total_validated: ($findings | length),
+                  confirmed_real: 0,
+                  false_positives: 0,
+                  needs_manual_verification: ($findings | length),
+                  risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end)
+                },
+                total_validated: ($findings | length),
+                confirmed_real: 0,
+                false_positives: 0,
+                needs_manual_verification: ($findings | length),
+                risk_level: (if ([$findings[] | select(.severity == "critical")] | length) > 0 then "高" else "中" end),
+                findings: $findings,
+                high_priority_items: ($findings | map((if (.url // "") != "" then (.url + " - ") else "" end) + (.finding // .type // "unknown")) | unique | .[0:10]),
+                verification_commands: ($findings | map(.verification_command) | map(select(. != null and . != "")) | unique)
+              }
+          ' "$FALLBACK_FINDINGS_JSONL" > {{vulnValidationOutput}}
+        fi
       fi
 
       for field in risk_level findings confirmed_real false_positives needs_manual_verification total_validated high_priority_items; do

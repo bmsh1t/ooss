@@ -371,6 +371,84 @@ func TestListWorkspaces_FilesystemIncludesWorkspaceFolders(t *testing.T) {
 	assert.Equal(t, float64(3), pagination["total"])
 }
 
+func TestListWorkspaces_DefaultUsesAssetCountsWhenAvailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.sqlite")
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   dbPath,
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	})
+
+	ctx := context.Background()
+	require.NoError(t, database.Migrate(ctx))
+
+	now := time.Now()
+	staleWorkspace := &database.Workspace{
+		Name:        "db-counted",
+		TotalAssets: 99,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	fallbackWorkspace := &database.Workspace{
+		Name:        "db-only-fallback",
+		TotalAssets: 7,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	_, err = database.GetDB().NewInsert().Model(staleWorkspace).Exec(ctx)
+	require.NoError(t, err)
+	_, err = database.GetDB().NewInsert().Model(fallbackWorkspace).Exec(ctx)
+	require.NoError(t, err)
+
+	asset := &database.Asset{
+		Workspace:  "db-counted",
+		AssetValue: "https://db-counted.example.com",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_, err = database.GetDB().NewInsert().Model(asset).Exec(ctx)
+	require.NoError(t, err)
+
+	app := fiber.New()
+	app.Get("/workspaces", ListWorkspaces(cfg))
+
+	req := httptest.NewRequest("GET", "/workspaces?limit=100", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, fiber.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]interface{}
+	err = json.Unmarshal(body, &result)
+	require.NoError(t, err)
+
+	data, ok := result["data"].([]interface{})
+	require.True(t, ok)
+
+	foundTotalAssets := map[string]float64{}
+	for _, item := range data {
+		m, ok := item.(map[string]interface{})
+		require.True(t, ok)
+		name, _ := m["name"].(string)
+		totalAssets, _ := m["total_assets"].(float64)
+		foundTotalAssets[name] = totalAssets
+	}
+
+	assert.Equal(t, float64(1), foundTotalAssets["db-counted"])
+	assert.Equal(t, float64(7), foundTotalAssets["db-only-fallback"])
+}
+
 func TestListArtifactsVerifyExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")

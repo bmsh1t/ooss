@@ -664,9 +664,7 @@ steps:
       FALLBACK_LINES="{{Output}}/ai-analysis/.attack-chain-acp-fallback-lines-{{TargetSpace}}.txt"
       FALLBACK_URLS="{{Output}}/ai-analysis/.attack-chain-acp-fallback-urls-{{TargetSpace}}.txt"
 
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{attack_chain_json}}
-      AIEOF
+      printf '%s\n' "{{attack_chain_json}}" > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -699,29 +697,43 @@ steps:
           awk 'NF { print "confirmed-url | " $0 " | severity=high" }' "{{confirmedUrlsFile}}" 2>/dev/null | awk 'NF && !seen[$0]++' | head -10 > "$FALLBACK_LINES" || true
         fi
 
-        awk -F'|' '
-          NF >= 2 {
-            url=$2
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", url)
-            if (url ~ /^https?:\/\// && !seen[url]++) print url
-          }
-        ' "$FALLBACK_LINES" > "$FALLBACK_URLS" || true
-
-        FALLBACK_URLS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_URLS" 2>/dev/null || echo '[]')
         jq -R -s '
+          def trim_ws:
+            gsub("^[[:space:]]+|[[:space:]]+$"; "");
+          def parse_structured:
+            capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
+            | if . == null then null else {
+                finding: (.finding | trim_ws),
+                url: (.url | trim_ws),
+                severity: (.severity | trim_ws | ascii_downcase)
+              } end;
+          def parse_generic:
+            . as $line
+            | (($line | capture("(?<url>https?://[^[:space:]\"]+)")?.url) // "") as $url
+            | if $url == "" then null else {
+                finding: (
+                  $line
+                  | sub("^\\[[^]]+\\][[:space:]]*"; "")
+                  | sub("[[:space:]]*-[[:space:]]*" + $url + "$"; "")
+                  | trim_ws
+                ),
+                url: $url,
+                severity: (($line | capture("^\\[(?<sev>[^]]+)\\]")?.sev // "high") | ascii_downcase)
+              } end;
           split("\n")
           | map(select(length > 0))
-          | map(
-              capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
-              | select(. != null and (.url | test("^https?://")))
-              | {
-                  chain_name: ((.finding // "validated finding") + " -> manual exploitation"),
-                  url: .url,
-                  vulnerability: (.finding // "validated finding"),
-                  severity: (.severity // "high")
-                }
-            )
+          | map((parse_structured // parse_generic))
+          | map(select(. != null and (.url | test("^https?://"))))
+          | map({
+              chain_name: (((.finding // "") | if . == "" then "validated finding" else . end) + " -> manual exploitation"),
+              url: .url,
+              vulnerability: (((.finding // "") | if . == "" then "validated finding" else . end)),
+              severity: (.severity // "high")
+            })
         ' "$FALLBACK_LINES" > "$JSON_FILE"
+
+        FALLBACK_URLS_JSON=$(jq -c '[.[].url // empty] | map(select(length > 0)) | unique' "$JSON_FILE" 2>/dev/null || echo '[]')
+        printf '%s\n' "$FALLBACK_URLS_JSON" | jq -r '.[]' > "$FALLBACK_URLS" 2>/dev/null || true
 
         jq -n \
           --slurpfile chains "$JSON_FILE" \
@@ -736,7 +748,7 @@ steps:
             },
             attack_chains: [
               $chains[0][] | {
-                chain_id: ("fallback-chain-" + ((.url | @base64) | gsub("[/=+]"; "") | .[0:10])),
+                chain_id: ("fallback-chain-" + ((((.vulnerability // "finding") + "|" + (.url // "")) | @base64) | gsub("[/=+]"; "") | .[0:16])),
                 chain_name: .chain_name,
                 entry_point: {
                   vulnerability: .vulnerability,
@@ -783,12 +795,19 @@ steps:
       fi
 
       jq '
-        .attack_chain_summary = ((.attack_chain_summary // {}) + {
-          total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
-          critical_chains: (.attack_chain_summary.critical_chains // 0),
-          high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
-          most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
-        })
+        ((.attack_chain_summary // {}).most_likely_entry_points // []) as $existing_entry_points
+        | .attack_chain_summary = ((.attack_chain_summary // {}) + {
+            total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+            critical_chains: (.attack_chain_summary.critical_chains // 0),
+            high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+            most_likely_entry_points: (
+              if ($existing_entry_points | length) > 0 then
+                $existing_entry_points
+              else
+                ([.attack_chains[]?.entry_point.url | select(. != null and . != "")] | unique)
+              end
+            )
+          })
         | .attack_chains = (.attack_chains // [])
         | .critical_paths = (.critical_paths // [])
         | .defense_recommendations = (.defense_recommendations // [])

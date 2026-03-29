@@ -22,6 +22,8 @@ params:
     default: "{{Output}}/ai-analysis/priority-targets-{{TargetSpace}}.txt"
   - name: aiDecisionOutput
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+  - name: preScanSkipFile
+    default: "{{Output}}/ai-analysis/.pre-scan-skip"
 
   # 输入文件
   - name: subdomainFile
@@ -303,11 +305,41 @@ steps:
           queue_followup_effective: $queue_followup_effective
         }' > "$PREV_SUMMARY"
 
+  - name: validate-pre-scan-inputs
+    type: bash
+    pre_condition: "{{enablePreScanDecision}}"
+    command: |
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      SUBDOMAIN_COUNT=$(count_lines "{{subdomainFile}}")
+      RESOLVED_COUNT=$(count_lines "{{resolvedFile}}")
+      OSINT_COUNT=$(count_lines "{{osintFile}}")
+      PREV_PRIORITY_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/previous-followup-priority-targets.txt")
+      PREV_FOCUS_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/previous-followup-focus-areas.txt")
+      TOTAL_CONTEXT=$((SUBDOMAIN_COUNT + RESOLVED_COUNT + OSINT_COUNT + PREV_PRIORITY_COUNT + PREV_FOCUS_COUNT))
+
+      if [ "$TOTAL_CONTEXT" -eq 0 ]; then
+        echo "[WARN] [Pre Scan] No actionable context available, skipping ACP analysis"
+        printf '%s\n' '{"pre_scan_summary":{"total_subdomains":0,"high_value_targets":0,"recommended_scan_depth":"normal","estimated_scan_time":"unknown"},"priority_targets":[],"scan_strategy":{"depth":"normal","focus_areas":[],"skip_areas":[]},"status":"no_data"}' > {{preScanOutput}}
+        : > {{preScanSkipFile}}
+      else
+        rm -f {{preScanSkipFile}} 2>/dev/null || true
+      fi
+
+      echo "[INFO] [Pre Scan] Context lines: subdomains=$SUBDOMAIN_COUNT resolved=$RESOLVED_COUNT osint=$OSINT_COUNT prev_priority=$PREV_PRIORITY_COUNT prev_focus=$PREV_FOCUS_COUNT"
+
   - name: ai-pre-scan
     type: agent-acp
     agent: claude-code
     timeout: "{{agentTimeout}}"
-    pre_condition: "{{enablePreScanDecision}}"
+    pre_condition: '{{enablePreScanDecision}} && !file_exists("{{preScanSkipFile}}")'
     on_error:
       - action: continue
         log: "Pre-scan decision failed, using default strategy"
@@ -385,11 +417,34 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
+      normalize_int() {
+        case "$1" in
+          ''|*[!0-9]*)
+            echo 0
+            ;;
+          *)
+            echo "$1"
+            ;;
+        esac
+      }
+
+      normalize_bool() {
+        value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+        case "$value" in
+          1|true|yes|y|on)
+            echo true
+            ;;
+          *)
+            echo false
+            ;;
+        esac
+      }
+
       # 容错：处理可能的空输出
-      if [ -n "{{pre_scan_json}}" ] && [ "{{pre_scan_json}}" != "null" ] && [ "{{pre_scan_json}}" != "{}" ]; then
-        cat > {{preScanOutput}} << 'AIEOF'
-        {{pre_scan_json}}
-        AIEOF
+      if [ -f "{{preScanSkipFile}}" ] && [ -s "{{preScanOutput}}" ] && jq empty {{preScanOutput}} 2>/dev/null; then
+        echo "[INFO] [Pre Scan] Using precomputed fallback output"
+      elif [ -n "{{pre_scan_json}}" ] && [ "{{pre_scan_json}}" != "null" ] && [ "{{pre_scan_json}}" != "{}" ]; then
+        printf '%s\n' "{{pre_scan_json}}" > {{preScanOutput}}
       else
         echo '{"pre_scan_summary":{"total_subdomains":0,"high_value_targets":0},"priority_targets":[],"scan_strategy":{"focus_areas":[]}}' > {{preScanOutput}}
       fi
@@ -415,7 +470,7 @@ steps:
       } | awk 'NF && !seen[$0]++' > {{Output}}/ai-analysis/focus-areas-pre.txt.tmp 2>/dev/null && mv {{Output}}/ai-analysis/focus-areas-pre.txt.tmp {{Output}}/ai-analysis/focus-areas-pre.txt || true
 
       # 生成前置 AI 决策（供本轮 vuln-suite 直接读取）
-      PRIORITY_COUNT=$(wc -l < {{priorityTargetsFile}} 2>/dev/null || echo 0)
+      PRIORITY_COUNT=$(normalize_int "$(wc -l < {{priorityTargetsFile}} 2>/dev/null || echo 0)")
       if [ "$PRIORITY_COUNT" -gt 30 ]; then
         SEVERITY="critical,high,medium"
         THREADS=15
@@ -435,11 +490,11 @@ steps:
 
       FOCUS_AREAS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "{{Output}}/ai-analysis/focus-areas-pre.txt" 2>/dev/null || echo '[]')
       PRIORITY_TARGETS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "{{priorityTargetsFile}}" 2>/dev/null || echo '[]')
-      PREV_TARGET_COUNT=$(jq -r '.counts.targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
-      PREV_PRIORITY_COUNT=$(jq -r '.counts.priority_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
-      PREV_FOCUS_COUNT=$(jq -r '.counts.focus_areas // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
-      PREV_MANUAL_FIRST_COUNT=$(jq -r '.counts.manual_first_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
-      PREV_HIGH_CONFIDENCE_COUNT=$(jq -r '.counts.high_confidence_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
+      PREV_TARGET_COUNT=$(normalize_int "$(jq -r '.counts.targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
+      PREV_PRIORITY_COUNT=$(normalize_int "$(jq -r '.counts.priority_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
+      PREV_FOCUS_COUNT=$(normalize_int "$(jq -r '.counts.focus_areas // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
+      PREV_MANUAL_FIRST_COUNT=$(normalize_int "$(jq -r '.counts.manual_first_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
+      PREV_HIGH_CONFIDENCE_COUNT=$(normalize_int "$(jq -r '.counts.high_confidence_targets // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
       PREV_SOURCE_KIND=$(jq -r '.source_kind // "none"' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "none")
       PREV_REASONING_DETAIL=$(jq -r '.reasoning // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
       PREV_SCAN_PROFILE=$(jq -r '.base_profile // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
@@ -447,15 +502,18 @@ steps:
       PREV_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
       PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
       PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
-      PREV_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
+      PREV_ESCALATION_SCORE=$(normalize_int "$(jq -r '.signal_scores.escalation_score // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
       PREV_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
       PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
-      PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)
+      PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(normalize_int "$(jq -r '.campaign_create.queued_runs // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
       PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo '[]')
+      if ! printf '%s\n' "$PREV_REUSE_SOURCES_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        PREV_REUSE_SOURCES_JSON='[]'
+      fi
       PREV_REUSE_SOURCES=$(printf '%s\n' "$PREV_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
-      PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.manual_followup_needed // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)
-      PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.campaign_followup_recommended // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)
-      PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.queue_followup_effective // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)
+      PREV_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "$(jq -r '.manual_followup_needed // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)")
+      PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "$(jq -r '.campaign_followup_recommended // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)")
+      PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "$(jq -r '.queue_followup_effective // false' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo false)")
       REASONING="Pre-scan ACP bootstrap decision: priority_targets=$PRIORITY_COUNT"
       if [ "$PREV_TARGET_COUNT" -gt 0 ] || [ "$PREV_PRIORITY_COUNT" -gt 0 ] || [ "$PREV_FOCUS_COUNT" -gt 0 ]; then
         REASONING="$REASONING + previous followup targets=$PREV_TARGET_COUNT priority=$PREV_PRIORITY_COUNT focus=$PREV_FOCUS_COUNT phase=$PREV_NEXT_PHASE"
@@ -503,7 +561,7 @@ steps:
         [ "$RATE_LIMIT" -lt 40 ] 2>/dev/null && RATE_LIMIT=40
       fi
 
-      jq -n \
+      if ! jq -n \
         --arg nuclei_severity "$SEVERITY" \
         --argjson suggested_threads "$THREADS" \
         --argjson suggested_rate_limit "$RATE_LIMIT" \
@@ -564,7 +622,9 @@ steps:
             previous_followup_queue_followup_effective: $previous_followup_queue_followup_effective
           },
           reasoning: $reasoning
-        }' > {{aiDecisionOutput}}
+        }' > {{aiDecisionOutput}}; then
+        printf '%s\n' '{"nuclei_severity":"critical,high","suggested_threads":10,"suggested_rate_limit":30,"recommended_timeout":"6h","waf_bypass_needed":false,"focus_areas":[],"priority_targets":[],"rescan_targets":[],"decision_inputs":{"previous_followup_source_kind":"none","previous_followup_targets":0,"previous_followup_priority_targets":0,"previous_followup_focus_areas":0,"previous_followup_manual_first_targets":0,"previous_followup_high_confidence_targets":0,"previous_followup_reasoning":"","previous_followup_scan_profile":"","previous_followup_severity":"","previous_followup_next_phase":"","previous_followup_priority_mode":"","previous_followup_confidence_level":"","previous_followup_escalation_score":0,"previous_followup_campaign_create_status":"","previous_followup_campaign_create_id":"","previous_followup_campaign_create_queued_runs":0,"previous_followup_reuse_sources":[],"previous_followup_manual_followup_needed":false,"previous_followup_campaign_followup_recommended":false,"previous_followup_queue_followup_effective":false},"reasoning":"Pre-scan ACP bootstrap decision fallback"}' > {{aiDecisionOutput}}
+      fi
 
   - name: log-pre-scan-complete
     type: function

@@ -13,7 +13,7 @@ description: Skill-based security testing knowledge system
 
 params:
   - name: skillsDir
-    default: "{{OsmedeusBase}}/skills"
+    default: "{{Workflows}}/../skills"
   - name: skillName
     type: string
     default: ""
@@ -90,7 +90,7 @@ steps:
 
   - name: load-skill-content
     type: bash
-    pre_condition: '{{skillName}} != ""'
+    pre_condition: '"{{skillName}}" != ""'
     command: |
       SKILLS_DIR="{{skillsDir}}"
       SKILL_NAME="{{skillName}}"
@@ -187,9 +187,9 @@ steps:
         ' "$file"
       }
       
-      if [ -z "$VULN_TYPES" ] || [ "$VULN_TYPES" = "{{vulnTypes}}" ]; then
+      if [ -z "$VULN_TYPES" ]; then
         echo "[INFO] No vulnTypes specified, using default skills"
-        VULN_TYPES="sql-injection,xss-testing,ssrf-testing,rce-testing"
+        VULN_TYPES="sql-injection,xss-testing,ssrf-testing,command-injection-testing,rce-testing,api-security"
       fi
       
       echo "=== Loading Skills for: $VULN_TYPES ==="
@@ -197,6 +197,17 @@ steps:
       
       COMBINED_FILE="{{Output}}/ai-analysis/skills-combined.md"
       : > "$COMBINED_FILE"
+      if [ ! -d "$SKILLS_DIR" ]; then
+        {
+          echo "# Security Testing Skills Library"
+          echo ""
+          echo "Skills directory not found: $SKILLS_DIR"
+          echo "Using workflow fallback mode without bundled skill content."
+        } > "$COMBINED_FILE"
+        echo "[WARN] Skills directory not found: $SKILLS_DIR"
+        echo "[INFO] Combined skills saved: $COMBINED_FILE ($(wc -l < "$COMBINED_FILE" 2>/dev/null || echo 0) lines)"
+        exit 0
+      fi
       
       for skill_name in $(printf '%s' "$VULN_TYPES" | tr ',' '\n' | sed '/^$/d' | sort -u); do
         SKILL_FILE="$SKILLS_DIR/$skill_name/SKILL.md"
@@ -223,11 +234,12 @@ steps:
 
   - name: search-skills
     type: bash
+    pre_condition: '"{{searchTerm}}" != ""'
     command: |
       SKILLS_DIR="{{skillsDir}}"
       SEARCH_TERM="{{searchTerm}}"
       
-      if [ -z "$SEARCH_TERM" ] || [ "$SEARCH_TERM" = "{{searchTerm}}" ]; then
+      if [ -z "$SEARCH_TERM" ]; then
         echo "[ERROR] No searchTerm specified"
         exit 1
       fi
@@ -295,10 +307,18 @@ steps:
         printf 'Generated: %s\n\n' "$(date)"
         printf -- '---\n\n'
       } >> "$GUIDE_FILE"
+
+      if [ ! -d "$SKILLS_DIR" ]; then
+        printf 'Skills directory not found: %s\n' "$SKILLS_DIR" >> "$GUIDE_FILE"
+        printf 'Workflow will continue without bundled skill excerpts.\n' >> "$GUIDE_FILE"
+        echo "[WARN] Skills directory not found: $SKILLS_DIR"
+        echo "[INFO] Guide generated: $GUIDE_FILE"
+        exit 0
+      fi
       
       # Add relevant skills based on target type
       case "$TARGET_TYPE" in
-        web|Website)
+        web|Website|website|domain|subdomain|host|url)
           printf '## Web Application Testing\n\n' >> "$GUIDE_FILE"
           for skill in sql-injection xss-testing ssrf-testing rce-testing; do
             if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then

@@ -1,0 +1,33 @@
+kind: flow
+name: ai-semantic-vector-smoke-flow
+description: Controlled provider-backed semantic retrieval smoke regression.
+
+modules:
+  - name: seed-fixtures
+    path: test/regression/workflows/ai-semantic/seed-ai-semantic-fixtures-module.yaml
+
+  - name: ai-semantic-search
+    path: osmedeus-base/workflows/fragments/do-ai-semantic-search.yaml
+    depends_on: [seed-fixtures]
+    params:
+      enableSemanticAgent: false
+      searchStage: "early"
+      searchQuery: "token confusion admin panel preview route"
+      knowledgeWorkspace: "example.com"
+      sharedKnowledgeWorkspace: "shared-web"
+      globalKnowledgeWorkspace: "global"
+      embeddingsProvider: "mock-openai"
+      embeddingsModel: "test-embedding-3-small"
+
+  - name: ai-semantic-search-hybrid
+    path: osmedeus-base/workflows/fragments/do-ai-semantic-search-hybrid.yaml
+    depends_on: [ai-semantic-search]
+    params:
+      semanticIndexDir: "{{Output}}/ai-analysis/hybrid-semantic-index"
+      searchStage: "early"
+      searchQuery: "token confusion admin panel preview route"
+      knowledgeWorkspace: "example.com"
+      sharedKnowledgeWorkspace: "shared-web"
+      globalKnowledgeWorkspace: "global"
+      embeddingsProvider: "mock-openai"
+      embeddingsModel: "test-embedding-3-small"

@@ -272,6 +272,87 @@ func TestLearnWorkspace_AssignsStableRetrievalFingerprintAcrossScopes(t *testing
 	require.Equal(t, workspaceFingerprint, publicFingerprint)
 }
 
+func TestLearnWorkspace_AIInsightsFingerprintIgnoresVolatileArtifactNames(t *testing.T) {
+	tmpDir := t.TempDir()
+	workspacesDir := filepath.Join(tmpDir, "workspaces")
+	workspaceDir := filepath.Join(workspacesDir, "acme")
+	aiDir := filepath.Join(workspaceDir, "ai-analysis")
+	require.NoError(t, os.MkdirAll(aiDir, 0o755))
+
+	initialInsight := filepath.Join(aiDir, "unified-analysis-001.md")
+	require.NoError(t, os.WriteFile(initialInsight, []byte("# Insight\n\nUse verified findings first.\n\nPrioritize the admin path."), 0o644))
+
+	cfg := &config.Config{
+		BaseFolder:     tmpDir,
+		WorkspacesPath: workspacesDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge-learning-ai-fingerprint.sqlite"),
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	verified := &database.Vulnerability{
+		Workspace:  "acme",
+		VulnInfo:   "auth-bypass",
+		VulnTitle:  "Authentication Bypass",
+		Severity:   "critical",
+		Confidence: "certain",
+		AssetType:  "url",
+		AssetValue: "https://app.acme.test/admin",
+		VulnStatus: "verified",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		LastSeenAt: now,
+	}
+	_, err = database.CreateVulnerabilityRecord(ctx, verified)
+	require.NoError(t, err)
+
+	_, err = LearnWorkspace(ctx, cfg, LearnOptions{Workspace: "acme"})
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(initialInsight))
+	rotatedInsight := filepath.Join(aiDir, "unified-analysis-20260328.md")
+	require.NoError(t, os.WriteFile(rotatedInsight, []byte("# Insight\n\nUse verified findings first.\n\nPrioritize the admin path."), 0o644))
+
+	_, err = LearnWorkspace(ctx, cfg, LearnOptions{Workspace: "acme", Scope: "public"})
+	require.NoError(t, err)
+
+	workspaceDocs, err := ListDocuments(ctx, "acme", 0, 20)
+	require.NoError(t, err)
+	publicDocs, err := ListDocuments(ctx, "public", 0, 20)
+	require.NoError(t, err)
+
+	var workspaceFingerprint string
+	for _, doc := range workspaceDocs.Data {
+		if doc.SourcePath == "kb://learned/workspace/acme/ai-insights.md" {
+			metadata := database.ParseKnowledgeMetadata(doc.Metadata)
+			require.NotNil(t, metadata)
+			workspaceFingerprint = metadata.RetrievalFingerprint
+		}
+	}
+	var publicFingerprint string
+	for _, doc := range publicDocs.Data {
+		if doc.SourcePath == "kb://learned/public/acme/ai-insights.md" {
+			metadata := database.ParseKnowledgeMetadata(doc.Metadata)
+			require.NotNil(t, metadata)
+			publicFingerprint = metadata.RetrievalFingerprint
+		}
+	}
+
+	require.NotEmpty(t, workspaceFingerprint)
+	require.Equal(t, workspaceFingerprint, publicFingerprint)
+}
+
 func TestLearnWorkspace_IncludesOperationalPlaybookFromFollowupArtifacts(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspacesDir := filepath.Join(tmpDir, "workspaces")

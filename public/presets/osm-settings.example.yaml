@@ -410,6 +410,42 @@ cloud:
   enabled: false
 
 # =============================================================================
+# Independent Vector Knowledge DB
+# =============================================================================
+# Stores vectorized knowledge in a standalone SQLite file for reusable semantic search.
+# If default_provider/default_model are left empty, Osmedeus will fall back to
+# embeddings_config.provider and that provider's configured model.
+# There is no separate semantic_search_config block; AI semantic retrieval is
+# controlled by workflows plus knowledge_vector/embeddings_config.
+knowledge_vector:
+  # Enable the independent vector knowledge DB
+  enabled: true
+
+  # Standalone vector DB path
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+
+  # Default embedding provider/model used for indexing and search
+  default_provider: ""
+  default_model: ""
+
+  # Informational settings for current implementation
+  dimension: 1024
+  metric: cosine
+
+  # Hybrid retrieval tuning
+  top_k: 20
+  hybrid_weight: 0.7
+  keyword_weight: 0.3
+
+  # Automatically refresh vector index after kb ingest / kb learn
+  auto_index_on_ingest: true
+  auto_index_on_learn: true
+
+  # Indexing controls
+  batch_size: 32
+  max_indexing_chunks: 5000
+
+# =============================================================================
 # LLM Configuration (Optional)
 # =============================================================================
 # Large Language Model settings for AI-powered features
@@ -450,6 +486,15 @@ llm_config:
   # Maximum number of retries for failed requests
   max_retries: 3
 
+  # Delay between retries
+  retry_delay: 1s
+
+  # Enable exponential backoff for retries
+  retry_backoff: true
+
+  # Delay between outbound requests (useful for embedding rate limits)
+  request_delay: 2s
+
   # Timeout for API requests
   timeout: 120s
 
@@ -464,3 +509,45 @@ llm_config:
 
   # Custom headers for API requests
   custom_headers: ""
+
+# =============================================================================
+# Embeddings Configuration (Optional)
+# =============================================================================
+# Dedicated embeddings provider settings for vectorkb / semantic KB indexing.
+# This is separate from llm_config so chat models and embedding models can be
+# configured independently.
+embeddings_config:
+  enabled: false
+
+  # Embeddings provider: "jina", "openai", "azure", "ollama"
+  provider: ""
+
+  # Jina AI example
+  jina:
+    api_url: "https://api.jina.ai/v1/embeddings"
+    model: "jina-embeddings-v3"
+    api_key: ""
+
+  # OpenAI-compatible embeddings example
+  openai:
+    api_url: "https://api.openai.com/v1/embeddings"
+    model: "text-embedding-3-small"
+    api_key: ""
+
+  # Azure OpenAI embeddings example
+  azure:
+    api_url: ""
+    model: ""
+    api_key: ""
+
+  # Ollama local embeddings example
+  ollama:
+    api_url: "http://localhost:11434/api/embeddings"
+    model: "nomic-embed-text"
+    api_key: ""
+
+  batch_size: 32
+  max_input_length: 8000
+  dimension: 1024
+  min_relevance_score: 0.7
+  max_search_results: 10

@@ -510,6 +510,89 @@ steps:
 	assert.Contains(t, issues[0].Message, "undefined_parallel")
 }
 
+func TestUndefinedVariableRule_AllowsLLMAutoExports(t *testing.T) {
+	rule := &UndefinedVariableRule{}
+	ast := parseTestWorkflow(t, `
+name: test
+kind: module
+params:
+  - name: target
+steps:
+  - name: llm-vuln-analysis
+    type: llm
+    messages:
+      - role: user
+        content: "Analyze {{target}}"
+    exports:
+      analysis: "{{llm_vuln_analysis_content}}"
+  - name: save
+    type: bash
+    command: echo "{{analysis}} {{llm_vuln_analysis_content}}"
+`)
+	issues := rule.Check(ast)
+	for _, issue := range issues {
+		if issue.Rule == "undefined-variable" {
+			t.Fatalf("unexpected undefined-variable issue: %+v", issue)
+		}
+	}
+}
+
+func TestUndefinedVariableRule_AllowsAgentAutoExports(t *testing.T) {
+	rule := &UndefinedVariableRule{}
+	ast := parseTestWorkflow(t, `
+name: test
+kind: module
+params:
+  - name: target
+steps:
+  - name: plan
+    type: agent
+    query: "Analyze {{target}}"
+    max_iterations: 3
+    agent_tools:
+      - preset: bash
+    exports:
+      result: "{{agent_content}}"
+  - name: save
+    type: bash
+    command: echo "{{result}} {{agent_iterations}}"
+`)
+	issues := rule.Check(ast)
+	for _, issue := range issues {
+		if issue.Rule == "undefined-variable" {
+			t.Fatalf("unexpected undefined-variable issue: %+v", issue)
+		}
+	}
+}
+
+func TestUndefinedVariableRule_AllowsACPAgentAutoExports(t *testing.T) {
+	rule := &UndefinedVariableRule{}
+	ast := parseTestWorkflow(t, `
+name: test
+kind: module
+params:
+  - name: target
+steps:
+  - name: external-agent
+    type: agent-acp
+    agent: codex
+    messages:
+      - role: user
+        content: "Analyze {{target}}"
+    exports:
+      result: "{{acp_output}}"
+  - name: save
+    type: bash
+    command: echo "{{result}} {{acp_agent}}"
+`)
+	issues := rule.Check(ast)
+	for _, issue := range issues {
+		if issue.Rule == "undefined-variable" {
+			t.Fatalf("unexpected undefined-variable issue: %+v", issue)
+		}
+	}
+}
+
 func TestUndefinedVariableRule_DecisionCaseCommands(t *testing.T) {
 	rule := &UndefinedVariableRule{}
 	ast := parseTestWorkflow(t, `

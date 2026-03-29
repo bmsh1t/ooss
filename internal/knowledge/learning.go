@@ -47,6 +47,8 @@ type LearnSummary struct {
 	AIFilesIncluded  []string `json:"ai_files_included,omitempty"`
 	SourcePath       string   `json:"source_path"`
 	SourcePaths      []string `json:"source_paths,omitempty"`
+	VectorIndexed    *bool    `json:"vector_indexed,omitempty"`
+	VectorError      string   `json:"vector_error,omitempty"`
 }
 
 // LearnWorkspace builds a synthetic knowledge document from a workspace's existing findings.
@@ -141,6 +143,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 		"operational_ai_files":     operationalFiles,
 		"target_types":             targetTypes,
 		"generated_at":             generatedAt,
+		"confidence_observed_at":   generatedAt,
 	}
 
 	type learnedDocument struct {
@@ -228,7 +231,7 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 			continue
 		}
 		metadata := mergeLearnMetadata(doc.metadata, map[string]interface{}{})
-		if fingerprint := buildLearnedRetrievalFingerprint(doc.docType, content); fingerprint != "" {
+		if fingerprint := buildLearnedRetrievalFingerprint(workspace, doc.docType, content); fingerprint != "" {
 			metadata["retrieval_fingerprint"] = fingerprint
 		}
 		chunks := chunkContent(content)
@@ -265,50 +268,8 @@ func LearnWorkspace(ctx context.Context, cfg *config.Config, opts LearnOptions) 
 }
 
 func upsertKnowledgeContent(ctx context.Context, workspace, sourcePath, docType, title, content string, metadata map[string]interface{}) error {
-	content = normalizeContent(content)
-	chunks := chunkContent(content)
-	if len(chunks) == 0 {
-		return fmt.Errorf("no searchable chunks generated")
-	}
-
-	record := &database.KnowledgeDocument{
-		Workspace:   normalizeWorkspace(workspace),
-		SourcePath:  sourcePath,
-		SourceType:  "generated",
-		DocType:     docType,
-		Title:       title,
-		ContentHash: hashString(content),
-		Status:      "ready",
-		ChunkCount:  len(chunks),
-		TotalBytes:  int64(len(content)),
-		Metadata:    marshalMetadata(metadata),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-
-	chunkRows := make([]database.KnowledgeChunk, 0, len(chunks))
-	for i, chunk := range chunks {
-		chunkMeta := map[string]interface{}{
-			"source_path": sourcePath,
-			"section":     chunk.Section,
-			"chunk_index": i,
-			"doc_type":    docType,
-		}
-		for key, value := range metadata {
-			chunkMeta[key] = value
-		}
-		chunkRows = append(chunkRows, database.KnowledgeChunk{
-			Workspace:   normalizeWorkspace(workspace),
-			ChunkIndex:  i,
-			Section:     chunk.Section,
-			Content:     chunk.Content,
-			ContentHash: hashString(chunk.Content),
-			Metadata:    marshalMetadata(chunkMeta),
-			CreatedAt:   time.Now(),
-		})
-	}
-
-	return database.UpsertKnowledgeDocument(ctx, record, chunkRows)
+	_, err := saveKnowledgeContent(ctx, workspace, sourcePath, "generated", docType, title, content, metadata, true)
+	return err
 }
 
 func normalizeLearnScope(scope string) string {
@@ -1401,12 +1362,12 @@ func buildAIInsightsMarkdown(workspace, scope string, aiSections []string) strin
 	return builder.String()
 }
 
-func buildLearnedRetrievalFingerprint(docType, content string) string {
+func buildLearnedRetrievalFingerprint(sourceWorkspace, docType, content string) string {
 	normalized := normalizeLearnedFingerprintContent(content)
 	if normalized == "" {
 		return ""
 	}
-	return hashString(strings.TrimSpace(docType) + "::" + normalized)
+	return hashString(strings.ToLower(strings.TrimSpace(sourceWorkspace)) + "::" + strings.TrimSpace(docType) + "::" + normalized)
 }
 
 func normalizeLearnedFingerprintContent(content string) string {
@@ -1423,15 +1384,52 @@ func normalizeLearnedFingerprintContent(content string) string {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "- generated:") {
+		if isVolatileLearnedFingerprintLine(lower) {
 			continue
 		}
-		if strings.HasPrefix(lower, "- scope:") {
+		if looksLikeVolatileLearnedArtifactHeading(line) {
 			continue
 		}
 		clean = append(clean, line)
 	}
 	return strings.Join(clean, "\n")
+}
+
+func isVolatileLearnedFingerprintLine(line string) bool {
+	for _, prefix := range []string{
+		"- generated:",
+		"- scope:",
+		"- artifact:",
+		"- source artifacts:",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeVolatileLearnedArtifactHeading(line string) bool {
+	if !strings.HasPrefix(line, "#") {
+		return false
+	}
+	heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
+	if heading == "" {
+		return false
+	}
+	if strings.Contains(heading, "/") || strings.Contains(heading, "\\") {
+		return true
+	}
+	if strings.Contains(heading, " ") {
+		return false
+	}
+	lower := strings.ToLower(heading)
+	for _, suffix := range []string{".json", ".jsonl", ".md", ".txt", ".log", ".yaml", ".yml"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeLearnMetadata(base map[string]interface{}, extra map[string]interface{}) map[string]interface{} {

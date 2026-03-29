@@ -38,11 +38,11 @@ func IndexWorkspace(ctx context.Context, cfg *config.Config, opts IndexOptions) 
 
 	provider := strings.TrimSpace(opts.Provider)
 	if provider == "" {
-		provider = strings.TrimSpace(cfg.KnowledgeVector.DefaultProvider)
+		provider = strings.TrimSpace(cfg.GetKnowledgeVectorProvider())
 	}
 	model := strings.TrimSpace(opts.Model)
 	if model == "" {
-		model = strings.TrimSpace(cfg.KnowledgeVector.DefaultModel)
+		model = strings.TrimSpace(cfg.GetKnowledgeVectorModel(provider))
 	}
 	if provider == "" || model == "" {
 		return nil, fmt.Errorf("vector provider/model is not configured")
