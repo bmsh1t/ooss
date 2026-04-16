@@ -438,8 +438,8 @@ llm_config:
   llm_providers:
     # Primary provider (OpenAI-compatible chat endpoint)
     - provider: openai
-      base_url: "http://72.60.236.127:8317/v1/chat/completions"
-      auth_token: "sk-helloworld"
+      base_url: "${OSM_LLM_BASE_URL}"
+      auth_token: "${OSM_LLM_AUTH_TOKEN}"
       model: "gpt-5.4"
 
     # Backup provider (Ollama local)
