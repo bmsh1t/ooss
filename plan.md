@@ -1,5 +1,56 @@
 # Plan
 
+## Current Handoff (2026-04-16)
+
+### Current Repo State
+
+- Code has been pushed to `origin/main` (`https://github.com/bmsh1t/ooss.git`).
+- Default sensitive values were removed from `osmedeus-base/osm-settings.yaml`.
+- The main AI workflow / vectorkb / rerank changes are already landed in source.
+- Local working tree was clean at handoff time.
+
+### What Is Actually Still Unfinished
+
+#### 1. Real provider-backed runtime validation
+
+- Still not fully closed:
+  - a full provider-backed end-to-end run of the main superdomain AI workflow on real scan output
+  - a final real-environment verification with:
+    - `OSM_LLM_BASE_URL`
+    - `OSM_LLM_AUTH_TOKEN`
+    - `TUMUER_API_KEY`
+- Current situation:
+  - controlled smoke paths are already covered
+  - chat LLM path was previously verified
+  - vectorkb/rerank live verification is blocked until valid provider credentials are supplied in env
+
+#### 2. vectorkb doctor practical hardening
+
+- Still recommended:
+  - add an early auth/provider probe in `kb vector doctor`
+  - make doctor surface auth/token/provider failures before full vector search/index requests fail later
+- Why:
+  - current doctor can report config/provider availability while a real embedding/rerank request still fails on invalid credentials
+
+#### 3. Plan/doc backfill cleanup
+
+- Code is ahead of some historical plan docs.
+- `docs/superpowers/plans/*` still contains unchecked historical task items.
+- This is mainly documentation drift, not proof that the implementation is missing.
+
+#### 4. Non-mainline backlog
+
+- There are still older TODOs outside the current mainline:
+  - cloud-related TODOs in `internal/cloud/*`
+  - cloud CLI TODOs in `pkg/cli/cloud.go`
+- These are not blocking the current AI workflow / KB / vectorkb line.
+
+### Recommended Next 3 Tasks
+
+1. Run one real provider-backed superdomain AI workflow verification with valid env credentials.
+2. Harden `kb vector doctor` so it can detect auth/provider failures earlier.
+3. Backfill the most important historical plan docs so documentation state matches shipped code.
+
 ## Current Status
 
 ### Completed
