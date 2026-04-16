@@ -144,11 +144,18 @@ done
 
 decision_prev_source=$(jq -er '.decision_inputs.previous_followup_source_kind' "$AI_DECISION")
 decision_rescan_count=$(jq -er '.rescan_targets | length' "$AI_DECISION")
+decision_passive_signal_count=$(jq -er '.decision_inputs.passive_web_risk_signals // 0' "$AI_DECISION")
+decision_passive_target_count=$(jq -er '.decision_inputs.passive_target_count // 0' "$AI_DECISION")
 applied_followup_used=$(jq -er '.source.followup_used' "$APPLIED_DECISION")
 applied_followup_kind=$(jq -er '.source.followup_source_kind' "$APPLIED_DECISION")
 retest_total=$(jq -er '.summary.total_targets // 0' "$RETEST_PLAN")
+retest_decision_source=$(jq -er '.summary.decision_source_kind // ""' "$RETEST_PLAN")
+retest_decision_targets=$(jq -er '.summary.decision_target_count // 0' "$RETEST_PLAN")
 operator_total=$(jq -er '.summary.total_tasks // 0' "$OPERATOR_QUEUE")
+operator_decision_source=$(jq -er '.summary.decision_source_kind // ""' "$OPERATOR_QUEUE")
+operator_decision_targets=$(jq -er '.summary.decision_target_count // 0' "$OPERATOR_QUEUE")
 campaign_ready=$(jq -er '.handoff_ready' "$CAMPAIGN_HANDOFF")
+campaign_decision_focus_targets=$(jq -er '.counts.decision_focus_targets // 0' "$CAMPAIGN_HANDOFF")
 campaign_target_count=$(jq -er '.counts.campaign_targets' "$CAMPAIGN_HANDOFF")
 campaign_create_status=$(jq -er '.status' "$CAMPAIGN_CREATE")
 campaign_create_id=$(jq -er '.campaign_id' "$CAMPAIGN_CREATE")
@@ -157,26 +164,37 @@ retest_queue_status=$(jq -er '.status' "$RETEST_QUEUE")
 retest_queue_targets=$(jq -er '.queued_targets' "$RETEST_QUEUE")
 followup_next_phase=$(jq -er '.execution_feedback.next_phase' "$FOLLOWUP_DECISION")
 followup_campaign_status=$(jq -er '.followup_summary.campaign_create_status' "$FOLLOWUP_DECISION")
+followup_passive_targets=$(jq -er '.followup_summary.passive_targets // 0' "$FOLLOWUP_DECISION")
 followup_priority_mode=$(jq -er '.seed_focus.priority_mode' "$FOLLOWUP_DECISION")
+followup_reuse_sources=$(jq -er '(.seed_focus.reuse_sources // []) | join(",")' "$FOLLOWUP_DECISION")
 knowledge_context_workspace=$(jq -er '.workspace' "$KNOWLEDGE_CONTEXT")
 knowledge_context_learning_workspace=$(jq -er '.learning_workspace' "$KNOWLEDGE_CONTEXT")
 knowledge_context_retrieval_workspace=$(jq -er '.retrieval_workspace' "$KNOWLEDGE_CONTEXT")
 
 assert_eq "$decision_prev_source" "decision-file" "ai decision previous follow-up source"
 assert_ge "$decision_rescan_count" 2 "ai decision rescan target count"
+assert_ge "$decision_passive_signal_count" 4 "ai decision passive signal count"
+assert_ge "$decision_passive_target_count" 3 "ai decision passive target count"
 assert_eq "$applied_followup_used" "true" "applied decision follow-up usage"
 assert_eq "$applied_followup_kind" "decision-file" "applied decision follow-up source kind"
 assert_ge "$retest_total" 2 "retest plan total targets"
+assert_eq "$retest_decision_source" "applied-ai-decision" "retest plan decision source"
+assert_ge "$retest_decision_targets" 2 "retest plan decision target count"
 assert_ge "$operator_total" 2 "operator queue total tasks"
+assert_eq "$operator_decision_source" "applied-ai-decision" "operator queue decision source"
+assert_ge "$operator_decision_targets" 2 "operator queue decision target count"
 assert_eq "$campaign_ready" "true" "campaign handoff readiness"
+assert_ge "$campaign_decision_focus_targets" 2 "campaign handoff decision focus target count"
 assert_ge "$campaign_target_count" 3 "campaign handoff target count"
 assert_eq "$campaign_create_status" "created" "campaign creation status"
 assert_ge "$campaign_create_runs" 3 "campaign queued run count"
 assert_eq "$retest_queue_status" "queued" "retest queue status"
 assert_ge "$retest_queue_targets" 2 "retest queued target count"
 assert_eq "$followup_campaign_status" "created" "follow-up campaign status"
+assert_ge "$followup_passive_targets" 3 "follow-up passive target count"
 assert_eq "$followup_priority_mode" "manual-first" "follow-up priority mode"
 assert_eq "$followup_next_phase" "manual-exploitation" "follow-up next phase"
+assert_contains "$followup_reuse_sources" "passive-web-risk" "follow-up reuse sources"
 assert_eq "$knowledge_context_workspace" "$WORKSPACE" "knowledge context workspace"
 assert_eq "$knowledge_context_learning_workspace" "$WORKSPACE" "knowledge learning workspace"
 assert_eq "$knowledge_context_retrieval_workspace" "shared-kb" "knowledge retrieval workspace"

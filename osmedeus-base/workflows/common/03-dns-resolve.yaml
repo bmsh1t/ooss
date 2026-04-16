@@ -19,6 +19,9 @@ params:
   - name: enableDnsBruteForcing
     type: bool
     default: true
+  - name: enableDnsBruteFocing
+    default: ""
+    description: "Legacy alias for enableDnsBruteForcing"
   - name: enablePermutation
     type: bool
     default: true
@@ -419,7 +422,7 @@ steps:
   # ===========================================================================
   - name: dns-bruteforce
     type: function
-    pre_condition: '{{enableDnsBruteForcing}} && command_exists("puredns")'
+    pre_condition: '(( "{{enableDnsBruteFocing}}" == "" && {{enableDnsBruteForcing}} ) || "{{enableDnsBruteFocing}}" == "true") && command_exists("puredns")'
     log: "Running DNS bruteforce with puredns"
     functions:
       - 'exec_cmd("timeout --foreground -k 15s {{dnsExternalTimeout}} puredns bruteforce {{dnsBruteForceWordlist}} {{Target}} --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/subbrute-{{TargetSpace}}.txt >/dev/null 2>&1 || true")'
@@ -431,7 +434,7 @@ steps:
   # ===========================================================================
   - name: generate-permutations
     type: function
-    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enablePermutation}} && {{enableDnsBruteForcing}} && command_exists("alterx") && command_exists("puredns")'
+    pre_condition: 'file_length("{{subdomainFile}}") <= {{permLimit}} && {{enablePermutation}} && (( "{{enableDnsBruteFocing}}" == "" && {{enableDnsBruteForcing}} ) || "{{enableDnsBruteFocing}}" == "true") && command_exists("alterx") && command_exists("puredns")'
     log: "Generating permutation subdomains"
     functions:
       - 'exec_cmd("cat {{subdomainFile}} | alterx -silent >> {{Output}}/probing/permutation-{{TargetSpace}}.txt")'

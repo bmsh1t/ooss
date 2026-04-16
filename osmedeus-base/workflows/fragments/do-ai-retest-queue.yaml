@@ -445,7 +445,7 @@ steps:
           }' > "{{retestQueueSummary}}"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       WORKFLOW_FLAG="-f"
       if [ "{{retestWorkflowKind}}" = "module" ]; then

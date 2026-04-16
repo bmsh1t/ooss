@@ -35,6 +35,8 @@ It is also consumed by `superdomain-extensive-ai-optimized`, `superdomain-extens
 
 - at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
   - Enables vector knowledge indexing/search and AI workflow semantic retrieval
+- optional `rerank_config` with an OpenAI-compatible `/rerank` endpoint
+  - Enables second-stage rerank for vectorkb search, API vector search, and AI workflow semantic retrieval
 - a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model`
   - Keeps vectorkb index/search bound to the same provider/model pair unless you override them explicitly
 
@@ -45,7 +47,7 @@ knowledge_vector:
   enabled: true
   db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
   default_provider: openai
-  default_model: text-embedding-3-small
+  default_model: BAAI/bge-m3
   auto_index_on_ingest: true
   auto_index_on_learn: true
   top_k: 20
@@ -53,6 +55,17 @@ knowledge_vector:
   keyword_weight: 0.3
   batch_size: 32
   max_indexing_chunks: 5000
+
+rerank_config:
+  enabled: true
+  provider: openai
+  top_n: 10
+  max_candidates: 40
+  timeout: 15s
+  openai:
+    api_url: "https://router.tumuer.me/v1/rerank"
+    model: "Pro/BAAI/bge-reranker-v2-m3"
+    api_key: "${TUMUER_API_KEY}"
 ```
 
 When `auto_index_on_ingest` or `auto_index_on_learn` is enabled, successful `kb ingest` and `kb learn` operations automatically refresh the standalone vector DB.
@@ -130,7 +143,10 @@ curl -X POST http://localhost:8002/osm/api/knowledge/search \
     "workspace_layers": ["example.com", "shared-websec", "global"],
     "scope_layers": ["workspace", "public"],
     "query": "authentication bypass",
-    "limit": 10
+    "limit": 10,
+    "enable_rerank": true,
+    "rerank_top_n": 8,
+    "rerank_max_candidates": 30
   }'
 ```
 
@@ -269,6 +285,17 @@ curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
 | `provider` | string | No | Override configured embedding provider |
 | `model` | string | No | Override configured embedding model |
 | `limit` | int | No | Maximum hits to return |
+| `enable_rerank` | bool | No | Apply configured rerank provider after vectorkb recall |
+| `rerank_provider` | string | No | Override configured rerank provider |
+| `rerank_model` | string | No | Override configured rerank model |
+| `rerank_top_n` | int | No | Limit reranked result count |
+| `rerank_max_candidates` | int | No | Limit recall candidates sent to rerank |
+
+**Response notes**
+
+- `ranking_source`: top-level ranking mode for the returned result set, such as `rerank`, `hybrid`, or `fallback_hybrid`
+- `rerank_applied`: `true` only when rerank succeeded and the result order came from rerank
+- per-hit fields may include `base_relevance_score`, `rerank_score`, and `ranking_source`
 
 ---
 
@@ -292,5 +319,5 @@ Recommended flow:
 1. Ingest your PDFs, markdown notes, ebooks, or vendor docs into the same workspace name you scan with.
 2. Let Osmedeus auto-index them into `vector-kb.sqlite`, or trigger `/knowledge/vector/index` manually.
 3. Run `superdomain-extensive-ai-hybrid`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-optimized`, or `superdomain-extensive-ai-lite`.
-4. The workflow will perform direct `kb vector search`, merge that with direct `kb search` keyword hits, still export chunks into the semantic corpus, and run post-report `kb learn` for reuse in future runs.
+4. The workflow will perform direct `kb vector search`, optionally apply rerank when `rerank_config.enabled=true`, merge that with direct `kb search` keyword hits, still export chunks into the semantic corpus, and run post-report `kb learn` for reuse in future runs.
 5. During the AI closure, the workflow also writes a normalized `applied-ai-decision-<workspace>.json`, feeds targeted rescan findings back into the main vuln result set, and emits a `followup-decision-<workspace>.json` package after retest/operator/campaign coordination.

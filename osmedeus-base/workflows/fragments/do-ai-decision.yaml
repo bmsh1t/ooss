@@ -163,7 +163,8 @@ steps:
     pre_condition: "{{enableAiDecision}}"
     log: "Validating AI decision output"
     functions:
-      - 'log_info("AI Decision: " + "{{decision_json}}")'
+      - 'log_info("AI Decision output received")'
+      - 'save_content(typeof decision_json !== "undefined" ? decision_json : "", "{{Output}}/ai-analysis/.decision-raw-{{TargetSpace}}.txt")'
 
   - name: save-decision-result
     type: bash
@@ -171,8 +172,14 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis
 
-      # 保存原始决策结果 (带错误处理)
-      echo '{{decision_json}}' > {{decisionOutput}} 2>/dev/null || echo '{}' > {{decisionOutput}}
+      RAW_FILE="{{Output}}/ai-analysis/.decision-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      if [ -s "$RAW_FILE" ] && jq empty "$RAW_FILE" 2>/dev/null; then
+        cp "$RAW_FILE" {{decisionOutput}}
+      else
+        echo '{}' > {{decisionOutput}}
+      fi
 
       # 验证 JSON 有效性并提取关键参数
       if jq empty {{decisionOutput}} 2>/dev/null; then

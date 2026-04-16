@@ -768,6 +768,126 @@ func TestVectorKBUsesDedicatedEmbeddingsConfigWithoutLLMProviders(t *testing.T) 
 	require.EqualValues(t, 2, atomic.LoadInt32(&embeddingRequests))
 }
 
+func TestVectorKBUsesDedicatedEmbeddingsConfigForKnowledgeVectorFallbackWhenDisabled(t *testing.T) {
+	var embeddingRequests int32
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&embeddingRequests, 1)
+		type embeddingRequest struct {
+			Input []string `json:"input"`
+			Model string   `json:"model"`
+		}
+		var req embeddingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		require.Equal(t, "jina-embeddings-v5-text-small", req.Model)
+
+		type embeddingData struct {
+			Object    string    `json:"object"`
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		}
+		resp := struct {
+			Object string          `json:"object"`
+			Data   []embeddingData `json:"data"`
+			Model  string          `json:"model"`
+		}{
+			Object: "list",
+			Data:   make([]embeddingData, 0, len(req.Input)),
+			Model:  "jina-embeddings-v5-text-small",
+		}
+		for i, input := range req.Input {
+			text := strings.ToLower(input)
+			resp.Data = append(resp.Data, embeddingData{
+				Object:    "embedding",
+				Index:     i,
+				Embedding: []float64{scoreTerm(text, "graphql", "session"), scoreTerm(text, "auth", "login"), scoreTerm(text, "upload", "file")},
+			})
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer embeddingServer.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:            filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			BatchSize:         8,
+			MaxIndexingChunks: 100,
+			TopK:              10,
+			HybridWeight:      0.7,
+			KeywordWeight:     0.3,
+		},
+		Embeddings: config.EmbeddingsConfig{
+			Enabled:  testBoolPtr(false),
+			Provider: "jina",
+			Jina: config.EmbeddingsProviderConfig{
+				APIURL: embeddingServer.URL + "/embeddings",
+				Model:  "jina-embeddings-v5-text-small",
+				APIKey: "test-jina-key",
+			},
+		},
+		LLM: config.LLMConfig{
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	ctx := context.Background()
+	now := time.Now()
+	doc := &database.KnowledgeDocument{
+		Workspace:   "acme",
+		SourcePath:  "/tmp/graphql-playbook.md",
+		SourceType:  "file",
+		DocType:     "md",
+		Title:       "GraphQL Notes",
+		ContentHash: "doc-hash-graphql",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  128,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	chunks := []database.KnowledgeChunk{{
+		Workspace:   "acme",
+		ChunkIndex:  0,
+		Section:     "GraphQL",
+		Content:     "Review graphql auth boundaries and file upload resolvers.",
+		ContentHash: "chunk-hash-graphql",
+		CreatedAt:   now,
+	}}
+	require.NoError(t, database.UpsertKnowledgeDocument(ctx, doc, chunks))
+
+	require.Equal(t, "jina", cfg.GetKnowledgeVectorProvider())
+	require.Equal(t, "jina-embeddings-v5-text-small", cfg.GetKnowledgeVectorModel(""))
+
+	summary, err := IndexWorkspace(ctx, cfg, IndexOptions{Workspace: "acme"})
+	require.NoError(t, err)
+	require.Equal(t, 1, summary.DocumentsIndexed)
+	require.Equal(t, 1, summary.ChunksEmbedded)
+
+	results, err := Search(ctx, cfg, SearchOptions{
+		Workspace: "acme",
+		Limit:     5,
+	}, "graphql auth upload")
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, "jina", results[0].Provider)
+	require.Equal(t, "jina-embeddings-v5-text-small", results[0].Model)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&embeddingRequests), int32(2))
+}
+
 func TestIndexWorkspaceRetriesEmbeddingRateLimit(t *testing.T) {
 	var embeddingRequests int32
 	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

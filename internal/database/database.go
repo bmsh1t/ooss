@@ -226,11 +226,6 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
-	// Create indexes for AttackChainReport table
-	if err := createAttackChainIndexes(ctx); err != nil {
-		return err
-	}
-
 	// Create indexes for Workspace table
 	if err := createWorkspaceIndexes(ctx); err != nil {
 		return err
@@ -336,8 +331,13 @@ func Migrate(ctx context.Context) error {
 		return err
 	}
 
-	// Add attack-chain queue metrics columns if they don't exist
+	// Add attack-chain queue metrics columns if they don't exist before index creation.
 	if err := addAttackChainMetricsColumns(ctx); err != nil {
+		return err
+	}
+
+	// Create indexes for AttackChainReport table after optional metrics columns exist.
+	if err := createAttackChainIndexes(ctx); err != nil {
 		return err
 	}
 

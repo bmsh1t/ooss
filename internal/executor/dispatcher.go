@@ -15,8 +15,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// functionCallPattern matches function call syntax like functionName(...)
-var functionCallPattern = regexp.MustCompile(`\w+\s*\(`)
+// functionCallPattern matches export expressions that explicitly start with a
+// function-style call like trim(...). We intentionally evaluate based on the
+// authored export expression, not the rendered value, so literal strings from
+// LLM/agent outputs such as "SLEEP(5)" are not misclassified as executable JS.
+var functionCallPattern = regexp.MustCompile(`^\s*[\w.]+\s*\(`)
 
 // StepDispatcher dispatches steps to appropriate executors
 type StepDispatcher struct {
@@ -222,9 +225,11 @@ func (d *StepDispatcher) Dispatch(ctx context.Context, step *core.Step, execCtx 
 				rendered = expr
 			}
 
-			// Only evaluate with JS if the rendered value contains a function call
-			// Otherwise, use the rendered string directly
-			if functionCallPattern.MatchString(rendered) {
+			// Only evaluate with JS when the export expression itself was authored
+			// as a function-style expression. Using the rendered value here would
+			// misclassify arbitrary text (for example AI output containing
+			// "sleep(5)" or payload snippets) as executable code.
+			if functionCallPattern.MatchString(expr) {
 				value, err := d.functionRegistry.Execute(rendered, vars)
 				if err != nil {
 					return result, fmt.Errorf("export evaluation failed for %s: %w", name, err)

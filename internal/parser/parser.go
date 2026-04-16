@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/goccy/go-yaml"
 	"github.com/j3ssie/osmedeus/v5/internal/core"
@@ -448,8 +449,13 @@ func (p *Parser) validateStep(step *core.Step, index int) error {
 				Message: "agent-acp step must have 'agent' field or 'acp_config.command'",
 			}
 		}
-		// Validate built-in agent name if provided
-		if step.Agent != "" && !core.IsBuiltinACPAgent(step.Agent) {
+		// Validate built-in agent name if provided as a static value.
+		// Template-backed agent names are rendered later by the dispatcher,
+		// and custom commands explicitly override built-in agent selection.
+		if step.Agent != "" &&
+			(step.ACPConfig == nil || step.ACPConfig.Command == "") &&
+			!strings.Contains(step.Agent, "{{") &&
+			!core.IsBuiltinACPAgent(step.Agent) {
 			return &ValidationError{
 				Field:   fmt.Sprintf("steps[%d].agent", index),
 				Message: fmt.Sprintf("unknown built-in agent: %s (available: %s)", step.Agent, core.BuiltinACPAgentNamesString()),

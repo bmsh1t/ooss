@@ -1,0 +1,247 @@
+# =============================================================================
+# Module Workflow: Passive Web Risk
+# =============================================================================
+# 低噪声被动 Web 风险聚合：
+# - Source map / debug 暴露
+# - API / docs / auth / internal surface 暴露
+# - CORS / cache review heuristics
+# - Cloud storage / signed URL 暴露
+# =============================================================================
+
+kind: module
+name: passive-web-risk
+description: Passive low-noise web risk aggregation from existing crawl, JS, and http fingerprint artifacts
+tags: passive, web, api, sourcemap, cloud, risk
+
+params:
+  - name: enablePassiveWebRisk
+    type: bool
+    default: true
+
+  # 输入文件
+  - name: combinedUrlsFile
+    default: "{{Output}}/content-analysis/combined-urls.txt"
+  - name: jsJsmapUrlsFile
+    default: "{{Output}}/content-analysis/js-jsmap-urls-{{TargetSpace}}.txt"
+  - name: jsEndpointsFile
+    default: "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt"
+  - name: jsApiEndpointsFile
+    default: "{{Output}}/content-analysis/js-api-endpoints-{{TargetSpace}}.txt"
+  - name: graphqlEndpointsFile
+    default: "{{Output}}/content-analysis/graphql-endpoints-{{TargetSpace}}.txt"
+  - name: httpFingerprintJsonFile
+    default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
+
+  # 输出目录/文件
+  - name: outputDir
+    default: "{{Output}}/passive-web-risk"
+  - name: sourceMapExposureFile
+    default: "{{outputDir}}/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{outputDir}}/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{outputDir}}/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{outputDir}}/cloud-storage-leaks-{{TargetSpace}}.txt"
+  - name: passiveWebRiskSummaryFile
+    default: "{{outputDir}}/passive-web-risk-summary-{{TargetSpace}}.md"
+
+dependencies:
+  commands:
+    - jq
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: source-map-exposure
+    path: "{{sourceMapExposureFile}}"
+    type: text
+    description: Source map and debug exposure candidates
+
+  - name: api-surface
+    path: "{{apiSurfaceFile}}"
+    type: text
+    description: Passive API, docs, auth, and internal surface candidates
+
+  - name: cors-cache-heuristics
+    path: "{{corsCacheHeuristicsFile}}"
+    type: text
+    description: Low-noise CORS and cache review heuristics
+
+  - name: cloud-storage-leaks
+    path: "{{cloudLeakFile}}"
+    type: text
+    description: Cloud storage and signed URL exposure candidates
+
+  - name: passive-web-risk-summary
+    path: "{{passiveWebRiskSummaryFile}}"
+    type: markdown
+    description: Summary of passive web risk signals
+
+steps:
+  - name: create-output-folder
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Creating passive web risk output folder"
+    command: |
+      mkdir -p "{{outputDir}}" 2>/dev/null || true
+      : > "{{sourceMapExposureFile}}"
+      : > "{{apiSurfaceFile}}"
+      : > "{{corsCacheHeuristicsFile}}"
+      : > "{{cloudLeakFile}}"
+    on_error:
+      - action: continue
+
+  - name: source-map-and-debug-exposure
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Collecting passive source map and debug exposure candidates"
+    command: |
+      collect_matches() {
+        src="$1"
+        label="$2"
+        regex="$3"
+        [ -f "$src" ] || return 0
+        grep -aEi "$regex" "$src" 2>/dev/null | sed "s|^|[$label] |" >> "{{sourceMapExposureFile}}" || true
+      }
+
+      collect_matches "{{jsJsmapUrlsFile}}" "sourcemap" '\.map([?#].*)?$'
+      collect_matches "{{combinedUrlsFile}}" "sourcemap" '\.map([?#].*)?$'
+      collect_matches "{{combinedUrlsFile}}" "debug" '(^|/)(debug|actuator|jolokia|heapdump|trace|metrics|env|server-status|console|phpinfo)(/|$|[?#])'
+      collect_matches "{{jsEndpointsFile}}" "debug" '(^|/)(debug|actuator|jolokia|heapdump|trace|metrics|env|server-status|console|phpinfo)(/|$|[?#])'
+      sort -u "{{sourceMapExposureFile}}" -o "{{sourceMapExposureFile}}" 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: api-surface-exposure
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Collecting passive API and documentation exposure candidates"
+    command: |
+      collect_api_surface() {
+        src="$1"
+        label="$2"
+        regex="$3"
+        [ -f "$src" ] || return 0
+        grep -aEi "$regex" "$src" 2>/dev/null | sed "s|^|[$label] |" >> "{{apiSurfaceFile}}" || true
+      }
+
+      [ -f "{{jsApiEndpointsFile}}" ] && sed 's|^|[js-api] |' "{{jsApiEndpointsFile}}" >> "{{apiSurfaceFile}}" 2>/dev/null || true
+      collect_api_surface "{{jsEndpointsFile}}" "js-endpoint" '(/api/|/v[0-9]+/|/swagger([/?#.]|$)|/openapi([/?#.]|$)|/api-docs([/?#]|$)|/redoc([/?#]|$)|/auth([/?#]|$)|/oauth([/?#]|$)|/admin([/?#]|$)|/internal([/?#]|$)|/private([/?#]|$))'
+      collect_api_surface "{{combinedUrlsFile}}" "url-surface" '(/api/|/v[0-9]+/|/swagger([/?#.]|$)|/openapi([/?#.]|$)|/api-docs([/?#]|$)|/redoc([/?#]|$)|/auth([/?#]|$)|/oauth([/?#]|$)|/admin([/?#]|$)|/internal([/?#]|$)|/private([/?#]|$))'
+      sort -u "{{apiSurfaceFile}}" -o "{{apiSurfaceFile}}" 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: cors-cache-heuristics
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Building passive CORS/cache review heuristics from httpx and API surface"
+    command: |
+      if [ -f "{{httpFingerprintJsonFile}}" ] && [ -s "{{httpFingerprintJsonFile}}" ]; then
+        jq -r '
+          select((.url // "") != "") as $row |
+          ($row.url // "") as $u |
+          ($row.content_type // "") as $ct |
+          ($row.status_code // 0) as $status |
+          if (
+            ($u | test("/(api|graphql|auth|oauth|token|session|account|profile|admin|internal|private)(/|$|[?#])"; "i")) or
+            ($u | test("(export|download|report|invoice|statement|backup|dump)(/|$|[?#])"; "i")) or
+            ($u | test("\\.json([?#].*)?$"; "i")) or
+            ($ct | test("json|javascript|xml"; "i"))
+          ) then
+            "[review-cors-cache] " + $u + " status=" + ($status | tostring) + " content_type=" + $ct
+          else empty end
+        ' "{{httpFingerprintJsonFile}}" 2>/dev/null >> "{{corsCacheHeuristicsFile}}" || true
+      fi
+
+      if [ -f "{{apiSurfaceFile}}" ] && [ -s "{{apiSurfaceFile}}" ]; then
+        grep -aEi '(graphql|/api/|/v[0-9]+/|/auth|/oauth|/admin|/internal|/private)' "{{apiSurfaceFile}}" 2>/dev/null \
+          | sed 's|^|[api-surface-review] |' >> "{{corsCacheHeuristicsFile}}" || true
+      fi
+
+      sort -u "{{corsCacheHeuristicsFile}}" -o "{{corsCacheHeuristicsFile}}" 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: cloud-storage-and-signed-url-leaks
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Collecting passive cloud storage and signed URL exposure candidates"
+    command: |
+      collect_cloud() {
+        src="$1"
+        label="$2"
+        regex="$3"
+        [ -f "$src" ] || return 0
+        grep -aEi "$regex" "$src" 2>/dev/null | sed "s|^|[$label] |" >> "{{cloudLeakFile}}" || true
+      }
+
+      cloud_regex='(s3[.-][^ /"]+\.amazonaws\.com|storage\.googleapis\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|cloudfront\.net)'
+      signed_regex='(X-Amz-Algorithm=|X-Amz-Credential=|X-Amz-Signature=|X-Goog-Algorithm=|X-Goog-Credential=|GoogleAccessId=|Signature=|Expires=)'
+
+      collect_cloud "{{combinedUrlsFile}}" "cloud-storage" "$cloud_regex"
+      collect_cloud "{{jsEndpointsFile}}" "cloud-storage" "$cloud_regex"
+      collect_cloud "{{jsApiEndpointsFile}}" "cloud-storage" "$cloud_regex"
+      collect_cloud "{{combinedUrlsFile}}" "signed-url" "$signed_regex"
+      collect_cloud "{{jsEndpointsFile}}" "signed-url" "$signed_regex"
+      collect_cloud "{{jsApiEndpointsFile}}" "signed-url" "$signed_regex"
+      sort -u "{{cloudLeakFile}}" -o "{{cloudLeakFile}}" 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: build-passive-web-risk-summary
+    type: bash
+    pre_condition: "{{enablePassiveWebRisk}}"
+    log: "Building passive web risk summary"
+    command: |
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      SOURCEMAP_COUNT=$(count_lines "{{sourceMapExposureFile}}")
+      API_COUNT=$(count_lines "{{apiSurfaceFile}}")
+      CORS_CACHE_COUNT=$(count_lines "{{corsCacheHeuristicsFile}}")
+      CLOUD_COUNT=$(count_lines "{{cloudLeakFile}}")
+
+      {
+        echo "# Passive Web Risk Summary - {{Target}}"
+        echo
+        echo "**Generated:** $(date)"
+        echo
+        echo "## Counts"
+        echo
+        echo "- Source map / debug exposure candidates: $SOURCEMAP_COUNT"
+        echo "- API / docs / GraphQL surface candidates: $API_COUNT"
+        echo "- CORS / cache review heuristics: $CORS_CACHE_COUNT"
+        echo "- Cloud storage / signed URL candidates: $CLOUD_COUNT"
+        echo
+        echo "## Top Source Map / Debug Signals"
+        echo '```'
+        head -20 "{{sourceMapExposureFile}}" 2>/dev/null || true
+        echo '```'
+        echo
+        echo "## Top API Surface Signals"
+        echo '```'
+        head -20 "{{apiSurfaceFile}}" 2>/dev/null || true
+        echo '```'
+        echo
+        echo "## Top CORS / Cache Review Signals"
+        echo '```'
+        head -20 "{{corsCacheHeuristicsFile}}" 2>/dev/null || true
+        echo '```'
+        echo
+        echo "## Top Cloud Storage / Signed URL Signals"
+        echo '```'
+        head -20 "{{cloudLeakFile}}" 2>/dev/null || true
+        echo '```'
+      } > "{{passiveWebRiskSummaryFile}}"
+    on_error:
+      - action: continue

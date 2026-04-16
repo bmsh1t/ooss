@@ -1,4 +1,4 @@
-.PHONY: build run test test-plain test-unit test-unit-plain test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-api-vector test-regression-ai-workflow-smoke test-regression-ai-semantic-vector-smoke test-regression-scan-content-smoke test-regression-superdomain-lite-smoke test-regression-superdomain-stable-smoke test-regression-queue-live test-regression-stable-core test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
+.PHONY: build run test test-plain test-unit test-unit-plain test-integration test-workflow-integration test-e2e test-e2e-verbose test-e2e-ssh test-e2e-api test-regression-api-ai test-regression-api-knowledge test-regression-api-vector test-regression-ai-workflow-smoke test-regression-ai-semantic-vector-smoke test-regression-scan-content-smoke test-regression-superdomain-lite-smoke test-regression-superdomain-stable-smoke test-regression-superdomain-optimized-smoke test-regression-queue-live test-regression-stable-core test-e2e-nix test-e2e-install test-e2e-cloud test-sudo test-cloud test-docker test-ssh test-distributed distributed-e2e-up distributed-e2e-run distributed-e2e-down test-canary-all test-canary-repo test-canary-domain test-canary-ip test-canary-general canary-up canary-down test-all test-summary test-ci clean install install-gotestsum lint fmt db-seed db-clean db-migrate run-server-debug swagger update-ui snapshot-release github-release run-github-action docker-toolbox docker-toolbox-run docker-toolbox-shell docker-publish
 
 # Go parameters
 GOCMD=go
@@ -280,7 +280,15 @@ test-regression-superdomain-stable-smoke:
 	@echo "$(PREFIX) Running superdomain stable flow smoke regression..."
 	@BASE_DIR=/tmp/osm-superdomain-stable-flow-smoke EMBED_PORT=8914 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/superdomain-stable-flow-smoke.sh
 
-# Stable-core regression: serial workflow lint + AI follow-up smoke + semantic workflow smoke + superdomain-lite/stable flow smoke + AI API + knowledge + vectorkb + queue live regressions
+# Current-source superdomain-extensive-ai-optimized closure smoke using seeded artifacts and the full AI follow-up chain
+test-regression-superdomain-optimized-smoke:
+	@echo "$(PREFIX) Building local regression binary..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/osmedeus
+	@echo "$(PREFIX) Running superdomain optimized flow smoke regression..."
+	@BASE_DIR=/tmp/osm-superdomain-optimized-flow-smoke EMBED_PORT=8915 OSMEDEUS_BIN=$(CURDIR)/build/bin/osmedeus WORKFLOW_DIR=$(CURDIR)/osmedeus-base/workflows bash ./test/regression/superdomain-optimized-flow-smoke.sh
+
+# Stable-core regression: serial workflow lint + AI follow-up smoke + semantic workflow smoke + superdomain-lite/stable/optimized flow smoke + AI API + knowledge + vectorkb + queue live regressions
 test-regression-stable-core:
 	@echo "$(PREFIX) Building local regression binary..."
 	@mkdir -p $(BINARY_DIR)

@@ -91,6 +91,20 @@ func TestACPExecutor_ResolveAgent_CustomCommand(t *testing.T) {
 	assert.Equal(t, []string{"--acp", "--verbose"}, args)
 }
 
+func TestACPExecutor_ResolveAgent_CustomCommandOverridesBuiltIn(t *testing.T) {
+	step := &core.Step{
+		Agent: "claude-code",
+		ACPConfig: &core.ACPStepConfig{
+			Command: "/usr/local/bin/my-agent",
+			Args:    []string{"--acp"},
+		},
+	}
+	cmd, args, err := ResolveAgent(step)
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/local/bin/my-agent", cmd)
+	assert.Equal(t, []string{"--acp"}, args)
+}
+
 func TestACPExecutor_ResolveAgent_NoAgentOrCommand(t *testing.T) {
 	step := &core.Step{}
 	_, _, err := ResolveAgent(step)
@@ -178,6 +192,33 @@ func TestACPExecutor_Validation(t *testing.T) {
 			step: core.Step{
 				Name: "test-acp-custom",
 				Type: core.StepTypeAgentACP,
+				ACPConfig: &core.ACPStepConfig{
+					Command: "/usr/bin/my-agent",
+				},
+				Messages: []core.LLMMessage{
+					{Content: "Do something"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with templated agent",
+			step: core.Step{
+				Name:  "test-acp-templated-agent",
+				Type:  core.StepTypeAgentACP,
+				Agent: "{{codeReviewAgent}}",
+				Messages: []core.LLMMessage{
+					{Content: "Do something"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "custom command overrides invalid built-in agent",
+			step: core.Step{
+				Name:  "test-acp-custom-overrides-invalid-agent",
+				Type:  core.StepTypeAgentACP,
+				Agent: "flowcli",
 				ACPConfig: &core.ACPStepConfig{
 					Command: "/usr/bin/my-agent",
 				},
@@ -358,6 +399,14 @@ func TestRunAgentACP_UnknownAgent(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown agent")
 	assert.Contains(t, err.Error(), "nonexistent-agent")
+}
+
+func TestRunAgentACP_CustomCommandOverridesBuiltIn(t *testing.T) {
+	_, _, err := RunAgentACP(context.Background(), "hello", "claude-code", &RunAgentACPConfig{
+		Command: "definitely-missing-custom-agent",
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "definitely-missing-custom-agent")
 }
 
 func TestRunAgentACP_DefaultAgent(t *testing.T) {

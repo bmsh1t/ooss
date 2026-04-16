@@ -13,6 +13,7 @@ SHARED_WORKSPACE="${SHARED_WORKSPACE:-shared-web}"
 GLOBAL_WORKSPACE="${GLOBAL_WORKSPACE:-global}"
 MOCK_PROVIDER="${MOCK_PROVIDER:-mock-openai}"
 EMBED_MODEL="${EMBED_MODEL:-test-embedding-3-small}"
+RERANK_MODEL="${RERANK_MODEL:-test-rerank-v1}"
 MOCK_SERVER_SCRIPT="${MOCK_SERVER_SCRIPT:-${ROOT_DIR}/test/regression/mock-embedding-server.py}"
 
 require_cmd() {
@@ -137,6 +138,16 @@ knowledge_vector:
   keyword_weight: 0.3
   batch_size: 8
   max_indexing_chunks: 200
+rerank_config:
+  enabled: true
+  provider: openai
+  top_n: 3
+  max_candidates: 10
+  timeout: 5s
+  openai:
+    api_url: "http://127.0.0.1:$EMBED_PORT/v1"
+    model: "$RERANK_MODEL"
+    api_key: ""
 llm_config:
   llm_providers:
     - provider: "$MOCK_PROVIDER"
@@ -208,6 +219,9 @@ vector_stats_workspaces=$(printf '%s' "$vector_stats_json" | jq -er '.workspaces
 vector_stats_model=$(printf '%s' "$vector_stats_json" | jq -er '.models[0]')
 direct_vector_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb vector search -w "$KNOWLEDGE_WORKSPACE" --query "token confusion admin panel preview route" --limit 3)
 direct_vector_total=$(printf '%s' "$direct_vector_search_json" | jq -er 'length')
+direct_vector_rerank_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb vector search -w "$KNOWLEDGE_WORKSPACE" --query "token confusion admin panel preview route" --limit 3 --rerank)
+direct_vector_rerank_total=$(printf '%s' "$direct_vector_rerank_json" | jq -er 'length')
+direct_vector_rerank_source=$(printf '%s' "$direct_vector_rerank_json" | jq -er '.[0].ranking_source')
 direct_keyword_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb search -w "$KNOWLEDGE_WORKSPACE" --query "token confusion admin panel preview route" --limit 3)
 direct_keyword_total=$(printf '%s' "$direct_keyword_search_json" | jq -er 'length')
 
@@ -276,6 +290,8 @@ semantic_ready=$(jq -er '.ready' "$SEMANTIC_VECTOR")
 semantic_status=$(jq -er '.semantic_status' "$SEMANTIC_VECTOR")
 semantic_reason=$(jq -er '.reason // ""' "$SEMANTIC_VECTOR")
 semantic_vector_total=$(jq -er '.total_results // 0' "$SEMANTIC_VECTOR")
+semantic_vector_ranking_source=$(jq -er '.ranking_source // "hybrid"' "$SEMANTIC_VECTOR")
+semantic_vector_rerank_applied=$(jq -er '.rerank_applied // false' "$SEMANTIC_VECTOR")
 semantic_vector_kb_hits=$(jq -er 'length' "$SEMANTIC_VECTOR_KB")
 semantic_kb_hits=$(jq -er 'length' "$SEMANTIC_KB")
 semantic_query=$(tr '\n' ' ' < "$SEMANTIC_QUERY")
@@ -283,6 +299,8 @@ semantic_knowledge_query=$(tr '\n' ' ' < "$AI_DIR/semantic-index/knowledge-searc
 semantic_highlights=$(cat "$SEMANTIC_HIGHLIGHTS")
 semantic_index=$(cat "$AI_DIR/semantic-index/knowledge-index.txt")
 semantic_export_log=$(cat "$SEMANTIC_LOG_DIR/semantic-kb-export-primary.log")
+semantic_results_rerank_applied=$(jq -er '.rerank_applied // false' "$SEMANTIC_RESULTS")
+semantic_results_ranking_source=$(jq -er '.vector_ranking_source // "hybrid"' "$SEMANTIC_RESULTS")
 
 assert_ge "$semantic_total" 1 "semantic total results"
 assert_eq "$semantic_provider" "$MOCK_PROVIDER" "semantic vector provider"
@@ -290,6 +308,8 @@ assert_eq "$semantic_ready" "true" "semantic vector ready"
 assert_eq "$semantic_status" "ready" "semantic vector status"
 assert_contains "$semantic_reason" "ready" "semantic vector reason"
 assert_ge "$semantic_vector_total" 1 "semantic vector total results"
+assert_eq "$semantic_vector_ranking_source" "rerank" "semantic vector ranking source"
+assert_eq "$semantic_vector_rerank_applied" "true" "semantic vector rerank applied"
 assert_ge "$semantic_vector_kb_hits" 1 "semantic vector kb hits"
 assert_ge "$semantic_kb_hits" 1 "semantic merged kb hits"
 assert_contains "$semantic_query" "token confusion" "semantic resolved query"
@@ -299,6 +319,8 @@ assert_contains "$semantic_index" "workspace=shared-web" "semantic shared knowle
 assert_contains "$semantic_index" "workspace=global" "semantic global knowledge export"
 assert_contains "$semantic_highlights" "critical_findings" "semantic highlights shape"
 assert_contains "$semantic_export_log" "example.com" "semantic primary export log"
+assert_eq "$semantic_results_rerank_applied" "true" "semantic final rerank applied"
+assert_eq "$semantic_results_ranking_source" "rerank" "semantic final ranking source"
 
 hybrid_total=$(jq -er '.total_results // 0' "$HYBRID_RESULTS")
 hybrid_vector_total=$(jq -er '.total_results // 0' "$HYBRID_VECTOR")
@@ -309,11 +331,15 @@ hybrid_provider=$(jq -er '.provider' "$HYBRID_VECTOR")
 hybrid_ready=$(jq -er '.ready' "$HYBRID_VECTOR")
 hybrid_status=$(jq -er '.semantic_status' "$HYBRID_VECTOR")
 hybrid_reason=$(jq -er '.reason // ""' "$HYBRID_VECTOR")
+hybrid_vector_ranking_source=$(jq -er '.ranking_source // "hybrid"' "$HYBRID_VECTOR")
+hybrid_vector_rerank_applied=$(jq -er '.rerank_applied // false' "$HYBRID_VECTOR")
 hybrid_query=$(tr '\n' ' ' < "$HYBRID_QUERY")
 hybrid_knowledge_query=$(tr '\n' ' ' < "$AI_DIR/hybrid-semantic-index/knowledge-search-query.txt")
 hybrid_highlights=$(cat "$HYBRID_HIGHLIGHTS")
 hybrid_export_log=$(cat "$HYBRID_LOG_DIR/hybrid-kb-export-primary.log")
 hybrid_scan_hits=$(jq -er '.scan_data.count // 0' "$HYBRID_RESULTS")
+hybrid_results_rerank_applied=$(jq -er '.rerank_applied // false' "$HYBRID_RESULTS")
+hybrid_results_ranking_source=$(jq -er '.vector_ranking_source // "hybrid"' "$HYBRID_RESULTS")
 
 assert_ge "$hybrid_total" 1 "hybrid total results"
 assert_eq "$hybrid_provider" "$MOCK_PROVIDER" "hybrid vector provider"
@@ -321,6 +347,8 @@ assert_eq "$hybrid_ready" "true" "hybrid vector ready"
 assert_eq "$hybrid_status" "ready" "hybrid vector status"
 assert_contains "$hybrid_reason" "ready" "hybrid vector reason"
 assert_ge "$hybrid_vector_total" 1 "hybrid vector total results"
+assert_eq "$hybrid_vector_ranking_source" "rerank" "hybrid vector ranking source"
+assert_eq "$hybrid_vector_rerank_applied" "true" "hybrid vector rerank applied"
 assert_ge "$hybrid_vector_recall" 1 "hybrid vector recall count"
 assert_ge "$hybrid_vector_kb_hits" 1 "hybrid vector kb hits"
 assert_ge "$hybrid_kb_hits" 1 "hybrid merged kb hits"
@@ -329,6 +357,8 @@ assert_contains "$hybrid_query" "token confusion" "hybrid resolved query"
 assert_contains "$hybrid_knowledge_query" "token confusion admin panel preview route" "hybrid knowledge query"
 assert_contains "$hybrid_highlights" "relevant_knowledge" "hybrid highlights shape"
 assert_contains "$hybrid_export_log" "example.com" "hybrid primary export log"
+assert_eq "$hybrid_results_rerank_applied" "true" "hybrid final rerank applied"
+assert_eq "$hybrid_results_ranking_source" "rerank" "hybrid final ranking source"
 
 assert_eq "$vector_stats_documents" "3" "vector stats documents"
 assert_eq "$vector_stats_chunks" "3" "vector stats chunks"
@@ -336,6 +366,8 @@ assert_eq "$vector_stats_embeddings" "3" "vector stats embeddings"
 assert_eq "$vector_stats_workspaces" "3" "vector stats workspaces"
 assert_eq "$vector_stats_model" "${MOCK_PROVIDER}:${EMBED_MODEL}" "vector stats model"
 assert_ge "$direct_vector_total" 1 "direct vector json search hits"
+assert_ge "$direct_vector_rerank_total" 1 "direct rerank vector json search hits"
+assert_eq "$direct_vector_rerank_source" "rerank" "direct rerank vector source"
 assert_ge "$direct_keyword_total" 1 "direct keyword json search hits"
 
 echo "ok ai semantic vector smoke regression: provider-enabled semantic and hybrid workflow execution with live KB hits"

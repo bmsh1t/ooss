@@ -551,3 +551,21 @@ embeddings_config:
   dimension: 1024
   min_relevance_score: 0.7
   max_search_results: 10
+
+# =============================================================================
+# Rerank Configuration (Optional)
+# =============================================================================
+# Dedicated rerank provider settings for semantic retrieval reranking.
+# Current implementation supports openai-compatible rerank endpoints.
+rerank_config:
+  enabled: false
+  provider: openai
+  top_n: 10
+  max_candidates: 40
+  timeout: 15s
+  min_score: 0.0
+
+  openai:
+    api_url: "https://router.tumuer.me/v1/rerank"
+    model: "Pro/BAAI/bge-reranker-v2-m3"
+    api_key: "${TUMUER_API_KEY}"

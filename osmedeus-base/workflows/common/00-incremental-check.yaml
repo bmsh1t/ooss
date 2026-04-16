@@ -64,16 +64,30 @@ steps:
   # Check Subdomain Changes (优化: 支持 backupDir)
   # ===========================================================================
   - name: check-subdomain-changes
-    type: function
+    type: bash
     log: "Checking subdomain changes"
-    functions:
-      # 直接使用 backupDir 进行对比
-      - 'set_var("hasBackup", to_string(file_exists("{{backupDir}}/subdomain-{{TargetSpace}}.txt")))'
-      # 使用 exec_cmd 执行 diff
-      - 'exec_cmd("comm -13 <(sort -u {{backupDir}}/subdomain-{{TargetSpace}}.txt 2>/dev/null) <(sort -u {{subdomainFile}} 2>/dev/null) > {{newSubdomainsFile}} 2>/dev/null || cp {{subdomainFile}} {{newSubdomainsFile}} 2>/dev/null")'
-      - 'sort_unix("{{newSubdomainsFile}}")'
-      # 更新备份
-      - 'exec_cmd("cp {{subdomainFile}} {{backupDir}}/subdomain-{{TargetSpace}}.txt")'
+    command: |
+      SUBDOMAIN_BACKUP="{{backupDir}}/subdomain-{{TargetSpace}}.txt"
+      SUBDOMAIN_BACKUP_SORTED="{{incrementalDir}}/.subdomain-backup-sorted-{{TargetSpace}}.txt"
+      SUBDOMAIN_CURRENT_SORTED="{{incrementalDir}}/.subdomain-current-sorted-{{TargetSpace}}.txt"
+
+      : > "{{newSubdomainsFile}}"
+      if [ -s "$SUBDOMAIN_BACKUP" ]; then
+        sort -u "$SUBDOMAIN_BACKUP" > "$SUBDOMAIN_BACKUP_SORTED" 2>/dev/null || true
+        sort -u "{{subdomainFile}}" > "$SUBDOMAIN_CURRENT_SORTED" 2>/dev/null || true
+
+        if [ -s "$SUBDOMAIN_CURRENT_SORTED" ]; then
+          comm -13 "$SUBDOMAIN_BACKUP_SORTED" "$SUBDOMAIN_CURRENT_SORTED" > "{{newSubdomainsFile}}" 2>/dev/null || cp "{{subdomainFile}}" "{{newSubdomainsFile}}" 2>/dev/null || true
+        else
+          cp "{{subdomainFile}}" "{{newSubdomainsFile}}" 2>/dev/null || true
+        fi
+      else
+        cp "{{subdomainFile}}" "{{newSubdomainsFile}}" 2>/dev/null || true
+      fi
+
+      sort -u "{{newSubdomainsFile}}" -o "{{newSubdomainsFile}}" 2>/dev/null || true
+      cp "{{subdomainFile}}" "$SUBDOMAIN_BACKUP" 2>/dev/null || true
+      rm -f "$SUBDOMAIN_BACKUP_SORTED" "$SUBDOMAIN_CURRENT_SORTED" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -81,11 +95,29 @@ steps:
   # Check HTTP Endpoint Changes
   # ===========================================================================
   - name: check-http-changes
-    type: function
+    type: bash
     log: "Checking HTTP endpoint changes"
-    functions:
-      - 'exec_cmd("comm -13 <(sort -u {{incrementalDir}}/previous/http.txt 2>/dev/null) <(sort -u {{httpFile}} 2>/dev/null) > {{newHttpFile}} 2>/dev/null || cp {{httpFile}} {{newHttpFile}} 2>/dev/null")'
-      - 'sort_unix("{{newHttpFile}}")'
+    command: |
+      PREVIOUS_HTTP_FILE="{{incrementalDir}}/previous/http.txt"
+      PREVIOUS_HTTP_SORTED="{{incrementalDir}}/.previous-http-sorted-{{TargetSpace}}.txt"
+      CURRENT_HTTP_SORTED="{{incrementalDir}}/.current-http-sorted-{{TargetSpace}}.txt"
+
+      : > "{{newHttpFile}}"
+      if [ -s "$PREVIOUS_HTTP_FILE" ]; then
+        sort -u "$PREVIOUS_HTTP_FILE" > "$PREVIOUS_HTTP_SORTED" 2>/dev/null || true
+        sort -u "{{httpFile}}" > "$CURRENT_HTTP_SORTED" 2>/dev/null || true
+
+        if [ -s "$CURRENT_HTTP_SORTED" ]; then
+          comm -13 "$PREVIOUS_HTTP_SORTED" "$CURRENT_HTTP_SORTED" > "{{newHttpFile}}" 2>/dev/null || cp "{{httpFile}}" "{{newHttpFile}}" 2>/dev/null || true
+        else
+          cp "{{httpFile}}" "{{newHttpFile}}" 2>/dev/null || true
+        fi
+      else
+        cp "{{httpFile}}" "{{newHttpFile}}" 2>/dev/null || true
+      fi
+
+      sort -u "{{newHttpFile}}" -o "{{newHttpFile}}" 2>/dev/null || true
+      rm -f "$PREVIOUS_HTTP_SORTED" "$CURRENT_HTTP_SORTED" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -122,9 +154,11 @@ steps:
   # Summary
   # ===========================================================================
   - name: summary
-    type: function
+    type: bash
     log: "Incremental check summary"
-    functions:
-      - 'log_info("Incremental check summary complete for {{Target}}")'
-      - 'log_info("New subdomains detected: {{file_length(newSubdomainsFile)}}")'
-      - 'log_info("New HTTP endpoints detected: {{file_length(newHttpFile)}}")'
+    command: |
+      new_subs=$(wc -l < "{{newSubdomainsFile}}" 2>/dev/null || echo 0)
+      new_http=$(wc -l < "{{newHttpFile}}" 2>/dev/null || echo 0)
+      echo "Incremental check summary complete for {{Target}}"
+      echo "New subdomains detected: $new_subs"
+      echo "New HTTP endpoints detected: $new_http"

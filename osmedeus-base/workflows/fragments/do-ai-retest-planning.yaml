@@ -202,10 +202,46 @@ steps:
       ACTIVE_SEMANTIC_FILE=$(pick_semantic_file)
       ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}")
       ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}")
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      DECISION_SOURCE_KIND="none"
+      DECISION_FOCUS_JSON='[]'
+      DECISION_PRIORITY_JSON='[]'
+      DECISION_RESCAN_JSON='[]'
+      DECISION_TARGETS_JSON='[]'
+      DECISION_TARGET_COUNT=0
 
-      CONFIRMED_COUNT=$(wc -l < "{{confirmedUrlsFile}}" 2>/dev/null || echo 0)
-      ENTRY_COUNT=$(wc -l < "{{entryPointsFile}}" 2>/dev/null || echo 0)
-      BEST_COUNT=$(wc -l < "{{bestPathTargetsFile}}" 2>/dev/null || echo 0)
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+        DECISION_SOURCE_KIND="applied-ai-decision"
+      elif [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+        DECISION_SOURCE_KIND="ai-decision"
+      fi
+
+      if [ "$DECISION_SOURCE_KIND" != "none" ] && [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        DECISION_FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_PRIORITY_JSON=$(jq -c '.targets.priority_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_TARGETS_JSON=$(jq -cn \
+          --argjson focus "$DECISION_FOCUS_JSON" \
+          --argjson priority "$DECISION_PRIORITY_JSON" \
+          --argjson rescan "$DECISION_RESCAN_JSON" \
+          '($focus + $priority + $rescan) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' 2>/dev/null || echo '[]')
+        DECISION_TARGET_COUNT=$(printf '%s\n' "$DECISION_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+      fi
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      CONFIRMED_COUNT=$(count_lines_safe "{{confirmedUrlsFile}}")
+      ENTRY_COUNT=$(count_lines_safe "{{entryPointsFile}}")
+      BEST_COUNT=$(count_lines_safe "{{bestPathTargetsFile}}")
       PREV_FOLLOWUP_TARGETS=0
       PREV_PRIORITY_MODE=""
       PREV_CONFIDENCE_LEVEL=""
@@ -335,6 +371,7 @@ steps:
         --arg vector_knowledge_file "$ACTIVE_VECTOR_KNOWLEDGE_FILE" \
         --arg decision_file "{{aiDecisionFile}}" \
         --arg applied_decision_file "{{appliedDecisionFile}}" \
+        --arg active_decision_file "$ACTIVE_DECISION_FILE" \
         --arg previous_followup_file "{{previousFollowupDecisionFile}}" \
         --arg confirmed_file "{{confirmedUrlsFile}}" \
         --arg entry_points_file "{{entryPointsFile}}" \
@@ -342,6 +379,11 @@ steps:
         --argjson confirmed_count "$CONFIRMED_COUNT" \
         --argjson entry_count "$ENTRY_COUNT" \
         --argjson best_count "$BEST_COUNT" \
+        --arg decision_source_kind "$DECISION_SOURCE_KIND" \
+        --argjson decision_target_count "$DECISION_TARGET_COUNT" \
+        --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
+        --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
+        --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
         --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGETS" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
@@ -376,6 +418,7 @@ steps:
             vector_knowledge_search: $vector_knowledge_file,
             ai_decision: $decision_file,
             applied_ai_decision: $applied_decision_file,
+            active_ai_decision: $active_decision_file,
             previous_followup: $previous_followup_file,
             confirmed_urls: $confirmed_file,
             entry_points: $entry_points_file,
@@ -385,6 +428,7 @@ steps:
             confirmed_urls: $confirmed_count,
             attack_chain_entry_points: $entry_count,
             best_path_targets: $best_count,
+            decision_targets: $decision_target_count,
             previous_followup_targets: $previous_followup_targets,
             previous_followup_manual_first_targets: $previous_followup_manual_first_targets,
             previous_followup_high_confidence_targets: $previous_followup_high_confidence_targets,
@@ -394,6 +438,12 @@ steps:
             semantic_targets: $semantic_target_count,
             knowledge_hits: $knowledge_count,
             vector_knowledge_hits: $vector_knowledge_count
+          },
+          decision: {
+            source_kind: $decision_source_kind,
+            focus_targets: $decision_focus_targets,
+            priority_targets: $decision_priority_targets,
+            rescan_targets: $decision_rescan_targets
           },
           previous_followup: {
             priority_mode: $previous_followup_priority_mode,
@@ -415,7 +465,7 @@ steps:
           }
         }' > {{Output}}/ai-analysis/.input/retest-context.json
 
-      if [ "$CONFIRMED_COUNT" -eq 0 ] && [ "$ENTRY_COUNT" -eq 0 ] && [ "$BEST_COUNT" -eq 0 ] && [ "$SEMANTIC_TARGET_COUNT" -eq 0 ] && [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ]; then
+      if [ "$CONFIRMED_COUNT" -eq 0 ] && [ "$ENTRY_COUNT" -eq 0 ] && [ "$BEST_COUNT" -eq 0 ] && [ "$DECISION_TARGET_COUNT" -eq 0 ] && [ "$SEMANTIC_TARGET_COUNT" -eq 0 ] && [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ]; then
         echo "[Retest] No actionable targets found, using fallback plan"
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.retest-plan-skip
       else
@@ -482,6 +532,7 @@ steps:
 
       先读取 {{Output}}/ai-analysis/.input/retest-context.json 获取上下文。
       然后按需读取里面列出的文件，结合 validated findings、attack chain、path planning、semantic search、knowledge hits、vector knowledge hits 和 ai decision，输出复测计划。
+      优先消费 active_ai_decision / applied_ai_decision 中的 focus_areas、priority_targets、rescan_targets，把这些目标转成低噪音、可复现的复测条目。
 
       优先级原则：
       - validated finding + attack chain entry + semantic/knowledge 多次命中的目标，排最前
@@ -501,6 +552,12 @@ steps:
       - preset: save_content
     exports:
       retest_plan_raw: "{{agent_content}}"
+
+  - name: persist-retest-plan-raw
+    type: function
+    pre_condition: "{{enableRetestPlanning}}"
+    functions:
+      - 'save_content(typeof retest_plan_raw !== "undefined" ? retest_plan_raw : "", "{{Output}}/ai-analysis/.retest-plan-raw-{{TargetSpace}}.txt")'
 
   - name: save-retest-plan
     type: bash
@@ -575,6 +632,32 @@ steps:
           fi
         fi
       done
+
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      DECISION_SOURCE_KIND="none"
+      DECISION_FOCUS_JSON='[]'
+      DECISION_PRIORITY_JSON='[]'
+      DECISION_RESCAN_JSON='[]'
+      DECISION_TARGETS_JSON='[]'
+      DECISION_TARGET_COUNT=0
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+        DECISION_SOURCE_KIND="applied-ai-decision"
+      elif [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+        DECISION_SOURCE_KIND="ai-decision"
+      fi
+      if [ "$DECISION_SOURCE_KIND" != "none" ] && [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        DECISION_FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_PRIORITY_JSON=$(jq -c '.targets.priority_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_TARGETS_JSON=$(jq -cn \
+          --argjson focus "$DECISION_FOCUS_JSON" \
+          --argjson priority "$DECISION_PRIORITY_JSON" \
+          --argjson rescan "$DECISION_RESCAN_JSON" \
+          '($focus + $priority + $rescan) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' 2>/dev/null || echo '[]')
+        DECISION_TARGET_COUNT=$(printf '%s\n' "$DECISION_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+      fi
 
       if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
         PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
@@ -662,10 +745,7 @@ steps:
       RAW_FILE="{{Output}}/ai-analysis/.retest-plan-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/.retest-plan-json-{{TargetSpace}}.json"
       FALLBACK_TARGETS="{{Output}}/ai-analysis/.retest-plan-fallback-targets-{{TargetSpace}}.txt"
-
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{retest_plan_raw}}
-      AIEOF
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -691,6 +771,9 @@ steps:
           head -20 "{{confirmedUrlsFile}}" 2>/dev/null || true
           head -10 "{{entryPointsFile}}" 2>/dev/null || true
           head -10 "{{bestPathTargetsFile}}" 2>/dev/null || true
+          if [ "$DECISION_SOURCE_KIND" != "none" ]; then
+            printf '%s\n' "$DECISION_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
+          fi
           if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
             jq -r '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
           elif [ -n "$PREV_COMBINED_TARGETS_JSON" ]; then
@@ -709,13 +792,13 @@ steps:
               recommended_flow: $recommended_flow,
               priority: $priority,
               total_targets: ($fallback_targets | length),
-              objective: (if ($fallback_targets | length) > 0 then "Fallback retest plan from confirmed URLs and attack-path signals" else "Retest plan generation fallback" end)
+              objective: (if ($fallback_targets | length) > 0 then "Fallback retest plan from AI decision, confirmed URLs, and attack-path signals" else "Retest plan generation fallback" end)
             },
             targets: [
               $fallback_targets[] | {
                 target: .,
                 priority: "P1",
-                reason: "fallback target derived from confirmed URLs / attack-chain / best-path outputs",
+                reason: "fallback target derived from ai decision / confirmed URLs / attack-chain / best-path outputs",
                 retest_actions: ["重复验证", "补充 payload", "权限边界检查"],
                 recommended_modules: ["httpx", "nuclei"],
                 workflow: $recommended_flow
@@ -742,6 +825,8 @@ steps:
       jq \
         --arg recommended_flow "{{retestFlow}}" \
         --arg priority "{{retestPriority}}" \
+        --arg decision_source_kind "$DECISION_SOURCE_KIND" \
+        --argjson decision_target_count "$DECISION_TARGET_COUNT" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
         --arg previous_followup_next_phase "$PREV_NEXT_PHASE" \
@@ -780,6 +865,8 @@ steps:
             priority: (.summary.priority // $priority),
             total_targets: (.summary.total_targets // 0),
             objective: (.summary.objective // "Retest plan generation fallback"),
+            decision_source_kind: $decision_source_kind,
+            decision_target_count: $decision_target_count,
             previous_followup_priority_mode: $previous_followup_priority_mode,
             previous_followup_confidence_level: $previous_followup_confidence_level,
             previous_followup_next_phase: $previous_followup_next_phase,
@@ -847,6 +934,15 @@ steps:
     type: bash
     pre_condition: "{{enableRetestPlanning}}"
     command: |
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       jq -r '
         [
           .targets[]?.target,
@@ -854,7 +950,7 @@ steps:
         ] | map(select(. != null and . != "")) | .[]
       ' {{retestPlanOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{retestTargetsFile}} || true
 
-      TARGET_COUNT=$(wc -l < {{retestTargetsFile}} 2>/dev/null || echo 0)
+      TARGET_COUNT=$(count_lines_safe "{{retestTargetsFile}}")
       jq --argjson total "$TARGET_COUNT" '.summary.total_targets = $total' {{retestPlanOutput}} > {{retestPlanOutput}}.tmp 2>/dev/null && mv {{retestPlanOutput}}.tmp {{retestPlanOutput}} || true
       echo "[Retest] Extracted $TARGET_COUNT targets"
 

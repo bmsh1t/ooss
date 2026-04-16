@@ -131,6 +131,15 @@ steps:
         fi
       }
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       PREV_SUMMARY="{{Output}}/ai-analysis/.input/previous-followup-summary.json"
       PREV_PRIORITY="{{Output}}/ai-analysis/.input/previous-followup-priority-targets.txt"
       PREV_FOCUS="{{Output}}/ai-analysis/.input/previous-followup-focus-areas.txt"
@@ -183,8 +192,8 @@ steps:
         PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
-        PREV_PRIORITY_COUNT=$(wc -l < "$PREV_PRIORITY" 2>/dev/null || echo 0)
-        PREV_FOCUS_COUNT=$(wc -l < "$PREV_FOCUS" 2>/dev/null || echo 0)
+        PREV_PRIORITY_COUNT=$(count_lines "$PREV_PRIORITY")
+        PREV_FOCUS_COUNT=$(count_lines "$PREV_FOCUS")
         PREV_MANUAL_FIRST_COUNT=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREV_HIGH_CONFIDENCE_COUNT=$(jq -r '[((.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
       else
@@ -411,11 +420,18 @@ steps:
     exports:
       pre_scan_json: "{{acp_output}}"
 
+  - name: persist-pre-scan-raw
+    type: function
+    pre_condition: "{{enablePreScanDecision}}"
+    functions:
+      - 'save_content(typeof pre_scan_json !== "undefined" ? pre_scan_json : "", "{{Output}}/ai-analysis/.pre-scan-acp-raw-{{TargetSpace}}.txt")'
+
   - name: save-pre-scan-results
     type: bash
     pre_condition: "{{enablePreScanDecision}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      RAW_FILE="{{Output}}/ai-analysis/.pre-scan-acp-raw-{{TargetSpace}}.txt"
 
       normalize_int() {
         case "$1" in
@@ -440,11 +456,27 @@ steps:
         esac
       }
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      RAW_HAS_CONTENT=false
+      if [ -s "$RAW_FILE" ] && ! grep -Eq '^[[:space:]]*(null|\{\})[[:space:]]*$' "$RAW_FILE"; then
+        RAW_HAS_CONTENT=true
+      fi
+
       # 容错：处理可能的空输出
       if [ -f "{{preScanSkipFile}}" ] && [ -s "{{preScanOutput}}" ] && jq empty {{preScanOutput}} 2>/dev/null; then
         echo "[INFO] [Pre Scan] Using precomputed fallback output"
-      elif [ -n "{{pre_scan_json}}" ] && [ "{{pre_scan_json}}" != "null" ] && [ "{{pre_scan_json}}" != "{}" ]; then
-        printf '%s\n' "{{pre_scan_json}}" > {{preScanOutput}}
+      elif [ "$RAW_HAS_CONTENT" = "true" ]; then
+        cp "$RAW_FILE" {{preScanOutput}}
       else
         echo '{"pre_scan_summary":{"total_subdomains":0,"high_value_targets":0},"priority_targets":[],"scan_strategy":{"focus_areas":[]}}' > {{preScanOutput}}
       fi
@@ -470,7 +502,7 @@ steps:
       } | awk 'NF && !seen[$0]++' > {{Output}}/ai-analysis/focus-areas-pre.txt.tmp 2>/dev/null && mv {{Output}}/ai-analysis/focus-areas-pre.txt.tmp {{Output}}/ai-analysis/focus-areas-pre.txt || true
 
       # 生成前置 AI 决策（供本轮 vuln-suite 直接读取）
-      PRIORITY_COUNT=$(normalize_int "$(wc -l < {{priorityTargetsFile}} 2>/dev/null || echo 0)")
+      PRIORITY_COUNT=$(normalize_int "$(count_lines "{{priorityTargetsFile}}")")
       if [ "$PRIORITY_COUNT" -gt 30 ]; then
         SEVERITY="critical,high,medium"
         THREADS=15

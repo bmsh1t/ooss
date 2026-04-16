@@ -51,6 +51,11 @@ type KnowledgeVectorSearchRequest struct {
 	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
 	SampleTypes         []string `json:"sample_types,omitempty"`
 	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
+	EnableRerank        bool     `json:"enable_rerank,omitempty"`
+	RerankProvider      string   `json:"rerank_provider,omitempty"`
+	RerankModel         string   `json:"rerank_model,omitempty"`
+	RerankTopN          int      `json:"rerank_top_n,omitempty"`
+	RerankMaxCandidates int      `json:"rerank_max_candidates,omitempty"`
 }
 
 type vectorAutoIndexResult struct {
@@ -295,6 +300,11 @@ func SearchVectorKnowledge(cfg *config.Config) fiber.Handler {
 			MinSourceConfidence: req.MinSourceConfidence,
 			SampleTypes:         req.SampleTypes,
 			ExcludeSampleTypes:  req.ExcludeSampleTypes,
+			EnableRerank:        req.EnableRerank,
+			RerankProvider:      strings.TrimSpace(req.RerankProvider),
+			RerankModel:         strings.TrimSpace(req.RerankModel),
+			RerankTopN:          req.RerankTopN,
+			RerankMaxCandidates: req.RerankMaxCandidates,
 		}, req.Query)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -303,13 +313,26 @@ func SearchVectorKnowledge(cfg *config.Config) fiber.Handler {
 			})
 		}
 
+		rankingSource := knowledgeVectorRankingSource(results)
+
 		return c.JSON(fiber.Map{
-			"query":     req.Query,
-			"workspace": formatKnowledgeWorkspaceLabel(req.Workspace),
-			"total":     len(results),
-			"data":      results,
+			"query":           req.Query,
+			"workspace":       formatKnowledgeWorkspaceLabel(req.Workspace),
+			"total":           len(results),
+			"ranking_source":  rankingSource,
+			"rerank_applied":  rankingSource == "rerank",
+			"rerank_provider": strings.TrimSpace(req.RerankProvider),
+			"rerank_model":    strings.TrimSpace(req.RerankModel),
+			"data":            results,
 		})
 	}
+}
+
+func knowledgeVectorRankingSource(results []vectorkb.SearchHit) string {
+	if len(results) == 0 {
+		return "hybrid"
+	}
+	return results[0].RankingSource
 }
 
 // VectorKnowledgeStats returns high-level statistics for the standalone vector DB.

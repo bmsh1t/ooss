@@ -99,7 +99,7 @@ func BuildBuiltinVariables(cfg *config.Config, params map[string]string) map[str
 	exec := NewExecutor()
 	runUUID := uuid.New().String()
 	execCtx := core.NewExecutionContext("func-eval", core.KindModule, runUUID, params["target"])
-	exec.injectBuiltinVariables(cfg, params, execCtx)
+	exec.injectBuiltinVariables(cfg, params, execCtx, "")
 
 	// Add temp directory for eval (cleanup is handled by the caller)
 	tempDir, err := os.MkdirTemp("", "osm-tmp-")
@@ -223,12 +223,37 @@ func (e *Executor) SetLoader(l *parser.Loader) {
 }
 
 // injectBuiltinVariables adds all builtin variables to the execution context
-func (e *Executor) injectBuiltinVariables(cfg *config.Config, params map[string]string, execCtx *core.ExecutionContext) {
+func inferWorkflowRootFromFilePath(workflowFilePath string) string {
+	cleanPath := strings.TrimSpace(workflowFilePath)
+	if cleanPath == "" {
+		return ""
+	}
+
+	if absPath, err := filepath.Abs(cleanPath); err == nil {
+		cleanPath = absPath
+	}
+	cleanPath = filepath.Clean(cleanPath)
+
+	dir := filepath.Dir(cleanPath)
+	for {
+		if filepath.Base(dir) == "workflows" {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func (e *Executor) injectBuiltinVariables(cfg *config.Config, params map[string]string, execCtx *core.ExecutionContext, workflowFilePath string) {
 	now := time.Now()
 
 	// Settings-based variables
 	execCtx.SetVariable("BaseFolder", cfg.BaseFolder)
 	execCtx.SetVariable("OsmedeusBase", cfg.BaseFolder) // Backward-compatible alias used by workflow YAMLs
+	execCtx.SetVariable("SettingsFile", cfg.GetSettingsFilePath())
 	if exePath, err := os.Executable(); err == nil {
 		execCtx.SetVariable("OsmedeusExec", exePath)
 	} else {
@@ -240,7 +265,11 @@ func (e *Executor) injectBuiltinVariables(cfg *config.Config, params map[string]
 	execCtx.SetVariable("ExternalConfigs", cfg.ConfigsPath)
 	execCtx.SetVariable("ExternalAgentConfigs", cfg.ExternalAgentConfigsPath)
 	execCtx.SetVariable("ExternalScripts", cfg.ExternalScriptsPath)
-	execCtx.SetVariable("Workflows", cfg.WorkflowsPath)
+	workflowsPath := cfg.WorkflowsPath
+	if runtimeWorkflowRoot := inferWorkflowRootFromFilePath(workflowFilePath); runtimeWorkflowRoot != "" {
+		workflowsPath = runtimeWorkflowRoot
+	}
+	execCtx.SetVariable("Workflows", workflowsPath)
 	execCtx.SetVariable("MarkdownTemplates", cfg.MarkdownReportTemplatesPath)
 	execCtx.SetVariable("ExternalMarkdowns", cfg.MarkdownReportTemplatesPath) // Alias for MarkdownTemplates
 	execCtx.SetVariable("ExternalAgents", cfg.ExternalAgentConfigsPath)       // Alias for ExternalAgentConfigs
@@ -838,10 +867,16 @@ func (e *Executor) checkDependencies(deps *core.Dependencies, execCtx *core.Exec
 
 	// Check command dependencies
 	if len(deps.Commands) > 0 {
-		for _, cmd := range deps.Commands {
-			// Try to find in external-binaries folder first, then system PATH
-			if _, err := utils.LookPathWithBinaries(cmd, binariesPath); err != nil {
-				return fmt.Errorf("required command not found: %s", cmd)
+		if e.dryRun {
+			e.logger.Debug("Skipping command dependency checks during dry-run",
+				zap.Int("command_count", len(deps.Commands)),
+			)
+		} else {
+			for _, cmd := range deps.Commands {
+				// Try to find in external-binaries folder first, then system PATH
+				if _, err := utils.LookPathWithBinaries(cmd, binariesPath); err != nil {
+					return fmt.Errorf("required command not found: %s", cmd)
+				}
 			}
 		}
 	}
@@ -1029,7 +1064,7 @@ func (e *Executor) ExecuteModule(ctx context.Context, module *core.Workflow, par
 		zap.String("target", params["target"]),
 		zap.String("tactic", params["tactic"]),
 	)
-	e.injectBuiltinVariables(cfg, params, execCtx)
+	e.injectBuiltinVariables(cfg, params, execCtx, module.FilePath)
 	tempCleanup := e.setupTempDirectory(execCtx)
 	defer tempCleanup()
 	e.debugLogTargetVariables(execCtx)
@@ -1743,7 +1778,7 @@ func (e *Executor) ExecuteFlow(ctx context.Context, flow *core.Workflow, params 
 
 	// Inject builtin variables
 	e.logger.Debug("Injecting builtin variables for flow")
-	e.injectBuiltinVariables(cfg, params, execCtx)
+	e.injectBuiltinVariables(cfg, params, execCtx, flow.FilePath)
 	tempCleanup := e.setupTempDirectory(execCtx)
 	defer tempCleanup()
 	e.debugLogTargetVariables(execCtx)
@@ -1979,11 +2014,24 @@ func (e *Executor) ExecuteFlow(ctx context.Context, flow *core.Workflow, params 
 			continue
 		}
 
-		// Check condition
-		if modRef.Condition != "" {
-			ok, err := e.functionRegistry.EvaluateCondition(modRef.Condition, execCtx.GetVariables())
+		// Check condition / pre_condition compatibility alias.
+		// Flow modules use the same {{var}} style as steps, so render first.
+		if moduleCondition := modRef.EffectiveCondition(); moduleCondition != "" {
+			renderedCondition, err := e.templateEngine.Render(moduleCondition, execCtx.GetVariables())
 			if err != nil {
-				execCtx.Logger.Warn("Condition evaluation failed", zap.Error(err))
+				execCtx.Logger.Warn("Failed to render module condition, using original",
+					zap.String("module", modRef.Name),
+					zap.String("condition", moduleCondition),
+					zap.Error(err))
+				renderedCondition = moduleCondition
+			}
+
+			ok, err := e.functionRegistry.EvaluateCondition(renderedCondition, execCtx.GetVariables())
+			if err != nil {
+				execCtx.Logger.Warn("Condition evaluation failed",
+					zap.String("module", modRef.Name),
+					zap.String("condition", renderedCondition),
+					zap.Error(err))
 				executed[modRef.Name] = true
 				result.ModuleResults = append(result.ModuleResults, &core.ModuleResult{
 					ModuleName: modRef.Name,

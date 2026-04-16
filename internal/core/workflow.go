@@ -100,10 +100,13 @@ type ModuleRef struct {
 	Path      string            `yaml:"path,omitempty"` // Path to external module file (omit for inline)
 	Params    map[string]string `yaml:"params"`
 	DependsOn []string          `yaml:"depends_on"`
-	Condition string            `yaml:"condition"`
-	OnSuccess []Action          `yaml:"on_success"`
-	OnError   []Action          `yaml:"on_error"`
-	Decision  *DecisionConfig   `yaml:"decision"`
+	Condition string            `yaml:"condition,omitempty"`
+	// PreCondition keeps backward compatibility with the workflow syntax already
+	// used across the repo. Executor prefers Condition when both are present.
+	PreCondition string          `yaml:"pre_condition,omitempty"`
+	OnSuccess    []Action        `yaml:"on_success"`
+	OnError      []Action        `yaml:"on_error"`
+	Decision     *DecisionConfig `yaml:"decision"`
 
 	// Inline module fields (used when Path is empty)
 	InlinePath   bool          `yaml:"inline_path,omitempty"`   // Marker to clarify this is an inline module (documentation only)
@@ -116,6 +119,16 @@ type ModuleRef struct {
 // IsInline returns true if this is an inline module (has steps defined directly)
 func (m *ModuleRef) IsInline() bool {
 	return len(m.Steps) > 0
+}
+
+// EffectiveCondition returns the condition expression used to gate module
+// execution. `condition` is preferred, while `pre_condition` remains supported
+// as a compatibility alias for existing workflow files.
+func (m *ModuleRef) EffectiveCondition() string {
+	if strings.TrimSpace(m.Condition) != "" {
+		return m.Condition
+	}
+	return m.PreCondition
 }
 
 // ToWorkflow converts an inline ModuleRef to a Workflow for execution

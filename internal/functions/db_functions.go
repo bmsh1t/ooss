@@ -227,6 +227,55 @@ func unmarshalAssetJSON(rawJSON []byte, asset *database.Asset) error {
 	return nil
 }
 
+func unwrapEnvelopeJSON(rawJSON []byte) (extracted []byte, skip bool) {
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(rawJSON, &envelope); err != nil {
+		return nil, false
+	}
+
+	eventType, _ := envelope["type"].(string)
+	data, ok := envelope["data"].(map[string]interface{})
+	if eventType == "" || !ok {
+		return nil, false
+	}
+
+	switch strings.ToLower(eventType) {
+	case "scan", "module":
+		return nil, true
+	case "http_record":
+		remapEnvelopeField(data, "response_content_type", "content_type")
+		remapEnvelopeField(data, "response_content_length", "content_length")
+		remapEnvelopeField(data, "response_words", "words")
+		remapEnvelopeField(data, "response_title", "title")
+		remapEnvelopeField(data, "ip", "host_ip")
+		remapEnvelopeField(data, "hostname", "input")
+
+		if _, ok := data["asset_type"]; !ok || strings.TrimSpace(fmt.Sprintf("%v", data["asset_type"])) == "" {
+			data["asset_type"] = "web"
+		}
+	}
+
+	normalized, err := json.Marshal(data)
+	if err != nil {
+		return nil, false
+	}
+
+	return normalized, false
+}
+
+func remapEnvelopeField(data map[string]interface{}, from, to string) {
+	value, ok := data[from]
+	if !ok {
+		return
+	}
+
+	if existing, ok := data[to]; !ok || existing == nil || strings.TrimSpace(fmt.Sprintf("%v", existing)) == "" {
+		data[to] = value
+	}
+
+	delete(data, from)
+}
+
 // dbImportAsset imports an asset from JSON data
 // Usage: db_import_asset('example.com', '{"host":"sub.example.com","url":"https://..."}')
 func (vf *vmFunc) dbImportAsset(call goja.FunctionCall) goja.Value {
@@ -2510,11 +2559,21 @@ func (vf *vmFunc) dbImportCustomAsset(call goja.FunctionCall) goja.Value {
 			continue
 		}
 
+		assetJSON := []byte(line)
+		if extracted, shouldSkip := unwrapEnvelopeJSON(assetJSON); shouldSkip {
+			continue
+		} else if len(extracted) > 0 {
+			assetJSON = extracted
+		}
+
 		var asset database.Asset
-		if err := unmarshalAssetJSON([]byte(line), &asset); err != nil {
+		if err := unmarshalAssetJSON(assetJSON, &asset); err != nil {
 			logger.Get().Debug("skipping invalid JSON line", zap.Error(err))
 			stats.Errors++
 			continue
+		}
+		if asset.RawJsonData == "" {
+			asset.RawJsonData = string(assetJSON)
 		}
 
 		// Force workspace from function argument
@@ -2528,7 +2587,7 @@ func (vf *vmFunc) dbImportCustomAsset(call goja.FunctionCall) goja.Value {
 
 		// Merge webserver into remarks
 		var rawData map[string]interface{}
-		if json.Unmarshal([]byte(line), &rawData) == nil {
+		if json.Unmarshal(assetJSON, &rawData) == nil {
 			if ws, ok := rawData["webserver"].(string); ok && ws != "" {
 				asset.Remarks = append(asset.Remarks, ws)
 			}
@@ -2569,6 +2628,8 @@ func (vf *vmFunc) dbImportCustomAsset(call goja.FunctionCall) goja.Value {
 		} else {
 			// Merge: preserve existing non-empty fields, fill gaps with incoming
 			mergeAssetFields(&existing, &asset)
+			asset.ID = existing.ID
+			asset.CreatedAt = existing.CreatedAt
 			asset.UpdatedAt = now
 			_, updateErr := db.NewUpdate().Model(&asset).WherePK().Exec(ctx)
 			if updateErr != nil {

@@ -69,6 +69,9 @@ params:
     type: bool
     default: false
     description: "Enable full Agent-based code review (requires claude-code or similar)"
+  - name: agentCodeReviewReport
+    default: "{{Output}}/sast/agent-code-review-{{TargetSpace}}.md"
+    description: "Agent deep security code review report"
 
 # -----------------------------------------------------------------------------
 # DEPENDENCIES SECTION
@@ -137,6 +140,12 @@ reports:
     path: "{{llmVulnAnalysis}}"
     type: json
     description: LLM vulnerability correlation analysis
+
+  - name: agent-code-review
+    path: "{{agentCodeReviewReport}}"
+    type: markdown
+    description: Agent deep security code review report
+    optional: true
 
 # -----------------------------------------------------------------------------
 # STEPS SECTION
@@ -391,19 +400,35 @@ steps:
     exports:
       code_review: "{{llm_security_code_review_content}}"
 
+  - name: persist-llm-code-review-raw
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'save_content(typeof code_review !== "undefined" ? code_review : "", "{{Output}}/sast/.llm-code-review-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-code-review
     type: bash
     pre_condition: "{{enableLlmCodeReview}}"
     log: "Saving LLM code review report"
     command: |
       mkdir -p {{Output}}/sast 2>/dev/null || true
+      RAW_FILE="{{Output}}/sast/.llm-code-review-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+        rm -f {{llmCodeReviewReport}} 2>/dev/null || true
+        echo "No LLM security code review available; skipping report write."
+        exit 0
+      fi
+
       echo "# LLM Security Code Review - {{Target}}" > {{llmCodeReviewReport}}
       echo "" >> {{llmCodeReviewReport}}
       echo "**Repository:** {{Target}}" >> {{llmCodeReviewReport}}
       echo "**Language:** {{repoLanguage}}" >> {{llmCodeReviewReport}}
       echo "**Generated:** $(date)" >> {{llmCodeReviewReport}}
       echo "" >> {{llmCodeReviewReport}}
-      echo "{{code_review}}" >> {{llmCodeReviewReport}}
+      cat "$RAW_FILE" >> {{llmCodeReviewReport}}
     on_error:
       - action: continue
 
@@ -443,15 +468,24 @@ steps:
     exports:
       correlation: "{{llm_vuln_correlation_content}}"
 
+  - name: persist-llm-vuln-correlation-raw
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'save_content(typeof correlation !== "undefined" ? correlation : "", "{{Output}}/sast/.llm-vuln-analysis-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-vuln-analysis
     type: bash
     pre_condition: "{{enableLlmCodeReview}}"
     log: "Saving LLM vulnerability correlation analysis"
     command: |
       mkdir -p {{Output}}/sast 2>/dev/null || true
+      RAW_FILE="{{Output}}/sast/.llm-vuln-analysis-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
       echo "# Vulnerability Correlation Analysis - {{Target}}" > {{llmVulnAnalysis}}
       echo "" >> {{llmVulnAnalysis}}
-      echo "{{correlation}}" >> {{llmVulnAnalysis}}
+      cat "$RAW_FILE" >> {{llmVulnAnalysis}}
     on_error:
       - action: continue
 
@@ -488,3 +522,24 @@ steps:
           Generate a markdown report with findings including file, line, severity, and remediation.
     exports:
       agent_review: "{{acp_output}}"
+
+  - name: persist-agent-deep-code-review-raw
+    type: function
+    pre_condition: "{{enableAgentCodeReview}}"
+    functions:
+      - 'save_content(typeof agent_review !== "undefined" ? agent_review : "", "{{Output}}/sast/.agent-code-review-raw-{{TargetSpace}}.md")'
+
+  - name: save-agent-deep-code-review-report
+    type: bash
+    pre_condition: "{{enableAgentCodeReview}}"
+    command: |
+      mkdir -p {{Output}}/sast
+      RAW_FILE="{{Output}}/sast/.agent-code-review-raw-{{TargetSpace}}.md"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      printf '# Agent Deep Security Code Review\n\n' > {{agentCodeReviewReport}}
+      printf '## Scan Info\n' >> {{agentCodeReviewReport}}
+      printf '- Target: %s\n' "{{Target}}" >> {{agentCodeReviewReport}}
+      printf '- Agent: %s\n\n' "claude-code" >> {{agentCodeReviewReport}}
+      printf '---\n\n' >> {{agentCodeReviewReport}}
+      cat "$RAW_FILE" >> {{agentCodeReviewReport}}

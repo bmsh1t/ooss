@@ -36,6 +36,16 @@ params:
     default: "{{Output}}/content-analysis/ws-misconfig-{{TargetSpace}}.txt"
   - name: graphqlEndpointsFile
     default: "{{Output}}/content-analysis/graphql-endpoints-{{TargetSpace}}.txt"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
   - name: gfDir
     default: "{{Output}}/gf"
   - name: paramsFile
@@ -361,6 +371,10 @@ steps:
       JS_ENDPOINTS=$(count_lines "{{jsEndpointsFile}}")
       WS_MISCONFIG=$(count_lines "{{websocketMisconfigFile}}")
       GRAPHQL=$(count_lines "{{graphqlEndpointsFile}}")
+      SOURCEMAP_EXPOSURES=$(count_lines "{{sourceMapExposureFile}}")
+      API_SURFACE=$(count_lines "{{apiSurfaceFile}}")
+      CORS_CACHE=$(count_lines "{{corsCacheHeuristicsFile}}")
+      CLOUD_LEAKS=$(count_lines "{{cloudLeakFile}}")
       
       # OSINT
       EMAILS=$(count_lines "{{osintEmailsFile}}")
@@ -413,7 +427,15 @@ steps:
         "scan_date": "$(date -Iseconds)",
         "statistics": {
           "assets": {"subdomains": $SUBDOMAINS, "resolved": $RESOLVED, "urls": $URLS},
-          "content": {"js_endpoints": $JS_ENDPOINTS, "ws_misconfig": $WS_MISCONFIG, "graphql": $GRAPHQL},
+          "content": {
+            "js_endpoints": $JS_ENDPOINTS,
+            "ws_misconfig": $WS_MISCONFIG,
+            "graphql": $GRAPHQL,
+            "source_map_exposures": $SOURCEMAP_EXPOSURES,
+            "api_surface_candidates": $API_SURFACE,
+            "cors_cache_review_candidates": $CORS_CACHE,
+            "cloud_storage_candidates": $CLOUD_LEAKS
+          },
           "osint": {"emails": $EMAILS, "cloud_assets": $CLOUD_ASSETS},
           "vulnerabilities": {"total": $TOTAL_VULNS, "critical": $CRITICAL, "high": $HIGH},
           "secrets": $SECRETS,
@@ -809,6 +831,30 @@ steps:
         echo -e "\`\`\`" >> {{fullReportFile}}
       fi
 
+      if [ -f "{{sourceMapExposureFile}}" ] && [ -s "{{sourceMapExposureFile}}" ]; then
+        echo -e "\n### 🧩 Source Map / Debug Exposure\n\`\`\`" >> {{fullReportFile}}
+        head -20 {{sourceMapExposureFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+
+      if [ -f "{{apiSurfaceFile}}" ] && [ -s "{{apiSurfaceFile}}" ]; then
+        echo -e "\n### 🛰️ Non-GraphQL API Surface / API Docs Exposure\n\`\`\`" >> {{fullReportFile}}
+        head -20 {{apiSurfaceFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+
+      if [ -f "{{corsCacheHeuristicsFile}}" ] && [ -s "{{corsCacheHeuristicsFile}}" ]; then
+        echo -e "\n### 🧪 CORS / Cache Heuristics\n\`\`\`" >> {{fullReportFile}}
+        head -20 {{corsCacheHeuristicsFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+
+      if [ -f "{{cloudLeakFile}}" ] && [ -s "{{cloudLeakFile}}" ]; then
+        echo -e "\n### ☁️ Cloud Storage / Signed URL Exposure\n\`\`\`" >> {{fullReportFile}}
+        head -20 {{cloudLeakFile}} >> {{fullReportFile}} 2>/dev/null || true
+        echo -e "\`\`\`" >> {{fullReportFile}}
+      fi
+
       echo -e "\n### 🎯 Prioritized Target Pack\n" >> {{fullReportFile}}
       cat {{assetsSummaryFile}} >> {{fullReportFile}} 2>/dev/null || true
 
@@ -991,25 +1037,30 @@ steps:
     exports:
       executive_summary: "{{llm_executive_summary_content}}"
 
+  - name: persist-llm-executive-summary-raw
+    type: function
+    pre_condition: "{{enableLlmReport}}"
+    functions:
+      - 'save_content(typeof executive_summary !== "undefined" ? executive_summary : "", "{{reportDir}}/.llm-executive-summary-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-executive-summary
     type: bash
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM executive summary"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{executive_summary}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      RAW_FILE="{{reportDir}}/.llm-executive-summary-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmExecutiveSummary}} 2>/dev/null || true
         echo "No LLM executive summary available; skipping report write."
         exit 0
       fi
-      mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Executive Summary - {{Target}}" > {{llmExecutiveSummary}}
       echo "" >> {{llmExecutiveSummary}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmExecutiveSummary}}
+      cat "$RAW_FILE" >> {{llmExecutiveSummary}}
     on_error:
       - action: continue
 
@@ -1047,25 +1098,30 @@ steps:
     exports:
       risk_assessment: "{{llm_risk_assessment_content}}"
 
+  - name: persist-llm-risk-assessment-raw
+    type: function
+    pre_condition: "{{enableLlmReport}}"
+    functions:
+      - 'save_content(typeof risk_assessment !== "undefined" ? risk_assessment : "", "{{reportDir}}/.llm-risk-assessment-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-risk-assessment
     type: bash
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM risk assessment"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{risk_assessment}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      RAW_FILE="{{reportDir}}/.llm-risk-assessment-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmRiskAssessment}} 2>/dev/null || true
         echo "No LLM risk assessment available; skipping report write."
         exit 0
       fi
-      mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Risk Assessment - {{Target}}" > {{llmRiskAssessment}}
       echo "" >> {{llmRiskAssessment}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmRiskAssessment}}
+      cat "$RAW_FILE" >> {{llmRiskAssessment}}
     on_error:
       - action: continue
 
@@ -1106,25 +1162,30 @@ steps:
     exports:
       recommendations: "{{llm_recommendations_content}}"
 
+  - name: persist-llm-recommendations-raw
+    type: function
+    pre_condition: "{{enableLlmReport}}"
+    functions:
+      - 'save_content(typeof recommendations !== "undefined" ? recommendations : "", "{{reportDir}}/.llm-recommendations-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-recommendations
     type: bash
     pre_condition: "{{enableLlmReport}}"
     log: "Saving LLM recommendations"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{recommendations}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      RAW_FILE="{{reportDir}}/.llm-recommendations-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmRecommendations}} 2>/dev/null || true
         echo "No LLM remediation recommendations available; skipping report write."
         exit 0
       fi
-      mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Remediation Recommendations - {{Target}}" > {{llmRecommendations}}
       echo "" >> {{llmRecommendations}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmRecommendations}}
+      cat "$RAW_FILE" >> {{llmRecommendations}}
     on_error:
       - action: continue
 
@@ -1195,6 +1256,9 @@ steps:
           ## Secrets/credentials
           {{readFile("{{secretFile}}")}}
 
+          ## Passive web risk summary
+          {{readFile("{{passiveWebRiskSummaryFile}}")}}
+
           ## AI target packs
           {{readFile("{{assetsSummaryFile}}")}}
           {{readFile("{{attackChainFile}}")}}
@@ -1203,27 +1267,32 @@ steps:
     exports:
       attack_surface: "{{llm_attack_surface_analysis_content}}"
 
+  - name: persist-llm-attack-surface-raw
+    type: function
+    pre_condition: "{{enableLlmAttackSurface}}"
+    functions:
+      - 'save_content(typeof attack_surface !== "undefined" ? attack_surface : "", "{{reportDir}}/.llm-attack-surface-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-attack-surface-report
     type: bash
     pre_condition: "{{enableLlmAttackSurface}}"
     log: "Saving LLM attack surface analysis report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{attack_surface}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{reportDir}} 2>/dev/null || true
+      RAW_FILE="{{reportDir}}/.llm-attack-surface-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmAttackSurfaceReport}} 2>/dev/null || true
         echo "No LLM attack surface analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{reportDir}} 2>/dev/null || true
       echo "# Attack Surface Analysis - {{Target}}" > {{llmAttackSurfaceReport}}
       echo "" >> {{llmAttackSurfaceReport}}
       echo "**Generated:** $(date)" >> {{llmAttackSurfaceReport}}
       echo "" >> {{llmAttackSurfaceReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmAttackSurfaceReport}}
+      cat "$RAW_FILE" >> {{llmAttackSurfaceReport}}
     on_error:
       - action: continue
 

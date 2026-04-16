@@ -42,6 +42,8 @@ var (
 	funcRepeatWaitTime string
 )
 
+const llmInvokeCustomMessageSentinel = "__OSM_LLM_INVOKE_CUSTOM_MESSAGE_PLACEHOLDER__"
+
 // functionCmd is the parent command for function operations
 var functionCmd = &cobra.Command{
 	Use:     "function",
@@ -312,11 +314,13 @@ func executeFunctionForTarget(printer *terminal.Printer, script, target string) 
 
 	// Render template variables ({{target}}, etc.)
 	templateEngine := template.NewEngine()
-	renderedScript, err := templateEngine.Render(script, ctx)
+	protectedScript := protectLLMInvokeCustomBodyPlaceholders(script)
+	renderedScript, err := templateEngine.Render(protectedScript, ctx)
 	if err != nil {
 		printer.Error("Template rendering failed: %s", err)
 		return fmt.Errorf("template rendering failed: %w", err)
 	}
+	renderedScript = restoreLLMInvokeCustomBodyPlaceholders(renderedScript)
 
 	// Show rendered script if different from original (verbose mode)
 	if verbose && renderedScript != script {
@@ -337,6 +341,208 @@ func executeFunctionForTarget(printer *terminal.Printer, script, target string) 
 	}
 
 	return nil
+}
+
+func protectLLMInvokeCustomBodyPlaceholders(script string) string {
+	ranges := findLLMInvokeCustomBodyRanges(script)
+	if len(ranges) == 0 {
+		return script
+	}
+
+	var out strings.Builder
+	last := 0
+	for _, r := range ranges {
+		start, end := r[0], r[1]
+		if start < last || start > len(script) || end > len(script) || start > end {
+			continue
+		}
+		out.WriteString(script[last:start])
+		segment := strings.ReplaceAll(script[start:end], "{{message}}", llmInvokeCustomMessageSentinel)
+		out.WriteString(segment)
+		last = end
+	}
+	out.WriteString(script[last:])
+	return out.String()
+}
+
+func restoreLLMInvokeCustomBodyPlaceholders(script string) string {
+	return strings.ReplaceAll(script, llmInvokeCustomMessageSentinel, "{{message}}")
+}
+
+func findLLMInvokeCustomBodyRanges(script string) [][2]int {
+	const funcName = "llm_invoke_custom"
+	var ranges [][2]int
+
+	for i := 0; i < len(script); i++ {
+		if !strings.HasPrefix(script[i:], funcName) {
+			continue
+		}
+		if i > 0 && isJSIdentifierChar(script[i-1]) {
+			continue
+		}
+
+		nameEnd := i + len(funcName)
+		j := skipJSSpaces(script, nameEnd)
+		if j >= len(script) || script[j] != '(' {
+			continue
+		}
+
+		start, end, ok := findSecondArgumentRange(script, j)
+		if ok {
+			ranges = append(ranges, [2]int{start, end})
+			i = end
+			continue
+		}
+		i = j
+	}
+
+	return ranges
+}
+
+func findSecondArgumentRange(script string, openParen int) (int, int, bool) {
+	callDepth := 1
+	braceDepth := 0
+	bracketDepth := 0
+
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	inLineComment := false
+	inBlockComment := false
+	escaped := false
+
+	topLevelCommaCount := 0
+	secondStart := -1
+	secondEnd := -1
+
+	for i := openParen + 1; i < len(script); i++ {
+		ch := script[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && i+1 < len(script) && script[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+
+		if inSingle || inDouble || inBacktick {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if (inSingle && ch == '\'') || (inDouble && ch == '"') || (inBacktick && ch == '`') {
+				inSingle, inDouble, inBacktick = false, false, false
+			}
+			continue
+		}
+
+		if ch == '/' && i+1 < len(script) {
+			switch script[i+1] {
+			case '/':
+				inLineComment = true
+				i++
+				continue
+			case '*':
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+
+		switch ch {
+		case '\'':
+			inSingle = true
+			continue
+		case '"':
+			inDouble = true
+			continue
+		case '`':
+			inBacktick = true
+			continue
+		case '(':
+			callDepth++
+			continue
+		case ')':
+			callDepth--
+			if callDepth == 0 {
+				if topLevelCommaCount == 1 && secondStart != -1 {
+					secondEnd = trimTrailingJSSpaces(script, i)
+					return secondStart, secondEnd, secondStart <= secondEnd
+				}
+				return 0, 0, false
+			}
+			continue
+		case '{':
+			braceDepth++
+			continue
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			continue
+		case '[':
+			bracketDepth++
+			continue
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			continue
+		case ',':
+			if callDepth == 1 && braceDepth == 0 && bracketDepth == 0 {
+				if topLevelCommaCount == 0 {
+					topLevelCommaCount = 1
+					secondStart = skipJSSpaces(script, i+1)
+					continue
+				}
+				if topLevelCommaCount == 1 && secondStart != -1 {
+					secondEnd = trimTrailingJSSpaces(script, i)
+					return secondStart, secondEnd, secondStart <= secondEnd
+				}
+			}
+		}
+	}
+
+	return 0, 0, false
+}
+
+func skipJSSpaces(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func trimTrailingJSSpaces(s string, end int) int {
+	for end > 0 {
+		switch s[end-1] {
+		case ' ', '\t', '\n', '\r':
+			end--
+		default:
+			return end
+		}
+	}
+	return end
+}
+
+func isJSIdentifierChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
 
 // readFuncTargetsFromFile reads targets from a file, one per line

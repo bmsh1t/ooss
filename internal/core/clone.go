@@ -240,11 +240,12 @@ func (m *ModuleRef) Clone() *ModuleRef {
 	}
 
 	cloned := &ModuleRef{
-		Name:        m.Name,
-		Path:        m.Path,
-		Condition:   m.Condition,
-		Runner:      m.Runner,
-		Description: m.Description,
+		Name:         m.Name,
+		Path:         m.Path,
+		Condition:    m.Condition,
+		PreCondition: m.PreCondition,
+		Runner:       m.Runner,
+		Description:  m.Description,
 	}
 
 	if len(m.Params) > 0 {

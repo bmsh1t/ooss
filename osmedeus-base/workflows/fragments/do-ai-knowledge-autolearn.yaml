@@ -330,7 +330,7 @@ steps:
         fi
         echo "[Knowledge Learn] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo ""
-        "$OSM_BIN" --base-folder "{{BaseFolder}}" --workflow-folder "{{Workflows}}" kb learn -w "{{knowledgeLearningWorkspace}}" --scope "{{knowledgeScope}}" --include-ai
+        "$OSM_BIN" --settings-file "{{SettingsFile}}" --base-folder "{{BaseFolder}}" --workflow-folder "{{Workflows}}" kb learn -w "{{knowledgeLearningWorkspace}}" --scope "{{knowledgeScope}}" --include-ai
       } > "{{knowledgeLearnSummary}}" 2>&1 || true
 
       echo "[Knowledge Learn] Summary saved to {{knowledgeLearnSummary}}"

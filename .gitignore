@@ -46,9 +46,13 @@ test/integration/*-test/
 
 .agents
 .claude
+.codex
+__pycache__/
+{{Output}}/
 OPTIMIZE.md
 OPTIMIZE-*.md
 PLANNING.md
 PLANNING-*.md
 INTERNAL.md
 INTERNAL-*.md
+.ace-tool/

@@ -222,6 +222,102 @@ func TestExecutor_DependencyTargetTypes_Unknown(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown target_types")
 }
 
+func TestExecutor_DryRunSkipsCommandDependencies(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	module := &core.Workflow{
+		Name: "test-dryrun-skip-command-deps",
+		Kind: core.KindModule,
+		Dependencies: &core.Dependencies{
+			Commands: []string{"definitely-missing-binary-for-dry-run"},
+		},
+		Steps: []core.Step{
+			{
+				Name:    "echo-test",
+				Type:    core.StepTypeBash,
+				Command: "echo ok",
+			},
+		},
+	}
+
+	executor := NewExecutor()
+	executor.SetDryRun(true)
+	executor.SetSpinner(false)
+
+	result, err := executor.ExecuteModule(ctx, module, map[string]string{
+		"target": "example.com",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	require.Len(t, result.Steps, 1)
+	assert.Contains(t, result.Steps[0].Output, "DRY-RUN")
+}
+
+func TestExecutor_CommandDependenciesCheckedOutsideDryRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	module := &core.Workflow{
+		Name: "test-command-deps-enforced",
+		Kind: core.KindModule,
+		Dependencies: &core.Dependencies{
+			Commands: []string{"definitely-missing-binary-for-live-run"},
+		},
+		Steps: []core.Step{
+			{
+				Name:    "echo-test",
+				Type:    core.StepTypeBash,
+				Command: "echo ok",
+			},
+		},
+	}
+
+	executor := NewExecutor()
+	executor.SetDryRun(false)
+	executor.SetSpinner(false)
+
+	_, err := executor.ExecuteModule(ctx, module, map[string]string{
+		"target": "example.com",
+	}, cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required command not found")
+}
+
+func TestExecutor_DryRunStillChecksFunctionConditions(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	module := &core.Workflow{
+		Name: "test-dryrun-function-conditions",
+		Kind: core.KindModule,
+		Dependencies: &core.Dependencies{
+			FunctionsConditions: []string{"false"},
+		},
+		Steps: []core.Step{
+			{
+				Name:    "echo-test",
+				Type:    core.StepTypeBash,
+				Command: "echo ok",
+			},
+		},
+	}
+
+	executor := NewExecutor()
+	executor.SetDryRun(true)
+	executor.SetSpinner(false)
+
+	_, err := executor.ExecuteModule(ctx, module, map[string]string{
+		"target": "example.com",
+	}, cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "function condition failed")
+}
+
 func TestExecutor_DefaultParams(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t)
@@ -2043,6 +2139,69 @@ func TestExecutor_SkipModulePreservesExports(t *testing.T) {
 	assert.Equal(t, "done early", result.Message)
 }
 
+func TestExecutor_ExportTemplateStringWithParenthesesStaysLiteral(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	module := &core.Workflow{
+		Name: "test-export-literal-parentheses",
+		Kind: core.KindModule,
+		Steps: []core.Step{
+			{
+				Name:    "emit-agent-like-output",
+				Type:    core.StepTypeBash,
+				Command: `printf 'Use SLEEP(5) and BENCHMARK(1000000,MD5(1)) for manual verification'`,
+				Exports: map[string]string{
+					"raw_copy": "{{output}}",
+				},
+			},
+		},
+	}
+
+	executor := NewExecutor()
+	executor.SetDryRun(false)
+	executor.SetSpinner(false)
+
+	result, err := executor.ExecuteModule(ctx, module, map[string]string{}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assert.Equal(t,
+		"Use SLEEP(5) and BENCHMARK(1000000,MD5(1)) for manual verification",
+		result.Exports["raw_copy"],
+	)
+}
+
+func TestExecutor_ExportFunctionExpressionStillEvaluates(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	module := &core.Workflow{
+		Name: "test-export-function-expression",
+		Kind: core.KindModule,
+		Steps: []core.Step{
+			{
+				Name:    "emit-spaced-output",
+				Type:    core.StepTypeBash,
+				Command: `printf '  keep-me  '`,
+				Exports: map[string]string{
+					"trimmed_output": "trim(output)",
+				},
+			},
+		},
+	}
+
+	executor := NewExecutor()
+	executor.SetDryRun(false)
+	executor.SetSpinner(false)
+
+	result, err := executor.ExecuteModule(ctx, module, map[string]string{}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assert.Equal(t, "keep-me", result.Exports["trimmed_output"])
+}
+
 func TestIsFuzzyModuleExcluded(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2099,6 +2258,263 @@ func TestExecutor_FuzzyExcludeModules(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+}
+
+func TestExecutor_FlowModulePreConditionAlias(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	flow := &core.Workflow{
+		Name: "test-module-precondition-alias",
+		Kind: core.KindFlow,
+		Modules: []core.ModuleRef{
+			{
+				Name:         "skip-me",
+				PreCondition: "false",
+				Steps: []core.Step{
+					{
+						Name:     "should-not-run",
+						Type:     core.StepTypeFunction,
+						Function: "log_info('skip-me executed')",
+					},
+				},
+			},
+			{
+				Name:      "after-skip",
+				DependsOn: []string{"skip-me"},
+				Steps: []core.Step{
+					{
+						Name:     "should-run",
+						Type:     core.StepTypeFunction,
+						Function: "log_info('after-skip executed')",
+					},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+	exec.SetLoader(parser.NewLoader(cfg.WorkflowsPath))
+
+	result, err := exec.ExecuteFlow(ctx, flow, map[string]string{
+		"target": "test.example.com",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statusByModule := make(map[string]core.RunStatus)
+	for _, mod := range result.ModuleResults {
+		if mod == nil {
+			continue
+		}
+		statusByModule[mod.ModuleName] = mod.Status
+	}
+
+	assert.Equal(t, core.RunStatusSkipped, statusByModule["skip-me"])
+	assert.Equal(t, core.RunStatusCompleted, statusByModule["after-skip"])
+}
+
+func TestExecutor_FlowDryRunSkipsCommandDependencies(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	flow := &core.Workflow{
+		Name: "test-flow-dryrun-skip-command-deps",
+		Kind: core.KindFlow,
+		Dependencies: &core.Dependencies{
+			Commands: []string{"definitely-missing-binary-for-flow-dry-run"},
+		},
+		Modules: []core.ModuleRef{
+			{
+				Name: "inline-module",
+				Steps: []core.Step{
+					{
+						Name:    "echo-test",
+						Type:    core.StepTypeBash,
+						Command: "echo ok",
+					},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor()
+	exec.SetDryRun(true)
+	exec.SetSpinner(false)
+	exec.SetLoader(parser.NewLoader(cfg.WorkflowsPath))
+
+	result, err := exec.ExecuteFlow(ctx, flow, map[string]string{
+		"target": "example.com",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	require.Len(t, result.ModuleResults, 1)
+	assert.Equal(t, core.RunStatusCompleted, result.ModuleResults[0].Status)
+}
+
+func TestExecutor_FlowModulePreConditionRendersTemplate(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	flow := &core.Workflow{
+		Name: "test-module-precondition-template",
+		Kind: core.KindFlow,
+		Modules: []core.ModuleRef{
+			{
+				Name:         "skip-me",
+				PreCondition: "{{run_first}}",
+				Steps: []core.Step{
+					{
+						Name:     "should-not-run",
+						Type:     core.StepTypeFunction,
+						Function: "log_info('skip-me executed')",
+					},
+				},
+			},
+			{
+				Name:         "run-me",
+				DependsOn:    []string{"skip-me"},
+				PreCondition: "{{run_second}}",
+				Steps: []core.Step{
+					{
+						Name:     "should-run",
+						Type:     core.StepTypeFunction,
+						Function: "log_info('run-me executed')",
+					},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+	exec.SetLoader(parser.NewLoader(cfg.WorkflowsPath))
+
+	result, err := exec.ExecuteFlow(ctx, flow, map[string]string{
+		"target":     "test.example.com",
+		"run_first":  "false",
+		"run_second": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statusByModule := make(map[string]core.RunStatus)
+	for _, mod := range result.ModuleResults {
+		if mod == nil {
+			continue
+		}
+		statusByModule[mod.ModuleName] = mod.Status
+	}
+
+	assert.Equal(t, core.RunStatusSkipped, statusByModule["skip-me"])
+	assert.Equal(t, core.RunStatusCompleted, statusByModule["run-me"])
+}
+
+func TestExecutor_FlowModulePreConditionOptionalToggleDefaultsOnWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	flow := &core.Workflow{
+		Name: "test-module-precondition-optional-toggle",
+		Kind: core.KindFlow,
+		Modules: []core.ModuleRef{
+			{
+				Name:         "run-with-missing-toggle",
+				PreCondition: `{{enable_llm}} && ("{{optional_toggle}}" == "" || "{{optional_toggle}}" == "true")`,
+				Steps: []core.Step{
+					{
+						Name:     "should-run",
+						Type:     core.StepTypeFunction,
+						Function: "log_info('optional toggle defaulted on')",
+					},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+	exec.SetLoader(parser.NewLoader(cfg.WorkflowsPath))
+
+	result, err := exec.ExecuteFlow(ctx, flow, map[string]string{
+		"target":     "test.example.com",
+		"enable_llm": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	require.Len(t, result.ModuleResults, 1)
+	assert.Equal(t, "run-with-missing-toggle", result.ModuleResults[0].ModuleName)
+	assert.Equal(t, core.RunStatusCompleted, result.ModuleResults[0].Status)
+}
+
+func TestExecutor_FlowSkippedDependencyDoesNotBlockDownstreamModules(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+
+	flow := &core.Workflow{
+		Name: "test-flow-skipped-dependency-continues",
+		Kind: core.KindFlow,
+		Modules: []core.ModuleRef{
+			{
+				Name: "skip-upstream",
+				Steps: []core.Step{
+					{
+						Name:     "skip-now",
+						Type:     core.StepTypeFunction,
+						Function: "skip('upstream not applicable')",
+					},
+				},
+			},
+			{
+				Name:      "downstream-still-runs",
+				DependsOn: []string{"skip-upstream"},
+				Steps: []core.Step{
+					{
+						Name:     "set-flag",
+						Type:     core.StepTypeFunction,
+						Function: "set_var('downstream_ran', 'true')",
+					},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+	exec.SetLoader(parser.NewLoader(cfg.WorkflowsPath))
+
+	result, err := exec.ExecuteFlow(ctx, flow, map[string]string{
+		"target": "test.example.com",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	statusByModule := make(map[string]core.RunStatus)
+	for _, mod := range result.ModuleResults {
+		if mod == nil {
+			continue
+		}
+		statusByModule[mod.ModuleName] = mod.Status
+	}
+
+	assert.Equal(t, core.RunStatusSkipped, statusByModule["skip-upstream"])
+	assert.Equal(t, core.RunStatusCompleted, statusByModule["downstream-still-runs"])
 }
 
 // --- Decision Conditions tests ---

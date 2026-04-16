@@ -14,8 +14,13 @@ import (
 )
 
 var (
-	kbVectorProvider string
-	kbVectorModel    string
+	kbVectorProvider      string
+	kbVectorModel         string
+	kbEnableRerank        bool
+	kbRerankProvider      string
+	kbRerankModel         string
+	kbRerankTopN          int
+	kbRerankMaxCandidates int
 )
 
 var kbVectorCmd = &cobra.Command{
@@ -81,6 +86,11 @@ func init() {
 	kbVectorSearchCmd.Flags().Float64Var(&kbMinSourceConfidence, "min-confidence", 0, "skip learned results below this source confidence")
 	kbVectorSearchCmd.Flags().StringSliceVar(&kbSampleTypes, "sample-type", nil, "include only specific learned sample types")
 	kbVectorSearchCmd.Flags().StringSliceVar(&kbExcludeSampleTypes, "exclude-sample-type", nil, "exclude specific learned sample types")
+	kbVectorSearchCmd.Flags().BoolVar(&kbEnableRerank, "rerank", false, "apply rerank on top of hybrid vector results")
+	kbVectorSearchCmd.Flags().StringVar(&kbRerankProvider, "rerank-provider", "", "rerank provider override")
+	kbVectorSearchCmd.Flags().StringVar(&kbRerankModel, "rerank-model", "", "rerank model override")
+	kbVectorSearchCmd.Flags().IntVar(&kbRerankTopN, "rerank-top-n", 0, "maximum number of reranked results (0 uses config default)")
+	kbVectorSearchCmd.Flags().IntVar(&kbRerankMaxCandidates, "rerank-max-candidates", 0, "maximum recall candidates sent to rerank (0 uses config default)")
 	_ = kbVectorSearchCmd.MarkFlagRequired("query")
 
 	kbVectorDoctorCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty checks all workspaces)")
@@ -169,6 +179,11 @@ func runKBVectorSearch(cmd *cobra.Command, args []string) error {
 		MinSourceConfidence: kbMinSourceConfidence,
 		SampleTypes:         kbSampleTypes,
 		ExcludeSampleTypes:  kbExcludeSampleTypes,
+		EnableRerank:        kbEnableRerank,
+		RerankProvider:      strings.TrimSpace(kbRerankProvider),
+		RerankModel:         strings.TrimSpace(kbRerankModel),
+		RerankTopN:          kbRerankTopN,
+		RerankMaxCandidates: kbRerankMaxCandidates,
 	}, kbQuery)
 	if err != nil {
 		return err

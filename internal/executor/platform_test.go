@@ -62,7 +62,7 @@ func TestPlatformVariablesInjection(t *testing.T) {
 	params := map[string]string{
 		"target": "example.com",
 	}
-	e.injectBuiltinVariables(cfg, params, execCtx)
+	e.injectBuiltinVariables(cfg, params, execCtx, "")
 
 	// Verify platform variables are set
 	tests := []struct {
@@ -123,7 +123,7 @@ func TestPlatformVariablesTemplateRendering(t *testing.T) {
 	params := map[string]string{
 		"target": "example.com",
 	}
-	e.injectBuiltinVariables(cfg, params, execCtx)
+	e.injectBuiltinVariables(cfg, params, execCtx, "")
 
 	// Create template engine and test rendering
 	engine := template.NewEngine()
@@ -187,7 +187,7 @@ func TestPlatformVariablesWithStepDispatcher(t *testing.T) {
 	params := map[string]string{
 		"target": "example.com",
 	}
-	e.injectBuiltinVariables(cfg, params, execCtx)
+	e.injectBuiltinVariables(cfg, params, execCtx, "")
 
 	// Get the step dispatcher
 	dispatcher := NewStepDispatcher()
@@ -213,4 +213,38 @@ func TestPlatformVariablesWithStepDispatcher(t *testing.T) {
 		t.Errorf("Rendered command = %q, expected %q", result, expected)
 	}
 	t.Logf("Rendered command: %q", result)
+}
+
+func TestInjectBuiltinVariablesPrefersRuntimeWorkflowRoot(t *testing.T) {
+	cfg := &config.Config{
+		BaseFolder:     "/home/test/osmedeus-base",
+		BinariesPath:   "/home/test/osmedeus-base/bin",
+		DataPath:       "/home/test/osmedeus-base/data",
+		WorkspacesPath: "/home/test/workspaces-osmedeus",
+		WorkflowsPath:  "/home/test/osmedeus-base/workflows",
+	}
+
+	execCtx := core.NewExecutionContext("test-workflow", core.KindModule, "test-run-uuid", "example.com")
+	e := NewExecutor()
+	params := map[string]string{
+		"target": "example.com",
+	}
+
+	e.injectBuiltinVariables(cfg, params, execCtx, "/tmp/repo/osmedeus-base/workflows/fragments/do-ai-semantic-search.yaml")
+
+	workflowsPath, ok := execCtx.GetVariable("Workflows")
+	if !ok {
+		t.Fatalf("Workflows variable not found in execution context")
+	}
+	if workflowsPath != "/tmp/repo/osmedeus-base/workflows" {
+		t.Fatalf("Workflows = %v, expected %q", workflowsPath, "/tmp/repo/osmedeus-base/workflows")
+	}
+
+	baseFolder, ok := execCtx.GetVariable("BaseFolder")
+	if !ok {
+		t.Fatalf("BaseFolder variable not found in execution context")
+	}
+	if baseFolder != "/home/test/osmedeus-base" {
+		t.Fatalf("BaseFolder = %v, expected %q", baseFolder, "/home/test/osmedeus-base")
+	}
 }

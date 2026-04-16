@@ -32,7 +32,7 @@ steps:
 
   - name: load-role
     type: bash
-    pre_condition: '"{{roleName}}" != ""'
+    pre_condition: 'typeof roleName !== "undefined" && String(roleName).trim() != ""'
     command: |
       ROLE_FILE="{{rolesDir}}/{{roleName}}.yaml"
       mkdir -p {{Output}}/ai-analysis
@@ -46,7 +46,7 @@ steps:
 
   - name: show-role-info
     type: bash
-    pre_condition: '"{{roleName}}" != ""'
+    pre_condition: 'typeof roleName !== "undefined" && String(roleName).trim() != ""'
     command: |
       ROLE_FILE="{{rolesDir}}/{{roleName}}.yaml"
       if [ ! -f "$ROLE_FILE" ]; then

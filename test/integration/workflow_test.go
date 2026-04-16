@@ -7,6 +7,7 @@ import (
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -61,6 +62,17 @@ func writeTestFile(t *testing.T, path, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 }
 
+func installStubCommand(t *testing.T, name, script string) string {
+	t.Helper()
+
+	stubDir := t.TempDir()
+	stubPath := filepath.Join(stubDir, name)
+	require.NoError(t, os.WriteFile(stubPath, []byte(script), 0755))
+	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+
+	return stubPath
+}
+
 func installStubOsmedeus(t *testing.T) string {
 	t.Helper()
 
@@ -71,7 +83,7 @@ func installStubOsmedeus(t *testing.T) string {
 printf '%%s\n' "$*" >> %q
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --base-folder|--workflow-folder)
+    --settings-file|--base-folder|--workflow-folder)
       shift
       [ "$#" -gt 0 ] && shift
       ;;
@@ -115,7 +127,7 @@ func installKBSearchStubOsmedeus(t *testing.T) string {
 printf '%%s\n' "$*" >> %q
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --base-folder|--workflow-folder)
+    --settings-file|--base-folder|--workflow-folder)
       shift
       [ "$#" -gt 0 ] && shift
       ;;
@@ -276,6 +288,7 @@ func TestValidateAllWorkflows(t *testing.T) {
 
 func TestSuperdomainAIWorkflowNamesMatchFileNames(t *testing.T) {
 	workflows := []string{
+		"domain-superdomain-extensive-ai",
 		"superdomain-extensive-ai-stable",
 		"superdomain-extensive-ai-hybrid",
 		"superdomain-extensive-ai-lite",
@@ -293,6 +306,648 @@ func TestSuperdomainAIWorkflowNamesMatchFileNames(t *testing.T) {
 			assert.Equal(t, workflowName, workflow.Name)
 		})
 	}
+}
+
+func TestVulnSuiteIncludesPrototypePollutionScan(t *testing.T) {
+	p := parser.NewParser()
+	file := filepath.Join(getRealWorkflowsPath(), "common", "09-vuln-suite.yaml")
+
+	workflow, err := p.Parse(file)
+	require.NoError(t, err)
+
+	paramNames := make(map[string]struct{}, len(workflow.Params))
+	for _, param := range workflow.Params {
+		paramNames[param.Name] = struct{}{}
+	}
+	assert.Contains(t, paramNames, "enablePrototypePollutionScan")
+	assert.Contains(t, paramNames, "prototypePollutionTemplateFile")
+	assert.Contains(t, paramNames, "prototypePollutionOutputFile")
+
+	reportNames := make(map[string]struct{}, len(workflow.Reports))
+	for _, report := range workflow.Reports {
+		reportNames[report.Name] = struct{}{}
+	}
+	assert.Contains(t, reportNames, "prototype-pollution-results")
+
+	var protoStep *core.Step
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "prototype-pollution-scan" {
+			protoStep = &workflow.Steps[i]
+			break
+		}
+	}
+
+	require.NotNil(t, protoStep)
+	assert.Equal(t, core.StepTypeBash, protoStep.Type)
+	assert.Contains(t, protoStep.Command, "prototypePollutionOutputFile")
+	assert.Contains(t, protoStep.Command, "prototypePollutionTemplateFile")
+}
+
+func TestTopLevelWorkflowNamesAreUniqueExceptApprovedAliases(t *testing.T) {
+	root := getRealWorkflowsPath()
+	files, err := filepath.Glob(filepath.Join(root, "*.yaml"))
+	require.NoError(t, err)
+
+	allowedDuplicates := map[string]map[string]struct{}{
+		"web-analysis": {
+			"url.yaml":          {},
+			"web-analysis.yaml": {},
+		},
+	}
+
+	p := parser.NewParser()
+	seen := make(map[string][]string)
+
+	for _, file := range files {
+		workflow, err := p.Parse(file)
+		require.NoError(t, err)
+		seen[workflow.Name] = append(seen[workflow.Name], filepath.Base(file))
+	}
+
+	for workflowName, names := range seen {
+		if len(names) <= 1 {
+			continue
+		}
+
+		allowed, ok := allowedDuplicates[workflowName]
+		require.Truef(t, ok, "unexpected duplicate workflow name %q in files %v", workflowName, names)
+		for _, fileName := range names {
+			_, exists := allowed[fileName]
+			assert.Truef(t, exists, "workflow %q duplicate file %q is not approved", workflowName, fileName)
+		}
+		assert.Equalf(t, len(allowed), len(names), "workflow %q duplicate set changed", workflowName)
+	}
+}
+
+func findModuleRef(t *testing.T, workflow *core.Workflow, moduleName string) core.ModuleRef {
+	t.Helper()
+
+	for _, module := range workflow.Modules {
+		if module.Name == moduleName {
+			return module
+		}
+	}
+
+	t.Fatalf("module %q not found in workflow %q", moduleName, workflow.Name)
+	return core.ModuleRef{}
+}
+
+func assertModuleParams(t *testing.T, module core.ModuleRef, expected map[string]string) {
+	t.Helper()
+
+	require.NotNil(t, module.Params, "module %q should define params", module.Name)
+	for key, value := range expected {
+		assert.Equalf(t, value, module.Params[key], "module=%s param=%s", module.Name, key)
+	}
+}
+
+func assertModulePreCondition(t *testing.T, module core.ModuleRef, expected string) {
+	t.Helper()
+	assert.Equalf(t, expected, module.PreCondition, "module=%s pre_condition", module.Name)
+}
+
+func assertWorkflowHasParam(t *testing.T, workflow *core.Workflow, name string, expectedDefault interface{}) {
+	t.Helper()
+	for _, param := range workflow.Params {
+		if param.Name == name {
+			assert.Equalf(t, expectedDefault, param.Default, "param=%s default", name)
+			return
+		}
+	}
+	t.Fatalf("param %q not found in workflow %q", name, workflow.Name)
+}
+
+func assertWorkflowLacksParam(t *testing.T, workflow *core.Workflow, name string) {
+	t.Helper()
+	for _, param := range workflow.Params {
+		if param.Name == name {
+			t.Fatalf("param %q unexpectedly present in workflow %q", name, workflow.Name)
+		}
+	}
+}
+
+func optionalFlowToggleCondition(baseToggle, optionalToggle string) string {
+	return fmt.Sprintf(`{{%s}} && ("{{%s}}" == "" || "{{%s}}" == "true")`, baseToggle, optionalToggle, optionalToggle)
+}
+
+func assertNoShellOpenErrors(t *testing.T, result *core.WorkflowResult) {
+	t.Helper()
+
+	for _, step := range result.Steps {
+		if step == nil {
+			continue
+		}
+		assert.NotContainsf(t, step.Output, "cannot open", "step=%s", step.StepName)
+		assert.NotContainsf(t, step.Output, "No such file or directory", "step=%s", step.StepName)
+	}
+}
+
+func TestSuperdomainAIWorkflowClosureModulesLanded(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+	}
+	expectedModules := []string{
+		"ai-skills-loader",
+		"ai-pre-scan-decision",
+		"ai-semantic-search",
+		"ai-vuln-validation",
+		"ai-attack-chain",
+		"ai-path-planning",
+		"ai-post-vuln-semantic-search",
+		"ai-intelligent-analysis",
+		"ai-apply-decision",
+		"ai-decision-semantic-search",
+		"ai-retest-planning",
+		"ai-operator-queue",
+		"ai-campaign-handoff",
+		"ai-targeted-rescan",
+		"ai-retest-queue",
+		"ai-post-followup-coordination",
+		"report",
+		"ai-knowledge-autolearn",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			moduleIndex := make(map[string]int, len(workflow.Modules))
+			for idx, module := range workflow.Modules {
+				moduleIndex[module.Name] = idx
+			}
+
+			for _, moduleName := range expectedModules {
+				_, ok := moduleIndex[moduleName]
+				assert.Truef(t, ok, "expected module %q in workflow %q", moduleName, workflowName)
+			}
+
+			assert.Less(t, moduleIndex["ai-apply-decision"], moduleIndex["ai-decision-semantic-search"])
+			assert.Less(t, moduleIndex["ai-decision-semantic-search"], moduleIndex["ai-retest-planning"])
+			assert.Less(t, moduleIndex["ai-retest-planning"], moduleIndex["ai-operator-queue"])
+			assert.Less(t, moduleIndex["ai-operator-queue"], moduleIndex["ai-campaign-handoff"])
+			assert.Less(t, moduleIndex["ai-campaign-handoff"], moduleIndex["ai-targeted-rescan"])
+			assert.Less(t, moduleIndex["ai-targeted-rescan"], moduleIndex["ai-retest-queue"])
+			assert.Less(t, moduleIndex["ai-retest-queue"], moduleIndex["ai-post-followup-coordination"])
+			assert.Less(t, moduleIndex["ai-post-followup-coordination"], moduleIndex["report"])
+			assert.Less(t, moduleIndex["report"], moduleIndex["ai-knowledge-autolearn"])
+		})
+	}
+}
+
+func TestSuperdomainAIWorkflowAIFragmentSelection(t *testing.T) {
+	type expectedModule struct {
+		name string
+		path string
+	}
+
+	expectedByWorkflow := map[string][]expectedModule{
+		"superdomain-extensive-ai-optimized": {
+			{name: "ai-pre-scan-decision", path: "fragments/do-ai-pre-scan-decision.yaml"},
+			{name: "ai-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-waf-bypass", path: "fragments/do-ai-waf-bypass.yaml"},
+			{name: "ai-vuln-validation", path: "fragments/do-ai-vuln-validation.yaml"},
+			{name: "ai-attack-chain", path: "fragments/do-ai-attack-chain.yaml"},
+			{name: "ai-path-planning", path: "fragments/do-ai-path-planning.yaml"},
+			{name: "ai-post-vuln-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-code-review", path: "fragments/do-ai-code-review-enhanced.yaml"},
+			{name: "ai-decision-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+		},
+		"superdomain-extensive-ai-stable": {
+			{name: "ai-pre-scan-decision", path: "fragments/do-ai-pre-scan-decision-acp.yaml"},
+			{name: "ai-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-waf-bypass", path: "fragments/do-ai-waf-bypass-acp.yaml"},
+			{name: "ai-vuln-validation", path: "fragments/do-ai-vuln-validation-acp.yaml"},
+			{name: "ai-attack-chain", path: "fragments/do-ai-attack-chain-acp.yaml"},
+			{name: "ai-path-planning", path: "fragments/do-ai-path-planning-acp.yaml"},
+			{name: "ai-post-vuln-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-code-review", path: "fragments/do-ai-code-review-acp.yaml"},
+			{name: "ai-decision-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+		},
+		"superdomain-extensive-ai-hybrid": {
+			{name: "ai-pre-scan-decision", path: "fragments/do-ai-pre-scan-decision-acp.yaml"},
+			{name: "ai-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-waf-bypass", path: "fragments/do-ai-waf-bypass-acp.yaml"},
+			{name: "ai-vuln-validation", path: "fragments/do-ai-vuln-validation-acp.yaml"},
+			{name: "ai-attack-chain", path: "fragments/do-ai-attack-chain.yaml"},
+			{name: "ai-path-planning", path: "fragments/do-ai-path-planning-acp.yaml"},
+			{name: "ai-post-vuln-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+			{name: "ai-code-review", path: "fragments/do-ai-code-review-acp.yaml"},
+			{name: "ai-decision-semantic-search", path: "fragments/do-ai-semantic-search.yaml"},
+		},
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for workflowName, expectedModules := range expectedByWorkflow {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			for _, expected := range expectedModules {
+				module := findModuleRef(t, workflow, expected.name)
+				assert.Equalf(t, expected.path, module.Path, "workflow=%s module=%s", workflowName, expected.name)
+			}
+		})
+	}
+}
+
+func TestSuperdomainAIWorkflowOperationalWiring(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			earlySemantic := findModuleRef(t, workflow, "ai-semantic-search")
+			assertModuleParams(t, earlySemantic, map[string]string{
+				"semanticIndexDir":              "{{Output}}/ai-analysis/semantic-index-early",
+				"searchResultsOutput":           "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json",
+				"semanticHighlightsOutput":      "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json",
+				"semanticPriorityTargetsOutput": "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt",
+				"vectorKnowledgeSearchOutput":   "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json",
+				"knowledgeSearchOutput":         "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json",
+				"searchStage":                   "early",
+			})
+			assert.ElementsMatch(t, []string{"fingerprint"}, earlySemantic.DependsOn)
+
+			postVulnSemantic := findModuleRef(t, workflow, "ai-post-vuln-semantic-search")
+			assertModuleParams(t, postVulnSemantic, map[string]string{
+				"semanticIndexDir":              "{{Output}}/ai-analysis/semantic-index-post-vuln",
+				"searchResultsOutput":           "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json",
+				"semanticHighlightsOutput":      "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json",
+				"semanticPriorityTargetsOutput": "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt",
+				"vectorKnowledgeSearchOutput":   "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json",
+				"knowledgeSearchOutput":         "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json",
+				"searchStage":                   "post-vuln",
+			})
+			assert.ElementsMatch(t, []string{"vuln-suite", "ai-skills-loader"}, postVulnSemantic.DependsOn)
+
+			intelligent := findModuleRef(t, workflow, "ai-intelligent-analysis")
+			assertModuleParams(t, intelligent, map[string]string{
+				"semanticSearchFile":               "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json",
+				"semanticHighlightsFile":           "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json",
+				"initialSemanticSearchFile":        "{{Output}}/ai-analysis/semantic-search-early-{{TargetSpace}}.json",
+				"initialSemanticHighlightsFile":    "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json",
+				"semanticPriorityTargetsFile":      "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt",
+				"knowledgeSearchFile":              "{{Output}}/ai-analysis/knowledge-search-results-post-vuln-{{TargetSpace}}.json",
+				"initialKnowledgeSearchFile":       "{{Output}}/ai-analysis/knowledge-search-results-early-{{TargetSpace}}.json",
+				"vectorKnowledgeSearchFile":        "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json",
+				"initialVectorKnowledgeSearchFile": "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json",
+			})
+
+			decisionSemantic := findModuleRef(t, workflow, "ai-decision-semantic-search")
+			assertModuleParams(t, decisionSemantic, map[string]string{
+				"semanticIndexDir":              "{{Output}}/ai-analysis/semantic-index-decision-followup",
+				"searchResultsOutput":           "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json",
+				"semanticHighlightsOutput":      "{{Output}}/ai-analysis/semantic-highlights-decision-followup-{{TargetSpace}}.json",
+				"semanticPriorityTargetsOutput": "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt",
+				"vectorKnowledgeSearchOutput":   "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json",
+				"knowledgeSearchOutput":         "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json",
+				"semanticPriorityTargetsInput":  "{{Output}}/ai-analysis/semantic-priority-targets-post-vuln-{{TargetSpace}}.txt",
+				"searchStage":                   "decision-followup",
+			})
+			assert.ElementsMatch(t, []string{"ai-apply-decision"}, decisionSemantic.DependsOn)
+
+			retestPlanning := findModuleRef(t, workflow, "ai-retest-planning")
+			assertModuleParams(t, retestPlanning, map[string]string{
+				"semanticSearchFile":        "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json",
+				"knowledgeSearchFile":       "{{Output}}/ai-analysis/knowledge-search-results-decision-followup-{{TargetSpace}}.json",
+				"vectorKnowledgeSearchFile": "{{Output}}/ai-analysis/vector-kb-search-results-decision-followup-{{TargetSpace}}.json",
+			})
+			assert.ElementsMatch(t, []string{"ai-apply-decision", "ai-path-planning", "ai-attack-chain", "ai-decision-semantic-search"}, retestPlanning.DependsOn)
+
+			operatorQueue := findModuleRef(t, workflow, "ai-operator-queue")
+			assertModuleParams(t, operatorQueue, map[string]string{
+				"semanticSearchFile": "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json",
+			})
+			assert.ElementsMatch(t, []string{"ai-retest-planning", "ai-apply-decision", "ai-decision-semantic-search"}, operatorQueue.DependsOn)
+
+			campaignHandoff := findModuleRef(t, workflow, "ai-campaign-handoff")
+			assertModuleParams(t, campaignHandoff, map[string]string{
+				"semanticPriorityTargetsFile": "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt",
+			})
+			assert.ElementsMatch(t, []string{"ai-retest-planning", "ai-operator-queue", "ai-apply-decision", "ai-decision-semantic-search"}, campaignHandoff.DependsOn)
+
+			targetedRescan := findModuleRef(t, workflow, "ai-targeted-rescan")
+			assertModuleParams(t, targetedRescan, map[string]string{
+				"semanticPriorityTargetsFile": "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt",
+			})
+			assert.ElementsMatch(t, []string{"ai-apply-decision", "ai-retest-planning", "ai-operator-queue", "ai-decision-semantic-search"}, targetedRescan.DependsOn)
+
+			postFollowup := findModuleRef(t, workflow, "ai-post-followup-coordination")
+			assertModuleParams(t, postFollowup, map[string]string{
+				"followupDecisionOutput":      "{{followupDecisionOutput}}",
+				"semanticPriorityTargetsFile": "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt",
+			})
+			assert.ElementsMatch(t, []string{"ai-targeted-rescan", "ai-campaign-handoff", "ai-retest-queue"}, postFollowup.DependsOn)
+
+			report := findModuleRef(t, workflow, "report")
+			assert.Equal(t, "common/10-report.yaml", report.Path)
+			assert.ElementsMatch(t, []string{"vuln-suite", "ai-intelligent-analysis", "ai-code-review", "ai-post-followup-coordination"}, report.DependsOn)
+
+			knowledgeAutolearn := findModuleRef(t, workflow, "ai-knowledge-autolearn")
+			assert.Equal(t, "fragments/do-ai-knowledge-autolearn.yaml", knowledgeAutolearn.Path)
+			assertModuleParams(t, knowledgeAutolearn, map[string]string{
+				"knowledgeWorkspace": "{{knowledgeWorkspace}}",
+			})
+			assert.ElementsMatch(t, []string{"report"}, knowledgeAutolearn.DependsOn)
+
+			assertModulePreCondition(t, earlySemantic, "{{enableSemanticSearch}}")
+			assertModulePreCondition(t, intelligent, optionalFlowToggleCondition("enableLlmAnalysis", "enableIntelligentAnalysis"))
+			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-apply-decision"), optionalFlowToggleCondition("enableLlmAnalysis", "enableAiDecision"))
+			assertModulePreCondition(t, retestPlanning, "{{enableRetestPlanning}}")
+			assertModulePreCondition(t, operatorQueue, "{{enableOperatorQueue}}")
+			assertModulePreCondition(t, campaignHandoff, "{{enableCampaignHandoff}}")
+			assertModulePreCondition(t, targetedRescan, "{{enableTargetedRescan}}")
+			assertModulePreCondition(t, postFollowup, "{{enablePostFollowupCoordination}}")
+			assertModulePreCondition(t, knowledgeAutolearn, "{{enableKnowledgeLearning}}")
+
+			if workflowName == "superdomain-extensive-ai-optimized" {
+				preScan := findModuleRef(t, workflow, "ai-pre-scan-decision")
+				assertModuleParams(t, preScan, map[string]string{
+					"enablePreScan": "{{enablePreScanDecision}}",
+				})
+			}
+		})
+	}
+}
+
+func TestSuperdomainAIWorkflowFollowupTogglesExposed(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+		"superdomain-extensive-ai-lite",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			assertWorkflowHasParam(t, workflow, "enableTargetedRescan", true)
+			assertWorkflowHasParam(t, workflow, "enablePostFollowupCoordination", true)
+			targetedRescan := findModuleRef(t, workflow, "ai-targeted-rescan")
+			postFollowup := findModuleRef(t, workflow, "ai-post-followup-coordination")
+			intelligent := findModuleRef(t, workflow, "ai-intelligent-analysis")
+			applyDecision := findModuleRef(t, workflow, "ai-apply-decision")
+			assertModulePreCondition(t, targetedRescan, "{{enableTargetedRescan}}")
+			assertModulePreCondition(t, postFollowup, "{{enablePostFollowupCoordination}}")
+			assertModulePreCondition(t, intelligent, optionalFlowToggleCondition("enableLlmAnalysis", "enableIntelligentAnalysis"))
+			assertModulePreCondition(t, applyDecision, optionalFlowToggleCondition("enableLlmAnalysis", "enableAiDecision"))
+		})
+	}
+}
+
+func TestDomainExtensiveWorkflowExtendsOptimized(t *testing.T) {
+	root := getRealWorkflowsPath()
+	loader := parser.NewLoader(root)
+
+	workflow, err := loader.LoadWorkflow("domain-superdomain-extensive-ai")
+	require.NoError(t, err)
+
+	assert.Equal(t, "domain-superdomain-extensive-ai", workflow.Name)
+	assert.Equal(t, core.KindFlow, workflow.Kind)
+
+	// The derived flow should inherit the parent AI contract cleanly.
+	assertWorkflowHasParam(t, workflow, "enableLlmAnalysis", true)
+	assertWorkflowHasParam(t, workflow, "enableTargetedRescan", true)
+	assertWorkflowHasParam(t, workflow, "enablePostFollowupCoordination", true)
+	assertWorkflowHasParam(t, workflow, "enableDnsBruteForcing", true)
+	assertWorkflowHasParam(t, workflow, "enablePermutation", true)
+	assertWorkflowHasParam(t, workflow, "commonHttpsPorts", "1-65535")
+	assertWorkflowHasParam(t, workflow, "commonHttpPorts", "1-65535")
+	assertWorkflowLacksParam(t, workflow, "enableDnsBruteFocing")
+	assertWorkflowLacksParam(t, workflow, "commonHttpsPort")
+
+	intelligent := findModuleRef(t, workflow, "ai-intelligent-analysis")
+	applyDecision := findModuleRef(t, workflow, "ai-apply-decision")
+	targetedRescan := findModuleRef(t, workflow, "ai-targeted-rescan")
+	postFollowup := findModuleRef(t, workflow, "ai-post-followup-coordination")
+
+	assertModulePreCondition(t, intelligent, optionalFlowToggleCondition("enableLlmAnalysis", "enableIntelligentAnalysis"))
+	assertModulePreCondition(t, applyDecision, optionalFlowToggleCondition("enableLlmAnalysis", "enableAiDecision"))
+	assertModulePreCondition(t, targetedRescan, "{{enableTargetedRescan}}")
+	assertModulePreCondition(t, postFollowup, "{{enablePostFollowupCoordination}}")
+}
+
+func TestDomainSuperdomainAIWorkflowDryRunSkipsCommandDependencyChecks(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflow("domain-superdomain-extensive-ai")
+	require.NoError(t, err)
+
+	t.Setenv("PATH", "")
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(true)
+	exec.SetSpinner(false)
+	exec.SetLoader(loader)
+
+	result, err := exec.ExecuteFlow(ctx, workflow, map[string]string{
+		"target":            "example.com",
+		"enableLlmAnalysis": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assert.NotEmpty(t, result.ModuleResults)
+}
+
+func TestOptimizedSuperdomainAIWorkflowDryRunSkipsCommandDependencyChecks(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflow("superdomain-extensive-ai-optimized")
+	require.NoError(t, err)
+
+	t.Setenv("PATH", "")
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(true)
+	exec.SetSpinner(false)
+	exec.SetLoader(loader)
+
+	result, err := exec.ExecuteFlow(ctx, workflow, map[string]string{
+		"target":            "example.com",
+		"enableLlmAnalysis": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assert.NotEmpty(t, result.ModuleResults)
+}
+
+func TestWorkflowFilesAvoidLegacyRawAIInliningPatterns(t *testing.T) {
+	root := getRealWorkflowsPath()
+	bannedPatterns := []string{
+		"REPORT_CONTENT=$(cat <<'EOF'",
+		"<< 'AIEOF'",
+		`echo "{{code_review}}"`,
+		`echo "{{correlation}}"`,
+		`pre_condition: '"{{skillName}}" != ""'`,
+		`pre_condition: '"{{searchTerm}}" != ""'`,
+	}
+	rawExportPattern := regexp.MustCompile(`(?m)^\s+([A-Za-z0-9_]+):\s+"\{\{(?:agent_content|acp_output|llm_[A-Za-z0-9_]*content)\}\}"\s*$`)
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".yaml") {
+			return nil
+		}
+		if strings.Contains(path, ".bak") || strings.Contains(path, ".backup") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+		for _, pattern := range bannedPatterns {
+			assert.NotContainsf(t, content, pattern, "workflow=%s", path)
+		}
+		rawExports := rawExportPattern.FindAllStringSubmatch(content, -1)
+		seenRawVars := make(map[string]struct{})
+		for _, match := range rawExports {
+			rawVar := match[1]
+			if _, seen := seenRawVars[rawVar]; seen {
+				continue
+			}
+			seenRawVars[rawVar] = struct{}{}
+			inlinePattern := regexp.MustCompile(`(?s)cat\s+>\s+["']?\$[A-Za-z_][^\n]*<<.*?\n\s*\{\{` + regexp.QuoteMeta(rawVar) + `\}\}\n`)
+			assert.Falsef(t, inlinePattern.MatchString(content), "workflow=%s rawVar=%s should not be inlined into shell heredocs", path, rawVar)
+			templateReusePattern := regexp.MustCompile(`\{\{` + regexp.QuoteMeta(rawVar) + `\}\}`)
+			assert.Falsef(t, templateReusePattern.MatchString(content), "workflow=%s rawVar=%s should not be template-inlined after export; persist it to a file and consume the file instead", path, rawVar)
+			unguardedPersistPattern := regexp.MustCompile(`save_content\(\s*` + regexp.QuoteMeta(rawVar) + `\s*,`)
+			assert.Falsef(t, unguardedPersistPattern.MatchString(content), "workflow=%s rawVar=%s should guard save_content against undefined exports", path, rawVar)
+			guardedPersistPattern := regexp.MustCompile(`save_content\(\s*typeof\s+` + regexp.QuoteMeta(rawVar) + `\s*!==\s*"undefined"\s*\?\s*` + regexp.QuoteMeta(rawVar) + `\s*:\s*""\s*,`)
+			assert.Truef(t, guardedPersistPattern.MatchString(content), "workflow=%s rawVar=%s should persist raw AI output to a file with an undefined guard", path, rawVar)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestSkillsSystemIgnoresEmptySkillAndSearchTermWithoutSyntaxError(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-skills-system.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "example.com",
+		"space_name": "skills-system-empty-input",
+		"skillsDir":  filepath.Join(getRepoRoot(), "osmedeus-base", "skills"),
+		"skillName":  "",
+		"searchTerm": "",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+}
+
+func TestHTTPProbeModuleAcceptsLegacyCommonHttpsPortAlias(t *testing.T) {
+	root := getRealWorkflowsPath()
+	loader := parser.NewLoader(root)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(root, "common", "04-http-probe.yaml"))
+	require.NoError(t, err)
+
+	assertWorkflowHasParam(t, workflow, "commonHttpsPorts", "80,443,8080,8443,8000,8008,81,82,8081,8888,3000,3001,3002,5000,5001,5002,9000,9001,9080,9443")
+	assertWorkflowHasParam(t, workflow, "commonHttpsPort", "")
+
+	var portProbeStep *core.Step
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "http-probe-ports" {
+			portProbeStep = &workflow.Steps[i]
+			break
+		}
+	}
+	require.NotNil(t, portProbeStep)
+	assert.Contains(t, portProbeStep.Command, `HTTPS_PORTS="{{commonHttpsPorts}}"`)
+	assert.Contains(t, portProbeStep.Command, `if [ -n "{{commonHttpsPort}}" ]; then`)
+	assert.Contains(t, portProbeStep.Command, `HTTPS_PORTS="{{commonHttpsPort}}"`)
+	assert.Contains(t, portProbeStep.Command, `https:${HTTPS_PORTS}`)
+}
+
+func TestDNSResolveModuleAcceptsLegacyDnsBruteforceAlias(t *testing.T) {
+	root := getRealWorkflowsPath()
+	loader := parser.NewLoader(root)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(root, "common", "03-dns-resolve.yaml"))
+	require.NoError(t, err)
+
+	assertWorkflowHasParam(t, workflow, "enableDnsBruteForcing", true)
+	assertWorkflowHasParam(t, workflow, "enableDnsBruteFocing", "")
+
+	var bruteStep *core.Step
+	var permutationStep *core.Step
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "dns-bruteforce":
+			bruteStep = &workflow.Steps[i]
+		case "generate-permutations":
+			permutationStep = &workflow.Steps[i]
+		}
+	}
+
+	require.NotNil(t, bruteStep)
+	require.NotNil(t, permutationStep)
+	assert.Contains(t, bruteStep.PreCondition, `"{{enableDnsBruteFocing}}" == ""`)
+	assert.Contains(t, bruteStep.PreCondition, `{{enableDnsBruteForcing}}`)
+	assert.Contains(t, bruteStep.PreCondition, `"{{enableDnsBruteFocing}}" == "true"`)
+	assert.Contains(t, permutationStep.PreCondition, `"{{enableDnsBruteFocing}}" == ""`)
+	assert.Contains(t, permutationStep.PreCondition, `{{enableDnsBruteForcing}}`)
+	assert.Contains(t, permutationStep.PreCondition, `"{{enableDnsBruteFocing}}" == "true"`)
 }
 
 // TestExecuteBashWorkflow tests executing a basic bash workflow
@@ -316,6 +971,7 @@ func TestExecuteBashWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 	assert.Len(t, result.Steps, 1)
 	assert.Equal(t, core.StepStatusSuccess, result.Steps[0].Status)
 }
@@ -341,6 +997,7 @@ func TestExecuteForeachWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	// Should have 4 steps: create-input, process-items (foreach), verify-output, cleanup
 	assert.Len(t, result.Steps, 4)
@@ -372,6 +1029,7 @@ func TestExecuteParallelCommandsWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 	assert.Len(t, result.Steps, 2)
 
 	// All steps should succeed
@@ -401,6 +1059,7 @@ func TestExecuteParallelStepsWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 }
 
 // TestExecuteFunctionsWorkflow tests executing utility functions
@@ -424,6 +1083,7 @@ func TestExecuteFunctionsWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	// All 4 steps should complete successfully
 	assert.Len(t, result.Steps, 4)
@@ -453,6 +1113,7 @@ func TestTimeoutWorkflowSuccess(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	// Both steps should succeed within timeout
 	assert.Len(t, result.Steps, 2)
@@ -566,6 +1227,7 @@ func TestDryRunExecution(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 	// In dry-run mode, output should indicate dry-run
 	assert.Contains(t, result.Steps[0].Output, "DRY-RUN")
 }
@@ -642,6 +1304,1318 @@ func TestDecisionWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+}
+
+func TestExecuteVulnSuitePrioritizeAssetsMatchesDefaultKeywords(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "prioritize-assets" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-priority-keywords"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), strings.Join([]string{
+		"https://www.example.com",
+		"https://login.example.com",
+		"https://api.example.com",
+		"https://static.example.com",
+	}, "\n")+"\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	highPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "high-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://login.example.com",
+		"https://api.example.com",
+	}, strings.Split(strings.TrimSpace(string(highPriorityData)), "\n"))
+
+	normalPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "normal-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://www.example.com",
+		"https://static.example.com",
+	}, strings.Split(strings.TrimSpace(string(normalPriorityData)), "\n"))
+}
+
+func TestExecuteVulnSuitePrioritizeAssetsMergesAppliedDecisionTargets(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "prioritize-assets" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-priority-ai-targets"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), strings.Join([]string{
+		"https://www.example.com",
+		"https://checkout.example.com/invoice",
+		"https://edge.example.com/home",
+	}, "\n")+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"), `{
+  "targets": {
+    "priority_targets": ["https://checkout.example.com/invoice"],
+    "rescan_targets": ["https://edge.example.com/home", "authentication"]
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	highPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "high-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://checkout.example.com/invoice",
+		"https://edge.example.com/home",
+	}, strings.Split(strings.TrimSpace(string(highPriorityData)), "\n"))
+
+	normalPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "normal-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://www.example.com",
+	}, strings.Split(strings.TrimSpace(string(normalPriorityData)), "\n"))
+}
+
+func TestExecuteVulnSuitePrioritizeAssetsMatchesAIFragmentsWithinHTTPAssets(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "prioritize-assets" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-priority-ai-fragments"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), strings.Join([]string{
+		"https://www.example.com",
+		"https://checkout.example.com/invoice",
+		"https://edge.example.com/home",
+	}, "\n")+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"), `{
+  "targets": {
+    "priority_targets": ["checkout.example.com"],
+    "rescan_targets": ["edge.example.com/home", "authentication"]
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	highPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "high-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://checkout.example.com/invoice",
+		"https://edge.example.com/home",
+	}, strings.Split(strings.TrimSpace(string(highPriorityData)), "\n"))
+
+	normalPriorityData, err := os.ReadFile(filepath.Join(vulnDir, "normal-priority-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"https://www.example.com",
+	}, strings.Split(strings.TrimSpace(string(normalPriorityData)), "\n"))
+}
+
+func TestExecuteVulnSuiteNucleiScanFallsBackToValidDecisionAndSkipsEmptyPriorityFile(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "nuclei-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-nuclei-ai-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	emptyHighPriorityFile := filepath.Join(vulnDir, "high-priority-"+targetSpace+".txt")
+	nucleiCallsPath := filepath.Join(t.TempDir(), "nuclei-calls.log")
+
+	writeTestFile(t, httpFile, "https://scan.example.com\n")
+	writeTestFile(t, emptyHighPriorityFile, "")
+	writeTestFile(t, filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"), `{"scan":`)
+	writeTestFile(t, filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"), `{
+  "suggested_threads": 17,
+  "suggested_rate_limit": 77,
+  "recommended_timeout": "7h",
+  "nuclei_severity": "critical,high,medium",
+  "reasoning": "fallback to valid ai decision"
+}`)
+
+	installStubCommand(t, "timeout", `#!/bin/sh
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+[ "$#" -gt 0 ] && shift
+exec "$@"
+`)
+	installStubCommand(t, "nuclei", fmt.Sprintf(`#!/bin/sh
+log=%q
+out=""
+list=""
+severity=""
+threads=""
+rate=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -l)
+      list="$2"
+      shift 2
+      ;;
+    -severity)
+      severity="$2"
+      shift 2
+      ;;
+    -c)
+      threads="$2"
+      shift 2
+      ;;
+    -rate-limit)
+      rate="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf 'list=%%s severity=%%s threads=%%s rate=%%s out=%%s\n' "$list" "$severity" "$threads" "$rate" "$out" >> "$log"
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  : > "$out"
+fi
+exit 0
+`, nucleiCallsPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                       "https://app.example.com",
+		"space_name":                   targetSpace,
+		"enableAssetPrioritization":    "true",
+		"enableSmartTemplateSelection": "false",
+		"enableWafAwareScan":           "false",
+		"enableUserAgentRotation":      "false",
+		"enableProxyRotation":          "false",
+		"enableJitter":                 "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	nucleiCallsData, err := os.ReadFile(nucleiCallsPath)
+	require.NoError(t, err)
+	callLines := strings.Split(strings.TrimSpace(string(nucleiCallsData)), "\n")
+	require.Len(t, callLines, 1)
+	assert.Contains(t, callLines[0], "list="+httpFile)
+	assert.Contains(t, callLines[0], "severity=critical,high,medium")
+	assert.Contains(t, callLines[0], "threads=17")
+	assert.Contains(t, callLines[0], "rate=77")
+	assert.NotContains(t, callLines[0], "high-priority-"+targetSpace+".txt")
+}
+
+func TestExecuteVulnSuiteNucleiDastFallsBackToLinksFileWhenUrlExtractMissing(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "nuclei-dast-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-nuclei-dast-fallback-links"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	linksFile := filepath.Join(outputDir, "links", "links-"+targetSpace+".txt")
+	nucleiCallsPath := filepath.Join(t.TempDir(), "nuclei-dast-calls.log")
+
+	writeTestFile(t, linksFile, "https://links.example.com/api\n")
+	installStubCommand(t, "nuclei", fmt.Sprintf(`#!/bin/sh
+log=%q
+out=""
+list=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -l)
+      list="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf 'list=%%s out=%%s\n' "$list" "$out" >> "$log"
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  printf '%%s\n' '{"template-id":"dast-test","info":{"severity":"medium"},"matched-at":"https://links.example.com/api"}' > "$out"
+fi
+exit 0
+`, nucleiCallsPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	nucleiCallsData, err := os.ReadFile(nucleiCallsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(nucleiCallsData), "list="+linksFile)
+
+	dastOutputData, err := os.ReadFile(filepath.Join(vulnDir, "nuclei-dast-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dastOutputData), "[dast-test] [medium] https://links.example.com/api")
+}
+
+func TestExecuteVulnSuiteNucleiDastFormatsOutputAfterLargeInputFallback(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "nuclei-dast-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-nuclei-dast-large-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	urlExtractFile := filepath.Join(outputDir, "links", "url-extract-"+targetSpace+".txt")
+	nucleiCallsPath := filepath.Join(t.TempDir(), "nuclei-dast-large-calls.log")
+
+	var targets strings.Builder
+	for i := 0; i < 1501; i++ {
+		targets.WriteString(fmt.Sprintf("https://api.example.com/item/%d\n", i))
+	}
+	writeTestFile(t, urlExtractFile, targets.String())
+
+	installStubCommand(t, "nuclei", fmt.Sprintf(`#!/bin/sh
+log=%q
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -l)
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+stdin_count=$(cat | wc -l | tr -d ' ')
+printf 'stdin_count=%%s out=%%s\n' "$stdin_count" "$out" >> "$log"
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  printf '%%s\n' '{"template-id":"dast-large","info":{"severity":"high"},"matched-at":"https://api.example.com/item/0"}' > "$out"
+fi
+exit 0
+`, nucleiCallsPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	nucleiCallsData, err := os.ReadFile(nucleiCallsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(nucleiCallsData), "stdin_count=1500")
+
+	dastOutputData, err := os.ReadFile(filepath.Join(vulnDir, "nuclei-dast-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dastOutputData), "[dast-large] [high] https://api.example.com/item/0")
+}
+
+func TestExecuteVulnSuiteSmugglingScanWrapsPipelineWithShellTimeout(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "smuggling-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-smuggling-timeout-shell"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	timeoutCallsPath := filepath.Join(t.TempDir(), "timeout-calls.log")
+
+	writeTestFile(t, httpFile, "https://smuggle.example.com\n")
+	installStubCommand(t, "smugglex", `#!/bin/sh
+printf '%s\n' '{"target":"https://smuggle.example.com","issue":"te-cl"}'
+`)
+	installStubCommand(t, "timeout", fmt.Sprintf(`#!/bin/sh
+log=%q
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+[ "$#" -gt 0 ] && shift
+printf 'cmd=%%s\n' "$*" >> "$log"
+exec "$@"
+`, timeoutCallsPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	timeoutCallsData, err := os.ReadFile(timeoutCallsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(timeoutCallsData), "cmd=sh -c")
+
+	smugglingOutputData, err := os.ReadFile(filepath.Join(vulnDir, "smuggling-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(smugglingOutputData), `"target":"https://smuggle.example.com"`)
+}
+
+func TestExecuteVulnSuiteTestsslScanWrapsEachTargetWithTimeout(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "testssl-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-testssl-timeout"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	timeoutCallsPath := filepath.Join(t.TempDir(), "testssl-timeout-calls.log")
+
+	writeTestFile(t, httpFile, "https://tls.example.com:8443/login\nhttp://ignored.example.com\n")
+	installStubCommand(t, "testssl.sh", `#!/bin/sh
+target=""
+for arg in "$@"; do
+  target="$arg"
+done
+printf 'TLS OK %s\n' "$target"
+`)
+	installStubCommand(t, "timeout", fmt.Sprintf(`#!/bin/sh
+log=%q
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+duration="$1"
+shift
+printf 'duration=%%s cmd=%%s\n' "$duration" "$*" >> "$log"
+exec "$@"
+`, timeoutCallsPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":             "https://app.example.com",
+		"space_name":         targetSpace,
+		"testsslTimeout":     "7m",
+		"testsslTargetLimit": "10",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	timeoutCallsData, err := os.ReadFile(timeoutCallsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(timeoutCallsData), "duration=7m")
+	assert.Contains(t, string(timeoutCallsData), "testssl.sh --quiet --color 0 tls.example.com:8443")
+
+	testsslOutputData, err := os.ReadFile(filepath.Join(outputDir, "vuln-scan-suite", "testssl-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(testsslOutputData), "Testing tls.example.com:8443")
+	assert.Contains(t, string(testsslOutputData), "TLS OK tls.example.com:8443")
+}
+
+func TestExecuteVulnSuiteSprayingScanFallsBackToServiceFingerprintsWhenGnmapMissing(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "spraying-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-spraying-brutus-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	serviceFingerprints := filepath.Join(outputDir, "ipspace", "service_fingerprints.jsonl")
+	brutusInputPath := filepath.Join(t.TempDir(), "brutus-stdin.log")
+
+	writeTestFile(t, serviceFingerprints, `{"host":"192.0.2.10","port":22,"service":"ssh"}`+"\n")
+	installStubCommand(t, "timeout", `#!/bin/sh
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+[ "$#" -gt 0 ] && shift
+exec "$@"
+`)
+	installStubCommand(t, "brutus", fmt.Sprintf(`#!/bin/sh
+stdin_log=%q
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -u|-p)
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat > "$stdin_log"
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  printf '%%s\n' '{"host":"192.0.2.10","service":"ssh","username":"root","password":"toor"}' > "$out"
+fi
+exit 0
+`, brutusInputPath))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":          "https://app.example.com",
+		"space_name":      targetSpace,
+		"sprayingEngine":  "brutus",
+		"sprayingTimeout": "5m",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	brutusInputData, err := os.ReadFile(brutusInputPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(brutusInputData), `"service":"ssh"`)
+
+	sprayingOutputData, err := os.ReadFile(filepath.Join(outputDir, "vuln-scan-suite", "spraying-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(sprayingOutputData), "=== Brutus Results ===")
+	assert.Contains(t, string(sprayingOutputData), `"host":"192.0.2.10"`)
+}
+
+func TestExecuteVulnSuiteSecretHTTPScanWritesResultsWithoutSetupStep(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "secret-http-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-secret-http"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+
+	writeTestFile(t, httpFile, "https://secret.example.com/config\n")
+	installStubCommand(t, "curl", `#!/bin/sh
+url=""
+for arg in "$@"; do
+  url="$arg"
+done
+printf 'AWS_SECRET_ACCESS_KEY=demo-for-%s\n' "$url"
+`)
+	installStubCommand(t, "trufflehog", `#!/bin/sh
+dir="$2"
+if grep -R -q "AWS_SECRET_ACCESS_KEY" "$dir" 2>/dev/null; then
+  printf '%s\n' '{"DetectorName":"AWS","Raw":"AWS_SECRET_ACCESS_KEY=demo"}'
+fi
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "https://app.example.com",
+		"space_name":    targetSpace,
+		"secretThreads": "1",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	secretsOutputData, err := os.ReadFile(filepath.Join(vulnDir, "secrets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(secretsOutputData), `"DetectorName":"AWS"`)
+
+	_, err = os.Stat(filepath.Join(vulnDir, "http-content"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestExecuteVulnSuiteSecretJSScanWritesResultsWithoutSetupStep(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "secret-js-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-secret-js"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	jsUrlsFile := filepath.Join(outputDir, "content-analysis", "js-urls-"+targetSpace+".txt")
+
+	writeTestFile(t, jsUrlsFile, "https://static.example.com/app.js\n")
+	installStubCommand(t, "curl", `#!/bin/sh
+printf 'const token = "ghp_demo_secret_value";\n'
+`)
+	installStubCommand(t, "trufflehog", `#!/bin/sh
+dir="$2"
+if grep -R -q "ghp_demo_secret_value" "$dir" 2>/dev/null; then
+  printf '%s\n' '{"DetectorName":"GitHub","Raw":"ghp_demo_secret_value"}'
+fi
+`)
+	installStubCommand(t, "jq", `#!/bin/sh
+cat
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "https://app.example.com",
+		"space_name":    targetSpace,
+		"secretThreads": "1",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	secretsOutputData, err := os.ReadFile(filepath.Join(vulnDir, "secrets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(secretsOutputData), `"DetectorName":"GitHub"`)
+
+	_, err = os.Stat(filepath.Join(vulnDir, "js-content"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestExecuteVulnSuiteWebcacheScanWritesOutputWithoutSetupStep(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "webcache-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-webcache"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	toolsDir := filepath.Join(t.TempDir(), "tools")
+
+	writeTestFile(t, httpFile, "https://cache.example.com\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(toolsDir, "Web-Cache-Vulnerability-Scanner"), 0755))
+
+	installStubCommand(t, "timeout", `#!/bin/sh
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+[ "$#" -gt 0 ] && shift
+exec "$@"
+`)
+	installStubCommand(t, "Web-Cache-Vulnerability-Scanner", `#!/bin/sh
+printf 'cache-key mismatch on https://cache.example.com\n'
+`)
+	installStubCommand(t, "anew", `#!/bin/sh
+if [ "$1" = "-q" ]; then
+  shift
+fi
+dest="$1"
+mkdir -p "$(dirname "$dest")"
+cat >> "$dest"
+`)
+	installStubCommand(t, "toxicache", `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  printf 'toxicache-result\n' > "$out"
+fi
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":          "https://app.example.com",
+		"space_name":      targetSpace,
+		"toolsDir":        toolsDir,
+		"webcacheTimeout": "5m",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	webcacheOutputData, err := os.ReadFile(filepath.Join(vulnDir, "webcache-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(webcacheOutputData), "cache-key mismatch")
+
+	toxicacheOutputData, err := os.ReadFile(filepath.Join(vulnDir, "webcache_toxicache.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(toxicacheOutputData), "toxicache-result")
+}
+
+func TestExecuteVulnSuite4xxBypassScanWritesOutputWithoutSetupStep(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "4xx-bypass-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-4xx-bypass"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	toolsDir := filepath.Join(t.TempDir(), "tools")
+	nomore403Dir := filepath.Join(toolsDir, "nomore403")
+
+	writeTestFile(t, httpFile, "https://forbidden.example.com/admin\n")
+	require.NoError(t, os.MkdirAll(nomore403Dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(nomore403Dir, "nomore403"), []byte(`#!/bin/sh
+while IFS= read -r url; do
+  printf '%s => bypassed via X-Rewrite-URL\n' "$url"
+done
+`), 0755))
+
+	installStubCommand(t, "timeout", `#!/bin/sh
+if [ "$1" = "-k" ]; then
+  shift 2
+fi
+[ "$#" -gt 0 ] && shift
+exec "$@"
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "https://app.example.com",
+		"space_name":    targetSpace,
+		"toolsDir":      toolsDir,
+		"bypassTimeout": "5m",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	bypassOutputData, err := os.ReadFile(filepath.Join(vulnDir, "4xx-bypass-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(bypassOutputData), "https://forbidden.example.com/admin")
+	assert.Contains(t, string(bypassOutputData), "bypassed via X-Rewrite-URL")
+}
+
+func TestExecuteVulnSuiteFrayScanWritesOutputWithoutGlobalTmp(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "fray-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-fray"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	frayDir := filepath.Join(vulnDir, "fray")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+
+	writeTestFile(t, httpFile, "https://waf.example.com/login\n")
+	installStubCommand(t, "fray", `#!/bin/sh
+category=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    test)
+      shift
+      ;;
+    -c)
+      category="$2"
+      shift 2
+      ;;
+    --max|-t|-d)
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+while IFS= read -r url; do
+  printf '{"target":"%s","bypass_rate":"100%%","bypassed":1,"total":1,"category":"%s"}\n' "$url" "$category"
+done
+`)
+	installStubCommand(t, "jq", `#!/bin/sh
+mode=""
+if [ "$1" = "-r" ] || [ "$1" = "-c" ]; then
+  mode="$1"
+  shift
+fi
+if [ "$mode" = "-c" ] && [ "$#" -eq 0 ]; then
+  cat
+  exit 0
+fi
+filter=""
+if [ "$#" -gt 0 ]; then
+  filter="$1"
+  shift
+fi
+input=""
+if [ "$#" -gt 0 ]; then
+  input="$1"
+fi
+if [ -n "$input" ] && [ -f "$input" ]; then
+  exec < "$input"
+fi
+while IFS= read -r line; do
+  target=$(printf '%s' "$line" | sed -n 's/.*"target":"\([^"]*\)".*/\1/p')
+  bypass_rate=$(printf '%s' "$line" | sed -n 's/.*"bypass_rate":"\([^"]*\)".*/\1/p')
+  bypassed=$(printf '%s' "$line" | sed -n 's/.*"bypassed":\([0-9][0-9]*\).*/\1/p')
+  total=$(printf '%s' "$line" | sed -n 's/.*"total":\([0-9][0-9]*\).*/\1/p')
+  if [ -n "$filter" ] && [ -n "$target" ] && [ -n "$bypassed" ] && [ "$bypassed" -gt 0 ]; then
+    printf '%s [bypass_rate:%s] %s/%s payloads bypassed WAF\n' "$target" "$bypass_rate" "$bypassed" "$total"
+    continue
+  fi
+  printf '%s\n' "$line"
+done
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":          "https://app.example.com",
+		"space_name":      targetSpace,
+		"frayCategories":  "sqli, cmdi",
+		"frayMaxPayloads": "5",
+		"frayTimeout":     "10",
+		"frayDelay":       "0.1",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	sqliOutputData, err := os.ReadFile(filepath.Join(frayDir, "sqli.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(sqliOutputData), "https://waf.example.com/login")
+	assert.Contains(t, string(sqliOutputData), "payloads bypassed WAF")
+
+	cmdiOutputData, err := os.ReadFile(filepath.Join(frayDir, "cmdi.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(cmdiOutputData), "https://waf.example.com/login")
+
+	frayTemps, err := filepath.Glob(filepath.Join(frayDir, ".fray-*.json"))
+	require.NoError(t, err)
+	assert.Len(t, frayTemps, 0)
+}
+
+func TestExecuteVulnSuiteCommandInjectionLargeInputStillExtractsResults(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "command-injection-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-command-injection-large"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	vulnDir := filepath.Join(outputDir, "vuln-scan-suite")
+	gfRceFile := filepath.Join(outputDir, "gf", "rce-"+targetSpace+".txt")
+
+	var targets strings.Builder
+	for i := 0; i < 501; i++ {
+		targets.WriteString(fmt.Sprintf("https://cmdi.example.com/run/%d?cmd=FUZZ\n", i))
+	}
+	writeTestFile(t, gfRceFile, targets.String())
+
+	installStubCommand(t, "qsreplace", `#!/bin/sh
+cat
+`)
+	installStubCommand(t, "commix", `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-dir)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ -n "$out" ]; then
+  mkdir -p "$out/session-1"
+  printf 'target appears vulnerable to command injection\n' > "$out/session-1/log.txt"
+fi
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	commandInjectionOutputData, err := os.ReadFile(filepath.Join(vulnDir, "command-injection-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(commandInjectionOutputData), "vulnerable")
+	assert.Contains(t, string(commandInjectionOutputData), "injection")
+}
+
+func TestExecuteIncrementalCheckDetectsOnlyNewAssetsWithoutProcessSubstitution(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "00-incremental-check.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "incremental-check-diff"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	incrementalDir := filepath.Join(outputDir, ".incremental")
+	backupDir := filepath.Join(outputDir, "backup")
+	subdomainFile := filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt")
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	resolvedFile := filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt")
+
+	writeTestFile(t, filepath.Join(backupDir, "subdomain-"+targetSpace+".txt"), "old.example.com\n")
+	writeTestFile(t, filepath.Join(incrementalDir, "previous", "http.txt"), "https://old.example.com\n")
+	writeTestFile(t, subdomainFile, "old.example.com\nnew.example.com\n")
+	writeTestFile(t, httpFile, "https://old.example.com\nhttps://new.example.com\n")
+	writeTestFile(t, resolvedFile, "old.example.com\nnew.example.com\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	newSubdomainsData, err := os.ReadFile(filepath.Join(incrementalDir, "new-subdomains.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "new.example.com\n", string(newSubdomainsData))
+
+	newHTTPData, err := os.ReadFile(filepath.Join(incrementalDir, "new-http.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "https://new.example.com\n", string(newHTTPData))
+
+	reportData, err := os.ReadFile(filepath.Join(incrementalDir, "incremental-report.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(reportData), "New Subdomains: 1")
+	assert.Contains(t, string(reportData), "New HTTP: 1")
+
+	sortedTemps, err := filepath.Glob(filepath.Join(incrementalDir, ".*sorted-*.txt"))
+	require.NoError(t, err)
+	assert.Len(t, sortedTemps, 0)
+
+	var summaryStep *core.StepResult
+	for _, step := range result.Steps {
+		if step != nil && step.StepName == "summary" {
+			summaryStep = step
+			break
+		}
+	}
+	require.NotNil(t, summaryStep)
+	assert.Contains(t, summaryStep.Output, "New subdomains detected: 1")
+	assert.Contains(t, summaryStep.Output, "New HTTP endpoints detected: 1")
+}
+
+func TestExecuteOSINTGithubReposChainWorksWithoutSetupStep(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "01-osint.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name != "github-repos-enum" && workflow.Steps[i].Name != "github-repos-secrets-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "osint-github-repos"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	osintDir := filepath.Join(outputDir, "osint")
+	githubTokensFile := filepath.Join(outputDir, "config", "github_tokens.txt")
+
+	writeTestFile(t, githubTokensFile, "ghp_test_token\n")
+	installStubCommand(t, "unfurl", `#!/bin/sh
+cat
+`)
+	installStubCommand(t, "enumerepo", `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+company=$(cat)
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")"
+  printf '[{"company":"%s","repos":[{"url":"https://github.com/example/demo-repo.git"}]}]\n' "$company" > "$out"
+fi
+`)
+	installStubCommand(t, "jq", `#!/bin/sh
+if [ "$1" = "-r" ]; then
+  shift
+  [ "$#" -gt 0 ] && shift
+  input="$1"
+  if [ -n "$input" ] && [ -f "$input" ]; then
+    sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$input"
+  fi
+  exit 0
+fi
+if [ "$1" = "-c" ]; then
+  cat
+  exit 0
+fi
+cat
+`)
+	installStubCommand(t, "git", `#!/bin/sh
+if [ "$1" = "clone" ]; then
+  repo="$2"
+  dest="$3"
+  mkdir -p "$dest"
+  printf 'cloned %s\n' "$repo" > "$dest/README.md"
+  exit 0
+fi
+exit 1
+`)
+	installStubCommand(t, "titus", `#!/bin/sh
+dir=""
+for arg in "$@"; do
+  dir="$arg"
+done
+repo=$(basename "$dir")
+printf '{"engine":"titus","repo":"%s","secret":"demo-token"}\n' "$repo"
+`)
+	installStubCommand(t, "trufflehog", `#!/bin/sh
+repo=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    git)
+      shift
+      [ "$#" -gt 0 ] && repo="$1"
+      shift
+      ;;
+    -j)
+      shift
+      ;;
+    *)
+      repo="$1"
+      shift
+      ;;
+  esac
+done
+printf '{"engine":"trufflehog","repo":"%s","secret":"demo-token"}\n' "$repo"
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":            "example.com",
+		"space_name":        targetSpace,
+		"githubTokensFile":  githubTokensFile,
+		"enableGithubRepos": "true",
+		"secretsEngine":     "titus",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	companyReposData, err := os.ReadFile(filepath.Join(outputDir, ".tmp", "company_repos_url.txt"))
+	require.NoError(t, err)
+	assert.Contains(t, string(companyReposData), "https://github.com/example/demo-repo.git")
+
+	_, err = os.Stat(filepath.Join(outputDir, ".tmp", "github_repos", "demo-repo"))
+	require.NoError(t, err)
+
+	githubSecretsData, err := os.ReadFile(filepath.Join(osintDir, "github-company-secrets-"+targetSpace+".json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(githubSecretsData), `"engine":"titus"`)
+	assert.Contains(t, string(githubSecretsData), `"engine":"trufflehog"`)
 }
 
 func TestExecuteAICampaignHandoffModule(t *testing.T) {
@@ -718,6 +2692,7 @@ func TestExecuteAICampaignHandoffModule(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 	assert.Len(t, result.Steps, 6)
 	for _, step := range result.Steps {
 		assert.Equal(t, core.StepStatusSuccess, step.Status, "Step %s failed", step.StepName)
@@ -798,6 +2773,7 @@ func TestExecuteAICampaignHandoffModule(t *testing.T) {
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "--settings-file "+cfg.GetSettingsFilePath())
 	assert.Contains(t, callLine, "--json campaign create")
 	assert.Contains(t, callLine, "--name "+targetSpace+"-ai-handoff")
 	assert.Contains(t, callLine, "-f web-classic")
@@ -869,6 +2845,7 @@ func TestExecuteAICampaignHandoffFallbackTargets(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	targetsData, err := os.ReadFile(filepath.Join(aiDir, "campaign-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
@@ -939,6 +2916,7 @@ func TestExecuteAICampaignHandoffConsumesQueuedPreviousFollowupTargetLists(t *te
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	targetsData, err := os.ReadFile(filepath.Join(aiDir, "campaign-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
@@ -1025,6 +3003,7 @@ func TestExecuteAICampaignHandoffIncludesRetestAndRescanSeedTargetsFromPreviousF
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	targetsData, err := os.ReadFile(filepath.Join(aiDir, "campaign-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
@@ -1097,6 +3076,7 @@ func TestExecuteAIOperatorQueueConsumesQueuedPreviousFollowupTargetLists(t *test
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	contextData, err := os.ReadFile(filepath.Join(aiDir, ".input", "operator-queue-context.json"))
 	require.NoError(t, err)
@@ -1191,6 +3171,7 @@ func TestExecuteAIOperatorQueuePrefersDecisionFollowupSemanticContext(t *testing
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	contextData, err := os.ReadFile(filepath.Join(aiDir, ".input", "operator-queue-context.json"))
 	require.NoError(t, err)
@@ -1246,6 +3227,7 @@ func TestExecuteAIOperatorQueueFallbackPreservesRetestPlanOrder(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	queueData, err := os.ReadFile(filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -1628,6 +3610,7 @@ func TestExecuteAIRetestQueueModule(t *testing.T) {
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "--settings-file "+cfg.GetSettingsFilePath())
 	assert.Contains(t, callLine, "worker queue new -m vuln-validation")
 	assert.Contains(t, callLine, "-p knowledgeWorkspace=shared-kb")
 	assert.Contains(t, callLine, "-p campaign_stage=retest")
@@ -2549,6 +4532,72 @@ func TestExecuteAIRetestPlanningFallsBackToSemanticTargets(t *testing.T) {
 	}, strings.Split(strings.TrimSpace(string(retestTargetsData)), "\n"))
 }
 
+func TestExecuteAIRetestPlanningGracefullyHandlesNoArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-retest-planning.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-retest-planning-no-artifacts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	_, err = os.Stat(filepath.Join(aiDir, ".retest-plan-skip"))
+	require.NoError(t, err)
+
+	planData, err := os.ReadFile(filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var plan map[string]interface{}
+	require.NoError(t, json.Unmarshal(planData, &plan))
+
+	summary, ok := plan["summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "web-analysis", summary["recommended_flow"])
+	assert.Equal(t, "high", summary["priority"])
+	assert.Equal(t, float64(0), summary["total_targets"])
+	assert.Equal(t, "No actionable retest targets", summary["objective"])
+
+	targets, ok := plan["targets"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, targets)
+
+	manualChecks, ok := plan["manual_checks"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, manualChecks)
+
+	automationQueue, ok := plan["automation_queue"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, automationQueue)
+
+	retestTargetsData, err := os.ReadFile(filepath.Join(aiDir, "retest-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(retestTargetsData)))
+
+	markdownData, err := os.ReadFile(filepath.Join(aiDir, "retest-plan-"+targetSpace+".md"))
+	require.NoError(t, err)
+	markdown := string(markdownData)
+	assert.Contains(t, markdown, "Total targets: 0")
+	assert.Contains(t, markdown, "No actionable retest targets")
+}
+
 func TestExecuteAIIntelligentAnalysisModule(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -2631,6 +4680,7 @@ func TestExecuteAIIntelligentAnalysisModule(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 	assert.Len(t, result.Steps, 8)
 	for _, step := range result.Steps {
 		assert.Equal(t, core.StepStatusSuccess, step.Status, "Step %s failed", step.StepName)
@@ -2674,6 +4724,16 @@ func TestExecuteAIIntelligentAnalysisModule(t *testing.T) {
 	var status map[string]interface{}
 	require.NoError(t, json.Unmarshal(statusData, &status))
 	assert.Equal(t, "completed", status["overall_status"])
+
+	summaryData, err := os.ReadFile(filepath.Join(aiDir, "intelligent-analysis-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var summary map[string]interface{}
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "completed", summary["overall_status"])
+
+	artifacts, ok := summary["artifacts"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"), artifacts["decision_file"])
 }
 
 func TestExecuteAIIntelligentAnalysisFallsBackToDecisionFollowupSemanticPriorityTargets(t *testing.T) {
@@ -2709,6 +4769,7 @@ func TestExecuteAIIntelligentAnalysisFallsBackToDecisionFollowupSemanticPriority
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	decisionData, err := os.ReadFile(filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -2770,6 +4831,7 @@ func TestExecuteAIIntelligentAnalysisCountsSemanticResultsFromArrays(t *testing.
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	analysisData, err := os.ReadFile(filepath.Join(aiDir, "aggregated-results.json"))
 	require.NoError(t, err)
@@ -2853,6 +4915,7 @@ func TestExecuteAIApplyDecisionMergesPreviousFollowup(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	appliedData, err := os.ReadFile(filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -2942,6 +5005,7 @@ func TestExecuteAIApplyDecisionFallbackToPreviousFollowup(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	appliedData, err := os.ReadFile(filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3026,6 +5090,7 @@ func TestExecuteAIApplyDecisionFallbackToSeedOnlyFollowup(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	appliedData, err := os.ReadFile(filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3119,6 +5184,7 @@ func TestExecuteAIApplyDecisionFallbackToRetestAndSemanticSeedTargets(t *testing
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	appliedData, err := os.ReadFile(filepath.Join(aiDir, "applied-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3222,6 +5288,7 @@ func TestExecuteAIPreScanDecisionFallbackToPreviousFollowup(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
@@ -3258,6 +5325,72 @@ func TestExecuteAIPreScanDecisionFallbackToPreviousFollowup(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, preReuseSources, "campaign-create")
 	assert.Contains(t, preReuseSources, "operator-queue")
+}
+
+func TestExecuteAIPreScanDecisionInvalidJSONFallsBackToSubdomainList(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan-analysis" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-invalid-json-fallback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	expectedTargets := []string{
+		"www.example.com",
+		"admin.example.com",
+		"api.example.com",
+	}
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), strings.Join(expectedTargets, "\n")+"\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "example.com",
+		"space_name":    targetSpace,
+		"pre_scan_json": "invalid-json",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	priorityTargets := strings.Split(strings.TrimSpace(string(priorityTargetsData)), "\n")
+	assert.ElementsMatch(t, expectedTargets, priorityTargets)
+
+	preDecisionData, err := os.ReadFile(filepath.Join(aiDir, "pre-ai-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var preDecision map[string]interface{}
+	require.NoError(t, json.Unmarshal(preDecisionData, &preDecision))
+
+	preDecisionPriority, ok := preDecision["priority_targets"].([]interface{})
+	require.True(t, ok)
+	assert.ElementsMatch(t, []interface{}{
+		"www.example.com",
+		"admin.example.com",
+		"api.example.com",
+	}, preDecisionPriority)
+
+	decisionInputs, ok := preDecision["decision_inputs"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "none", decisionInputs["previous_followup_source_kind"])
+	assert.Equal(t, float64(0), decisionInputs["previous_followup_targets"])
 }
 
 func TestExecuteAIPreScanDecisionACPBuildsPreviousFollowupContext(t *testing.T) {
@@ -3322,6 +5455,7 @@ func TestExecuteAIPreScanDecisionACPBuildsPreviousFollowupContext(t *testing.T) 
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-priority-targets.txt"))
 	require.NoError(t, err)
@@ -3414,6 +5548,7 @@ func TestExecuteAIPreScanDecisionFallbackToQueuedPreviousFollowupParams(t *testi
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	summaryData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-summary.json"))
 	require.NoError(t, err)
@@ -3516,6 +5651,7 @@ func TestExecuteAIPreScanDecisionACPBuildsQueuedPreviousFollowupContext(t *testi
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	summaryData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-summary.json"))
 	require.NoError(t, err)
@@ -3538,6 +5674,76 @@ func TestExecuteAIPreScanDecisionACPBuildsQueuedPreviousFollowupContext(t *testi
 	assert.Equal(t, float64(5), counts["targets"])
 	assert.Equal(t, float64(3), counts["priority_targets"])
 	assert.Equal(t, float64(2), counts["focus_areas"])
+}
+
+func TestExecuteAIPreScanDecisionACPNoContextSkipsAndBuildsFallbackDecision(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision-acp.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-acp-no-context"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "example.com",
+		"space_name":            targetSpace,
+		"enablePreScanDecision": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+	for _, step := range result.Steps {
+		if step == nil {
+			continue
+		}
+		assert.NotContainsf(t, step.Output, "count_lines:", "step=%s", step.StepName)
+		assert.NotContainsf(t, step.Output, "command not found", "step=%s", step.StepName)
+	}
+
+	_, err = os.Stat(filepath.Join(aiDir, ".pre-scan-skip"))
+	require.NoError(t, err)
+
+	preScanData, err := os.ReadFile(filepath.Join(aiDir, "pre-scan-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var preScan map[string]interface{}
+	require.NoError(t, json.Unmarshal(preScanData, &preScan))
+	assert.Equal(t, "no_data", preScan["status"])
+
+	preScanSummary, ok := preScan["pre_scan_summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(0), preScanSummary["total_subdomains"])
+	assert.Equal(t, float64(0), preScanSummary["high_value_targets"])
+
+	decisionData, err := os.ReadFile(filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var decision map[string]interface{}
+	require.NoError(t, json.Unmarshal(decisionData, &decision))
+
+	assert.Equal(t, "critical,high", decision["nuclei_severity"])
+	assert.Equal(t, float64(10), decision["suggested_threads"])
+	assert.Equal(t, float64(30), decision["suggested_rate_limit"])
+	assert.Equal(t, "6h", decision["recommended_timeout"])
+
+	priorityTargets, ok := decision["priority_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, priorityTargets)
+
+	decisionInputs, ok := decision["decision_inputs"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "none", decisionInputs["previous_followup_source_kind"])
+	assert.Equal(t, float64(0), decisionInputs["previous_followup_targets"])
 }
 
 func TestExecuteAIApplyDecisionFallbackToPreviousFollowupParams(t *testing.T) {
@@ -3587,6 +5793,7 @@ func TestExecuteAIApplyDecisionFallbackToPreviousFollowupParams(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	appliedData, err := os.ReadFile(filepath.Join(outputDir, "ai-analysis", "applied-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3654,6 +5861,71 @@ func TestExecuteAIApplyDecisionFallbackToPreviousFollowupParams(t *testing.T) {
 	combinedTargetList, ok := decisionInputs["followup_combined_targets_list"].([]interface{})
 	require.True(t, ok)
 	assert.Equal(t, expectedCombined, combinedTargetList)
+}
+
+func TestExecuteAIApplyDecisionUsesDefaultsWithoutDecisionOrFollowup(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-apply-decision.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-apply-decision-defaults"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	appliedData, err := os.ReadFile(filepath.Join(outputDir, "ai-analysis", "applied-ai-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var applied map[string]interface{}
+	require.NoError(t, json.Unmarshal(appliedData, &applied))
+
+	source, ok := applied["source"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "defaults", source["kind"])
+	assert.Equal(t, false, source["followup_used"])
+	assert.Equal(t, "none", source["followup_source_kind"])
+
+	scan, ok := applied["scan"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "focused", scan["profile"])
+	assert.Equal(t, "critical,high", scan["severity"])
+	assert.Equal(t, float64(10), scan["threads"])
+	assert.Equal(t, float64(30), scan["rate_limit"])
+	assert.Equal(t, "6h", scan["timeout"])
+
+	targets, ok := applied["targets"].(map[string]interface{})
+	require.True(t, ok)
+	focusAreas, ok := targets["focus_areas"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, focusAreas)
+	priorityTargets, ok := targets["priority_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, priorityTargets)
+	rescanTargets, ok := targets["rescan_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, rescanTargets)
+
+	decisionInputs, ok := applied["decision_inputs"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, false, decisionInputs["followup_available"])
+	assert.Equal(t, "none", decisionInputs["followup_source_kind"])
+	assert.Equal(t, float64(0), decisionInputs["followup_target_count"])
 }
 
 func TestExecuteAIIntelligentAnalysisConsumesQueuedPreviousFollowupParams(t *testing.T) {
@@ -3805,6 +6077,7 @@ func TestExecuteAIPostFollowupCoordinationBuildsEnrichedSeedSignals(t *testing.T
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3919,6 +6192,7 @@ func TestExecuteAIPostFollowupCoordinationCountsRetestTargetsWithoutSummary(t *t
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -3990,6 +6264,7 @@ func TestExecuteAIPostFollowupCoordinationCountsOperatorTasksFromTaskList(t *tes
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4067,6 +6342,7 @@ func TestExecuteAIPostFollowupCoordinationCountsCampaignAndQueuedRetestsFromArti
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4097,6 +6373,79 @@ func TestExecuteAIPostFollowupCoordinationCountsCampaignAndQueuedRetestsFromArti
 		"https://campaign.example.com/graphql",
 		"https://campaign.example.com/api",
 	}, campaignTargets)
+}
+
+func TestExecuteAIPostFollowupCoordinationHandlesMissingArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-missing-artifacts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var followup map[string]interface{}
+	require.NoError(t, json.Unmarshal(followupData, &followup))
+
+	baseDecision, ok := followup["base_decision"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "no_base_decision", baseDecision["reasoning"])
+
+	followupSummary, ok := followup["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(0), followupSummary["retest_targets"])
+	assert.Equal(t, float64(0), followupSummary["operator_tasks"])
+	assert.Equal(t, float64(0), followupSummary["campaign_targets"])
+	assert.Equal(t, "not_requested", followupSummary["campaign_create_status"])
+	assert.Equal(t, "not_requested", followupSummary["retest_queue_status"])
+
+	seedFocus, ok := followup["seed_focus"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "knowledge-first", seedFocus["priority_mode"])
+	assert.Equal(t, "low", seedFocus["confidence_level"])
+	assert.Equal(t, "knowledge-consolidation", seedFocus["next_phase"])
+	assert.Equal(t, "focused", seedFocus["scan_profile"])
+
+	reuseSources, ok := seedFocus["reuse_sources"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, reuseSources)
+
+	signalScores, ok := seedFocus["signal_scores"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(0), signalScores["escalation_score"])
+
+	nextActions, ok := followup["next_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"Persist the final follow-up decision package for future reruns and manual handoff",
+	}, nextActions)
+
+	markdownData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".md"))
+	require.NoError(t, err)
+	markdown := string(markdownData)
+	assert.Contains(t, markdown, "knowledge-consolidation")
+	assert.Contains(t, markdown, "knowledge-first")
 }
 
 func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
@@ -4170,6 +6519,7 @@ func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	contextData, err := os.ReadFile(filepath.Join(aiDir, "semantic-index", "resolved-search-query-context.json"))
 	require.NoError(t, err)
@@ -4268,6 +6618,7 @@ func TestExecuteAISemanticSearchConsumesQueuedPreviousFollowupParams(t *testing.
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	contextData, err := os.ReadFile(filepath.Join(aiDir, "semantic-index", "resolved-search-query-context.json"))
 	require.NoError(t, err)
@@ -4365,6 +6716,7 @@ func TestExecuteAISemanticSearchFallsBackToDecisionFollowupSemanticPriorityTarge
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	contextData, err := os.ReadFile(filepath.Join(aiDir, "semantic-index", "resolved-search-query-context.json"))
 	require.NoError(t, err)
@@ -4422,6 +6774,7 @@ func TestExecuteAIAttackChainFallbackGeneration(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	attackChainData, err := os.ReadFile(filepath.Join(aiDir, "attack-chain-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4439,6 +6792,61 @@ func TestExecuteAIAttackChainFallbackGeneration(t *testing.T) {
 	bestTargetsData, err := os.ReadFile(filepath.Join(aiDir, "best-path-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
 	assert.Contains(t, string(bestTargetsData), "https://app.example.com/api?id=1")
+}
+
+func TestExecuteAIAttackChainParsesAgentOutputContainingSingleQuotes(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-attack-chain.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-analyze-attack-chains" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-attack-chain-single-quotes"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "vuln-validation-"+targetSpace+".json"), `{
+  "findings": [
+    {"status":"confirmed","type":"SQL Injection","url":"https://app.example.com/api?id=1","severity":"critical"}
+  ]
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":            "https://app.example.com",
+		"space_name":        targetSpace,
+		"attack_chain_json": "analysis\n```json\n{\n  \"attack_chain_summary\": {\n    \"total_chains\": 1,\n    \"critical_chains\": 1,\n    \"most_likely_entry_points\": [\"https://app.example.com/api?id=1\"]\n  },\n  \"attack_chains\": [\n    {\n      \"chain_id\": \"chain-1\",\n      \"chain_name\": \"SQLi via user's search API\",\n      \"entry_point\": {\n        \"vulnerability\": \"SQL Injection\",\n        \"url\": \"https://app.example.com/api?id=1\",\n        \"severity\": \"critical\"\n      },\n      \"chain_steps\": [\n        {\"step\": 1, \"action\": \"probe user's search id\", \"result\": \"error-based signal\"}\n      ],\n      \"final_objective\": \"Extract admin data\",\n      \"difficulty\": \"中\",\n      \"impact\": \"数据泄露\",\n      \"success_probability\": 0.82\n    }\n  ],\n  \"critical_paths\": [\n    {\"path\": [\"search\", \"SQLi\", \"DB\"], \"total_risk\": \"高\"}\n  ]\n}\n```",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	attackChainData, err := os.ReadFile(filepath.Join(aiDir, "attack-chain-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var attackChain map[string]interface{}
+	require.NoError(t, json.Unmarshal(attackChainData, &attackChain))
+
+	chains, ok := attackChain["attack_chains"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, chains, 1)
+
+	firstChain, ok := chains[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "SQLi via user's search API", firstChain["chain_name"])
 }
 
 func TestExecuteAIAttackChainFallsBackToDecisionFollowupContext(t *testing.T) {
@@ -4507,6 +6915,7 @@ func TestExecuteAIAttackChainFallsBackToDecisionFollowupContext(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	preparedData, err := os.ReadFile(filepath.Join(aiDir, "attack-chain-input-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4609,6 +7018,7 @@ func TestExecuteAIAttackChainACPFallsBackToDecisionFollowupContext(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	preparedData, err := os.ReadFile(filepath.Join(aiDir, "attack-chain-input-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4671,6 +7081,7 @@ func TestExecuteAIAttackChainPreservesNoDataSkipOutput(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	_, err = os.Stat(filepath.Join(aiDir, ".attack-chain-skip"))
 	require.NoError(t, err)
@@ -4716,6 +7127,7 @@ func TestExecuteAIAttackChainACPPreservesNoDataSkipOutput(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	_, err = os.Stat(filepath.Join(aiDir, ".attack-chain-skip"))
 	require.NoError(t, err)
@@ -4772,6 +7184,7 @@ func TestExecuteAIVulnValidationFallbackGeneration(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	validationData, err := os.ReadFile(filepath.Join(aiDir, "vuln-validation-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4798,6 +7211,59 @@ func TestExecuteAIVulnValidationFallbackGeneration(t *testing.T) {
 	validatedList, err := os.ReadFile(filepath.Join(aiDir, "validated-vulns-"+targetSpace+".json"))
 	require.NoError(t, err)
 	assert.Contains(t, string(validatedList), "needs_manual_verification")
+}
+
+func TestExecuteAIVulnValidationParsesAgentOutputContainingSingleQuotes(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-vuln-validation.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-validate-vulns" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-vuln-validation-single-quotes"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-critical-"+targetSpace+".txt"), "[critical] https://app.example.com/api?id=1 - admin exposure\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-high-"+targetSpace+".txt"), "[high] https://app.example.com/login - auth weakness\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":          "https://app.example.com",
+		"space_name":      targetSpace,
+		"validation_json": "analysis\n```json\n{\n  \"risk_level\": \"中\",\n  \"confirmed_real\": 0,\n  \"false_positives\": 0,\n  \"needs_manual_verification\": 1,\n  \"findings\": [\n    {\n      \"severity\": \"critical\",\n      \"type\": \"sql-injection\",\n      \"url\": \"https://app.example.com/api?id=1\",\n      \"status\": \"needs_manual_verification\",\n      \"confidence\": 0.81,\n      \"reason\": \"parameter 'id' still needs manual confirmation\",\n      \"evidence\": \"response around 'id' looks unstable\",\n      \"verification_command\": \"curl -sk 'https://app.example.com/api?id=1%27'\"\n    }\n  ],\n  \"high_priority_items\": [\"https://app.example.com/api?id=1 - sql-injection\"]\n}\n```",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	validationData, err := os.ReadFile(filepath.Join(aiDir, "vuln-validation-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var validation map[string]interface{}
+	require.NoError(t, json.Unmarshal(validationData, &validation))
+
+	findings, ok := validation["findings"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, findings, 1)
+
+	firstFinding, ok := findings[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "parameter 'id' still needs manual confirmation", firstFinding["reason"])
+	assert.Equal(t, "curl -sk 'https://app.example.com/api?id=1%27'", firstFinding["verification_command"])
 }
 
 func TestExecuteAIVulnValidationACPFallbackGeneration(t *testing.T) {
@@ -4838,6 +7304,7 @@ func TestExecuteAIVulnValidationACPFallbackGeneration(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	validationData, err := os.ReadFile(filepath.Join(aiDir, "vuln-validation-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4912,6 +7379,7 @@ func TestExecuteAISemanticSearchFallbackNormalization(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	searchData, err := os.ReadFile(filepath.Join(aiDir, "semantic-search-results-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -4985,6 +7453,7 @@ func TestExecuteAISemanticSearchUsesVectorArraysWithoutTotalResults(t *testing.T
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	searchData, err := os.ReadFile(filepath.Join(aiDir, "semantic-search-results-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5021,7 +7490,7 @@ func TestExecuteAISemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.WorkflowsPath = workflowsPath
 
-	installKBSearchStubOsmedeus(t)
+	callsPath := installKBSearchStubOsmedeus(t)
 
 	targetSpace := "ai-semantic-search-local-kb-logs"
 	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
@@ -5045,6 +7514,7 @@ func TestExecuteAISemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	knowledgeIndexData, err := os.ReadFile(filepath.Join(aiDir, "semantic-index", "knowledge-index.txt"))
 	require.NoError(t, err)
@@ -5080,6 +7550,10 @@ func TestExecuteAISemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 	primaryKeywordLog, err := os.ReadFile(filepath.Join(logDir, "semantic-kb-search-primary.log"))
 	require.NoError(t, err)
 	assert.Contains(t, string(primaryKeywordLog), "keyword primary-kb")
+
+	callsData, err := os.ReadFile(callsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(callsData), "--settings-file "+cfg.GetSettingsFilePath())
 }
 
 func TestExecuteAIHybridSemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
@@ -5093,7 +7567,7 @@ func TestExecuteAIHybridSemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.WorkflowsPath = workflowsPath
 
-	installKBSearchStubOsmedeus(t)
+	callsPath := installKBSearchStubOsmedeus(t)
 
 	targetSpace := "ai-hybrid-semantic-search-local-kb-logs"
 	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
@@ -5117,6 +7591,7 @@ func TestExecuteAIHybridSemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	vectorData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-vector-search-results-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5145,6 +7620,43 @@ func TestExecuteAIHybridSemanticSearchUsesWorkspaceLocalKBLogs(t *testing.T) {
 	primaryKeywordLog, err := os.ReadFile(filepath.Join(logDir, "hybrid-kb-search-primary.log"))
 	require.NoError(t, err)
 	assert.Contains(t, string(primaryKeywordLog), "keyword primary-kb")
+
+	resultsData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-search-results-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var resultsPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resultsData, &resultsPayload))
+	priorityTargets, ok := resultsPayload["priority_targets"].([]interface{})
+	require.True(t, ok)
+	assert.NotEmpty(t, priorityTargets)
+
+	highlightsData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-search-highlights-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var highlightsPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(highlightsData, &highlightsPayload))
+	affectedSystems, ok := highlightsPayload["affected_systems"].([]interface{})
+	require.True(t, ok)
+	assert.NotEmpty(t, affectedSystems)
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(string(priorityTargetsData)))
+
+	priorityVulnsData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-priority-vulns-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var priorityVulns []map[string]interface{}
+	require.NoError(t, json.Unmarshal(priorityVulnsData, &priorityVulns))
+
+	agentData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-agent-results-"+targetSpace+".json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(agentData), `"status":"not_applicable"`)
+
+	embeddingsData, err := os.ReadFile(filepath.Join(aiDir, "hybrid-embeddings-"+targetSpace+".json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(embeddingsData), `"status":"not_applicable"`)
+
+	callsData, err := os.ReadFile(callsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(callsData), "--settings-file "+cfg.GetSettingsFilePath())
 }
 
 func TestExecuteAIPathPlanningFallbackGeneration(t *testing.T) {
@@ -5195,6 +7707,7 @@ func TestExecuteAIPathPlanningFallbackGeneration(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	planData, err := os.ReadFile(filepath.Join(aiDir, "path-planning-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5277,6 +7790,7 @@ func TestExecuteAIPathPlanningFallsBackToDecisionFollowupInputs(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	planData, err := os.ReadFile(filepath.Join(aiDir, "path-planning-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5323,6 +7837,7 @@ func TestExecuteAIPathPlanningPreservesNoDataSkipOutput(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	_, err = os.Stat(filepath.Join(aiDir, ".path-planning-skip"))
 	require.NoError(t, err)
@@ -5405,6 +7920,7 @@ func TestExecuteAIPathPlanningACPFallbackUsesPreparedPriorityTargets(t *testing.
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	planData, err := os.ReadFile(filepath.Join(aiDir, "path-planning-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5447,6 +7963,7 @@ func TestExecuteAIPathPlanningACPPreservesNoDataSkipOutput(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
 
 	_, err = os.Stat(filepath.Join(aiDir, ".path-planning-skip"))
 	require.NoError(t, err)
@@ -5676,6 +8193,74 @@ func TestExecuteFinalReportUsesRealOperatorTaskCount(t *testing.T) {
 	aiStats, ok := statistics["ai"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, float64(2), aiStats["operator_tasks"])
+}
+
+func TestExecuteFinalReportHandlesMissingAIFollowupArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "10-report.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "report-missing-ai-followup"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	reportDir := filepath.Join(outputDir, "report")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://a.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "a.example.com\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                 "https://app.example.com",
+		"space_name":             targetSpace,
+		"enableLlmReport":        "false",
+		"enableLlmAttackSurface": "false",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	statsData, err := os.ReadFile(filepath.Join(reportDir, "statistics-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var stats map[string]interface{}
+	require.NoError(t, json.Unmarshal(statsData, &stats))
+
+	statistics, ok := stats["statistics"].(map[string]interface{})
+	require.True(t, ok)
+	aiStats, ok := statistics["ai"].(map[string]interface{})
+	require.True(t, ok)
+
+	assert.Equal(t, float64(0), aiStats["confirmed_findings"])
+	assert.Equal(t, float64(0), aiStats["attack_chains"])
+	assert.Equal(t, float64(0), aiStats["retest_targets"])
+	assert.Equal(t, float64(0), aiStats["operator_tasks"])
+	assert.Equal(t, float64(0), aiStats["campaign_targets"])
+	assert.Equal(t, "not_generated", aiStats["followup_next_phase"])
+	assert.Equal(t, "not_generated", aiStats["priority_mode"])
+	assert.Equal(t, "not_generated", aiStats["confidence_level"])
+	assert.Equal(t, float64(0), aiStats["escalation_score"])
+	assert.Equal(t, false, aiStats["manual_followup_needed"])
+	assert.Equal(t, false, aiStats["campaign_followup_recommended"])
+	assert.Equal(t, false, aiStats["queue_followup_effective"])
+	assert.Equal(t, false, aiStats["campaign_ready"])
+	assert.Equal(t, "not_requested", aiStats["campaign_create_status"])
+	assert.Equal(t, float64(0), aiStats["campaign_create_queued_runs"])
+
+	summaryData, err := os.ReadFile(filepath.Join(reportDir, "executive-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	summaryText := string(summaryData)
+	assert.Contains(t, summaryText, "🧭 下一阶段")
+	assert.Contains(t, summaryText, "| 🧭 下一阶段 | not_generated |")
+	assert.Contains(t, summaryText, "| 🚀 Campaign Create | not_requested |")
 }
 
 func TestExecuteFinalReportFallsBackToDecisionFollowupSemanticPriorityTargets(t *testing.T) {
@@ -6308,6 +8893,7 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "--settings-file "+cfg.GetSettingsFilePath())
 	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
 }
 
@@ -6376,6 +8962,7 @@ func TestExecuteAIKnowledgeAutolearnCountsRealOperationalArtifacts(t *testing.T)
 	callsData, err := os.ReadFile(callsPath)
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "--settings-file "+cfg.GetSettingsFilePath())
 	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
 }
 
@@ -6446,4 +9033,553 @@ func TestExecuteAIKnowledgeAutolearnCountsCampaignAndQueueFromRealArtifacts(t *t
 	require.NoError(t, err)
 	callLine := strings.TrimSpace(string(callsData))
 	assert.Contains(t, callLine, "kb learn -w "+targetSpace+" --scope workspace --include-ai")
+}
+
+func TestExecuteAIDecisionPreservesRawJSONContainingQuotesAndShellSyntax(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-decision.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-strategy-decision-unified" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-decision-raw-shell-syntax"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(cfg.WorkspacesPath, targetSpace, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "content-analysis", "js-endpoints-"+targetSpace+".txt"), "/app.js\n")
+	writeTestFile(t, filepath.Join(outputDir, "content-analysis", "params-"+targetSpace+".json"), "[]")
+	writeTestFile(t, filepath.Join(outputDir, "osint", "emails-"+targetSpace+".txt"), "ops@example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "waf", "waf-"+targetSpace+".txt"), "www.example.com,cloudflare\n")
+	writeTestFile(t, filepath.Join(outputDir, "fingerprint", "http-fingerprint-"+targetSpace+".jsonl"), `{"tech":["nginx"]}`+"\n")
+
+	rawDecision := `{
+  "priority": "高",
+  "risk_level": "高",
+  "nuclei_severity": "critical,high",
+  "suggested_threads": 11,
+  "suggested_rate_limit": 35,
+  "recommended_timeout": "6h",
+  "enable_additional_scans": {
+    "ssrf": true,
+    "ssti": false,
+    "sqli": true,
+    "lfi": false,
+    "takeover": true,
+    "smuggling": false,
+    "webcache": true
+  },
+  "focus_areas": ["admin'panel", "$(printf decision-target)"],
+  "waf_bypass_needed": false,
+  "asset_prioritization": true,
+  "smart_template_selection": true,
+  "reasoning": "raw \"quotes\" and $(printf decision)"
+}`
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":              "example.com",
+		"space_name":          targetSpace,
+		"enableAiDecision":    "true",
+		"enableDynamicConfig": "false",
+		"enableMemory":        "false",
+		"decision_json":       rawDecision,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	decisionData, err := os.ReadFile(filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var decision map[string]interface{}
+	require.NoError(t, json.Unmarshal(decisionData, &decision))
+	assert.Equal(t, `raw "quotes" and $(printf decision)`, decision["reasoning"])
+
+	focusAreas, ok := decision["focus_areas"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, focusAreas, "admin'panel")
+	assert.Contains(t, focusAreas, "$(printf decision-target)")
+}
+
+func TestExecuteAIUnifiedAnalysisPreservesRawJSONContainingSingleQuotes(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-unified-analysis.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "unified-ai-analysis" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-unified-raw-shell-syntax"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(cfg.WorkspacesPath, targetSpace, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-critical-"+targetSpace+".txt"), "[critical] https://www.example.com - auth\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-high-"+targetSpace+".txt"), "[high] https://www.example.com - api\n")
+	writeTestFile(t, filepath.Join(outputDir, "vuln-scan-suite", "secrets-"+targetSpace+".txt"), "secret-token\n")
+	writeTestFile(t, filepath.Join(outputDir, "fingerprint", "http-fingerprint-"+targetSpace+".jsonl"), `{"tech":["nginx"]}`+"\n")
+
+	rawUnified := `{
+  "risk_level": "高",
+  "total_critical": 1,
+  "total_high": 2,
+  "overall_assessment": "it's exploitable $(printf unified)",
+  "findings": [
+    {
+      "severity": "critical",
+      "title": "admin's auth bypass",
+      "description": "raw $(printf finding) preserved"
+    }
+  ],
+  "attack_chains": [],
+  "critical_paths": [],
+  "defense_recommendations": ["rotate secrets"],
+  "verification_checklist": ["verify auth boundary"]
+}`
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "https://app.example.com",
+		"space_name":            targetSpace,
+		"enableUnifiedAnalysis": "true",
+		"enableMemory":          "false",
+		"unified_analysis":      rawUnified,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	unifiedData, err := os.ReadFile(filepath.Join(aiDir, "unified-analysis-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var unified map[string]interface{}
+	require.NoError(t, json.Unmarshal(unifiedData, &unified))
+	assert.Equal(t, "it's exploitable $(printf unified)", unified["overall_assessment"])
+
+	findings, ok := unified["findings"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, findings, 1)
+	firstFinding, ok := findings[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "admin's auth bypass", firstFinding["title"])
+	assert.Equal(t, "raw $(printf finding) preserved", firstFinding["description"])
+}
+
+func TestExecuteAIPreScanDecisionACPHandlesRawJSONContainingShellSyntax(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision-acp.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-acp-raw-shell-syntax"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "osint", "emails-"+targetSpace+".txt"), "ops@example.com\n")
+
+	rawPreScan := `{
+  "pre_scan_summary": {
+    "total_subdomains": 2,
+    "high_value_targets": 1
+  },
+  "priority_targets": [
+    {
+      "subdomain": "admin.example.com",
+      "reason": "contains $(printf admin) and \"quotes\""
+    }
+  ],
+  "scan_strategy": {
+    "focus_areas": ["api $(printf focus)", "login"]
+  }
+}`
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "example.com",
+		"space_name":            targetSpace,
+		"enablePreScanDecision": "true",
+		"pre_scan_json":         rawPreScan,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	preScanData, err := os.ReadFile(filepath.Join(aiDir, "pre-scan-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var preScan map[string]interface{}
+	require.NoError(t, json.Unmarshal(preScanData, &preScan))
+
+	scanStrategy, ok := preScan["scan_strategy"].(map[string]interface{})
+	require.True(t, ok)
+	focusAreas, ok := scanStrategy["focus_areas"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, focusAreas, "api $(printf focus)")
+	assert.Contains(t, focusAreas, "login")
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Contains(t, strings.TrimSpace(string(priorityTargetsData)), "admin.example.com")
+}
+
+func TestExecuteAIPreScanDecisionHandlesRawJSONContainingShellSyntax(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan-analysis" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-raw-shell-syntax"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "osint", "emails-"+targetSpace+".txt"), "ops@example.com\n")
+
+	rawPreScan := `{
+  "pre_scan_summary": {
+    "total_subdomains": 2,
+    "high_value_targets": 1
+  },
+  "priority_targets": [
+    "admin.example.com",
+    "api.example.com $(printf api)"
+  ],
+  "predicted_tech_stack": [
+    "nginx $(printf tech)",
+    "go"
+  ],
+  "focus_areas": [
+    "auth $(printf focus)",
+    "graphql"
+  ],
+  "reasoning": "it's safe $(printf literal)"
+}`
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "example.com",
+		"space_name":    targetSpace,
+		"enablePreScan": "true",
+		"pre_scan_json": rawPreScan,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	preScanData, err := os.ReadFile(filepath.Join(aiDir, "pre-scan-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var preScan map[string]interface{}
+	require.NoError(t, json.Unmarshal(preScanData, &preScan))
+
+	focusAreas, ok := preScan["focus_areas"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, focusAreas, "auth $(printf focus)")
+	assert.Contains(t, focusAreas, "graphql")
+
+	techStack, ok := preScan["predicted_tech_stack"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, techStack, "nginx $(printf tech)")
+	assert.Contains(t, techStack, "go")
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	priorityTargets := strings.TrimSpace(string(priorityTargetsData))
+	assert.Contains(t, priorityTargets, "admin.example.com")
+	assert.Contains(t, priorityTargets, "api.example.com $(printf api)")
+}
+
+func TestExecuteAIPreScanDecisionFallsBackWhenAIStepFailsBeforeExport(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan-analysis" {
+			workflow.Steps[i].Type = core.StepTypeBash
+			workflow.Steps[i].Command = "echo simulated-ai-failure >&2; exit 1"
+			workflow.Steps[i].PreCondition = "true"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-agent-failure"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nadmin.example.com\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "example.com",
+		"space_name":    targetSpace,
+		"enablePreScan": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	preScanData, err := os.ReadFile(filepath.Join(aiDir, "pre-scan-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(preScanData))
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	priorityTargets := strings.TrimSpace(string(priorityTargetsData))
+	assert.Contains(t, priorityTargets, "www.example.com")
+	assert.Contains(t, priorityTargets, "admin.example.com")
+}
+
+func TestExecuteAICodeReviewPersistsFallbackOutputWhenNoRepos(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-code-review.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "ai-code-review", "no-repos-fallback":
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-code-review-no-repos-fallback"
+	aiDir := filepath.Join(cfg.WorkspacesPath, targetSpace, "ai-analysis")
+	rawFallback := "Fallback guidance $(printf fallback)\n- Review exposed admin paths"
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":           "example.com",
+		"space_name":       targetSpace,
+		"enableCodeReview": "true",
+		"fallback_result":  rawFallback,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	rawData, err := os.ReadFile(filepath.Join(aiDir, ".code-review-raw-"+targetSpace+".md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(rawData), "Fallback guidance $(printf fallback)")
+	assert.Contains(t, string(rawData), "Review exposed admin paths")
+
+	reportData, err := os.ReadFile(filepath.Join(aiDir, "code-review-"+targetSpace+".md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(reportData), "Fallback guidance $(printf fallback)")
+	assert.Contains(t, string(reportData), "Review exposed admin paths")
+}
+
+func TestExecuteScanRepoPersistsAgentDeepReviewOutput(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-scan-repo.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	allowed := map[string]struct{}{
+		"create-output-folders":              {},
+		"persist-agent-deep-code-review-raw": {},
+		"save-agent-deep-code-review-report": {},
+	}
+	for i := range workflow.Steps {
+		if _, ok := allowed[workflow.Steps[i].Name]; !ok {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "scan-repo-agent-deep-review"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	rawReview := "# Deep Review\n\n- literal $(printf deep-review)\n- hardcoded token in config"
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "https://repo.example.com/project.git",
+		"space_name":            targetSpace,
+		"enableAgentCodeReview": "true",
+		"agent_review":          rawReview,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	rawData, err := os.ReadFile(filepath.Join(outputDir, "sast", ".agent-code-review-raw-"+targetSpace+".md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(rawData), "literal $(printf deep-review)")
+	assert.Contains(t, string(rawData), "hardcoded token in config")
+
+	reportData, err := os.ReadFile(filepath.Join(outputDir, "sast", "agent-code-review-"+targetSpace+".md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(reportData), "literal $(printf deep-review)")
+	assert.Contains(t, string(reportData), "hardcoded token in config")
+}
+
+func TestExecuteAIAttackPathPreservesLiteralCommandSubstitutionText(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-attack-path.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "attack-chain-analysis", "comprehensive-attack-analysis", "generate-exploit-checklist":
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-attack-path-raw-shell-syntax"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(cfg.WorkspacesPath, targetSpace, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt"), "https://www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-critical-"+targetSpace+".txt"), "[critical] https://www.example.com - auth\n")
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-high-"+targetSpace+".txt"), "[high] https://www.example.com - api\n")
+	writeTestFile(t, filepath.Join(outputDir, "vuln-scan-suite", "secrets-"+targetSpace+".txt"), "secret-token\n")
+
+	rawAttackChain := `{
+  "attack_chains": [
+    {
+      "chain_name": "literal $(printf chain-name)",
+      "chain_description": "admin's chain",
+      "entry_point": "https://app.example.com/admin",
+      "steps": [
+        {"step": 1, "action": "probe $(printf chain-step)", "vulnerability": "auth-bypass", "result": "admin"}
+      ],
+      "difficulty": "中",
+      "impact": "high"
+    }
+  ],
+  "critical_paths": ["literal $(printf critical-path)", "admin's portal"],
+  "recommendations": ["keep literal $(printf chain-rec)"]
+}`
+
+	rawAttackPlan := "Phase 1: inspect $(printf attack-plan)\n- keep admin's portal literal"
+	rawChecklist := "- [P1] verify $(printf checklist)\n- [P2] inspect admin's portal"
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                   "https://app.example.com",
+		"space_name":               targetSpace,
+		"enableAttackPathPlanning": "true",
+		"enableAttackChain":        "true",
+		"attack_chain_json":        rawAttackChain,
+		"attack_plan":              rawAttackPlan,
+		"exploit_checklist":        rawChecklist,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	criticalPathsData, err := os.ReadFile(filepath.Join(aiDir, "critical-paths.txt"))
+	require.NoError(t, err)
+	criticalPathsText := string(criticalPathsData)
+	assert.Contains(t, criticalPathsText, "literal $(printf critical-path)")
+	assert.Contains(t, criticalPathsText, "admin's portal")
+
+	reportData, err := os.ReadFile(filepath.Join(aiDir, "attack-path-"+targetSpace+".md"))
+	require.NoError(t, err)
+	report := string(reportData)
+	assert.Contains(t, report, "Phase 1: inspect $(printf attack-plan)")
+	assert.Contains(t, report, "- [P1] verify $(printf checklist)")
+	assert.Contains(t, report, "admin's portal")
 }

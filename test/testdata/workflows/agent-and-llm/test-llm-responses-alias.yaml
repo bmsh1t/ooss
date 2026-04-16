@@ -1,0 +1,29 @@
+kind: module
+name: test-llm-responses-alias
+description: Test LLM Responses API alias execution
+tags: test,llm,responses,alias
+
+params:
+  - name: target
+    required: true
+    default: example.com
+
+steps:
+  - name: responses-chat-alias
+    type: llm
+    log: "Running LLM via Responses API alias"
+    messages:
+      - role: user
+        content: "Summarize recon priorities for {{Target}}"
+    extra_llm_parameters:
+      use_responses_api: true
+      tools:
+        - type: web_search_preview
+    timeout: 60
+    exports:
+      responses_text: "{{responses_chat_alias_content}}"
+
+  - name: verify-responses-alias-output
+    type: bash
+    log: "Printing Responses API alias result"
+    command: 'echo "Responses alias summary: {{responses_text}}"'

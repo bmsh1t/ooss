@@ -45,6 +45,10 @@ params:
     type: bool
     default: true
     description: "Enable AI vulnerability validation and analysis"
+  - name: enableAiDecision
+    type: bool
+    default: true
+    description: "Enable application of AI-generated decision artifacts and scan parameters"
   # enableVulnValidation 是 do-ai-vuln-validation fragment 内部使用的参数名
   - name: enableVulnValidation
     type: bool
@@ -94,6 +98,14 @@ params:
     type: bool
     default: false
     description: "Queue AI-selected retest targets into worker queue"
+  - name: enableTargetedRescan
+    type: bool
+    default: true
+    description: "Run targeted nuclei rescans against AI-selected follow-up targets"
+  - name: enablePostFollowupCoordination
+    type: bool
+    default: true
+    description: "Aggregate follow-up execution outputs into a final reusable decision package"
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
   - name: sharedKnowledgeWorkspace
@@ -299,7 +311,7 @@ modules:
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
     depends_on: [ai-vuln-validation, ai-semantic-search, ai-post-vuln-semantic-search]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: '{{enableLlmAnalysis}} && ("{{enableIntelligentAnalysis}}" == "" || "{{enableIntelligentAnalysis}}" == "true")'
     params:
       semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
       semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
@@ -315,7 +327,7 @@ modules:
   - name: ai-apply-decision
     path: fragments/do-ai-apply-decision.yaml
     depends_on: [ai-intelligent-analysis]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: '{{enableLlmAnalysis}} && ("{{enableAiDecision}}" == "" || "{{enableAiDecision}}" == "true")'
 
   # ===========================================================================
   # Phase 9: Code Review (可选)
@@ -396,7 +408,7 @@ modules:
   - name: ai-targeted-rescan
     path: fragments/do-ai-targeted-rescan.yaml
     depends_on: [ai-apply-decision, ai-retest-planning, ai-operator-queue, ai-decision-semantic-search]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enableTargetedRescan}}"
     params:
       semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
 
@@ -413,7 +425,7 @@ modules:
   - name: ai-post-followup-coordination
     path: fragments/do-ai-post-followup-coordination.yaml
     depends_on: [ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enablePostFollowupCoordination}}"
     params:
       followupDecisionOutput: "{{followupDecisionOutput}}"
       semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
@@ -423,7 +435,7 @@ modules:
   # ===========================================================================
   - name: report
     path: common/10-report-enhanced.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue, ai-post-followup-coordination]
+    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-post-followup-coordination]
     on_error:
       - action: continue
 

@@ -84,6 +84,16 @@ params:
     default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
   - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
   - name: osintFile
     default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
 
@@ -181,6 +191,16 @@ steps:
       ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
       ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
       ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}" "{{thirdFallbackVectorKnowledgeSearchFile}}")
+      PASSIVE_COUNT=0
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        PASSIVE_COUNT=$(count_lines "{{passiveWebRiskSummaryFile}}")
+      else
+        for candidate in "{{sourceMapExposureFile}}" "{{apiSurfaceFile}}" "{{corsCacheHeuristicsFile}}" "{{cloudLeakFile}}"; do
+          if text_has_lines "$candidate"; then
+            PASSIVE_COUNT=$((PASSIVE_COUNT + $(count_lines "$candidate")))
+          fi
+        done
+      fi
 
       CONFIRMED=0
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
@@ -202,7 +222,7 @@ steps:
         VECTOR_KNOWLEDGE_COUNT=$(jq -r 'length // 0' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || echo 0)
       fi
 
-      echo "[INFO] [Attack Chain] Confirmed=$CONFIRMED critical=$CRITICAL_COUNT high=$HIGH_COUNT confirmed_urls=$CONFIRMED_URL_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT vector=$VECTOR_KNOWLEDGE_COUNT"
+      echo "[INFO] [Attack Chain] Confirmed=$CONFIRMED critical=$CRITICAL_COUNT high=$HIGH_COUNT confirmed_urls=$CONFIRMED_URL_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT vector=$VECTOR_KNOWLEDGE_COUNT passive=$PASSIVE_COUNT"
       echo "[INFO] [Attack Chain] Active inputs: semantic=$ACTIVE_SEMANTIC_FILE semantic_targets=$ACTIVE_SEMANTIC_PRIORITY_FILE knowledge=$ACTIVE_KNOWLEDGE_FILE vector=$ACTIVE_VECTOR_KNOWLEDGE_FILE"
       echo "[INFO] [Attack Chain] Input data check complete"
 
@@ -218,10 +238,19 @@ steps:
       : > "$INPUT_DIR/tech-stack.txt"
       : > "$INPUT_DIR/semantic-context.txt"
       : > "$INPUT_DIR/knowledge-context.txt"
+      : > "$INPUT_DIR/passive-web-risk.txt"
       CONFIRMED_FINDINGS_TMP="$INPUT_DIR/.confirmed-findings.tsv"
       VALIDATED_FINDINGS_TMP="$INPUT_DIR/.validated-findings.tsv"
       : > "$CONFIRMED_FINDINGS_TMP"
       : > "$VALIDATED_FINDINGS_TMP"
+
+      append_passive_context() {
+        file="$1"
+        label="$2"
+        limit="${3:-5}"
+        [ -f "$file" ] || return 0
+        sed -n "1,${limit}p" "$file" 2>/dev/null | sed "s|^|[$label] |" >> "$INPUT_DIR/passive-web-risk.txt" || true
+      }
 
       text_has_lines() {
         file="$1"
@@ -431,6 +460,19 @@ steps:
         fi
       } | awk 'NF && !seen[$0]++' | head -12 > "$INPUT_DIR/knowledge-context.txt" || true
 
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        sed -n '1,40p' "{{passiveWebRiskSummaryFile}}" > "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null || true
+      else
+        append_passive_context "{{sourceMapExposureFile}}" "source-map" 6
+        append_passive_context "{{apiSurfaceFile}}" "api-surface" 8
+        append_passive_context "{{corsCacheHeuristicsFile}}" "cors-cache" 8
+        append_passive_context "{{cloudLeakFile}}" "cloud-storage" 6
+      fi
+
+      awk 'NF && !seen[$0]++' "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null > "$INPUT_DIR/passive-web-risk.txt.tmp" \
+        && mv "$INPUT_DIR/passive-web-risk.txt.tmp" "$INPUT_DIR/passive-web-risk.txt" \
+        || true
+
       for file in "{{nucleiCriticalFile}}" "{{nucleiHighFile}}" "{{sqliFile}}" "{{takeoverFile}}" "{{secretsFile}}" "{{confirmedUrlsFile}}"; do
         if [ ! -f "$file" ]; then
           mkdir -p "$(dirname "$file")"
@@ -441,6 +483,7 @@ steps:
       CONFIRMED_VULN_COUNT=$(count_lines "$INPUT_DIR/confirmed-vulns.txt")
       SEMANTIC_CONTEXT_COUNT=$(count_lines "$INPUT_DIR/semantic-context.txt")
       KNOWLEDGE_CONTEXT_COUNT=$(count_lines "$INPUT_DIR/knowledge-context.txt")
+      PASSIVE_WEB_RISK_COUNT=$(count_lines "$INPUT_DIR/passive-web-risk.txt")
 
       jq -n \
         --arg semantic_file "$ACTIVE_SEMANTIC_FILE" \
@@ -459,17 +502,21 @@ steps:
         --arg tech_stack_file "$INPUT_DIR/tech-stack.txt" \
         --arg semantic_context_file "$INPUT_DIR/semantic-context.txt" \
         --arg knowledge_context_file "$INPUT_DIR/knowledge-context.txt" \
+        --arg passive_web_risk_file "$INPUT_DIR/passive-web-risk.txt" \
         --argjson confirmed_vuln_count "$CONFIRMED_VULN_COUNT" \
         --argjson semantic_context_count "$SEMANTIC_CONTEXT_COUNT" \
         --argjson knowledge_context_count "$KNOWLEDGE_CONTEXT_COUNT" \
+        --argjson passive_web_risk_count "$PASSIVE_WEB_RISK_COUNT" \
         '{
           confirmed_vulns_file: $confirmed_vulns_file,
           tech_stack_file: $tech_stack_file,
           semantic_context_file: $semantic_context_file,
           knowledge_context_file: $knowledge_context_file,
+          passive_web_risk_file: $passive_web_risk_file,
           confirmed_vuln_count: $confirmed_vuln_count,
           semantic_context_count: $semantic_context_count,
-          knowledge_context_count: $knowledge_context_count
+          knowledge_context_count: $knowledge_context_count,
+          passive_web_risk_count: $passive_web_risk_count
         }' > "$INPUT_DIR/prepared-context.json" 2>/dev/null || printf '%s\n' '{}' > "$INPUT_DIR/prepared-context.json"
 
       # 追加原始高危输入，作为 verified 不足时的回退上下文
@@ -510,7 +557,8 @@ steps:
       CONFIRMED_COUNT=$(count_lines "$INPUT_DIR/confirmed-vulns.txt")
       SEMANTIC_SIZE=$(count_lines "$INPUT_DIR/semantic-context.txt")
       KNOWLEDGE_SIZE=$(count_lines "$INPUT_DIR/knowledge-context.txt")
-      echo "[INFO] [Attack Chain] Input prepared: bytes=$CHAIN_INPUT_SIZE confirmed=$CONFIRMED_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      PASSIVE_SIZE=$(count_lines "$INPUT_DIR/passive-web-risk.txt")
+      echo "[INFO] [Attack Chain] Input prepared: bytes=$CHAIN_INPUT_SIZE confirmed=$CONFIRMED_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE passive=$PASSIVE_SIZE"
       rm -f "$CONFIRMED_FINDINGS_TMP" "$VALIDATED_FINDINGS_TMP" "$INPUT_DIR/active-inputs.json" "$INPUT_DIR/prepared-context.json" "$INPUT_DIR/raw-inputs.json" 2>/dev/null || true
 
   - name: check-attack-chain-data
@@ -584,6 +632,9 @@ steps:
           ## 知识库利用上下文
           请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/knowledge-context.txt
 
+          ## 被动 Web 风险摘要
+          请使用 read_lines 工具读取 {{Output}}/ai-analysis/.input/passive-web-risk.txt
+
           ## 已确认可利用的 URL
           请使用 read_lines 工具读取 {{confirmedUrlsFile}}
 
@@ -640,11 +691,18 @@ steps:
           - 优先仅基于 verified / confirmed findings 建链；如果 verified 为空，才退回到 non-false-positive 的高置信候选
           - false_positive 样本只能用于排除和校准，不得作为攻击链节点
           - 如果 validated finding、semantic result、knowledge/vector 命中同时指向同一 URL、同一入口或同一产品弱点，要把它视为高优先级攻击链入口
+          - 如果 passive web risk 摘要指向 source map/debug、API/auth/internal 面、CORS/cache 复核点或 cloud/signed URL 暴露，应把这些入口当作高价值链路前置信号
           - 不要编造不存在的中间条件
           - 更偏向真实可落地的链路，而不是理论最复杂的链路
 
     exports:
       attack_chain_json: "{{acp_output}}"
+
+  - name: persist-attack-chain-raw
+    type: function
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
+    functions:
+      - 'save_content(typeof attack_chain_json !== "undefined" ? attack_chain_json : "", "{{Output}}/ai-analysis/.attack-chain-acp-raw-{{TargetSpace}}.txt")'
 
   - name: log-progress
     type: function
@@ -663,8 +721,7 @@ steps:
       JSON_FILE="{{Output}}/ai-analysis/.attack-chain-acp-json-{{TargetSpace}}.json"
       FALLBACK_LINES="{{Output}}/ai-analysis/.attack-chain-acp-fallback-lines-{{TargetSpace}}.txt"
       FALLBACK_URLS="{{Output}}/ai-analysis/.attack-chain-acp-fallback-urls-{{TargetSpace}}.txt"
-
-      printf '%s\n' "{{attack_chain_json}}" > "$RAW_FILE"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }

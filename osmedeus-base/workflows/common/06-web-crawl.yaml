@@ -868,27 +868,32 @@ steps:
     exports:
       injection_analysis: "{{llm_injection_analysis_content}}"
 
+  - name: persist-llm-injection-analysis-raw
+    type: function
+    pre_condition: "{{enableLlmInjectionAnalysis}}"
+    functions:
+      - 'save_content(typeof injection_analysis !== "undefined" ? injection_analysis : "", "{{Output}}/links/.llm-injection-analysis-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-injection-report
     type: bash
     pre_condition: "{{enableLlmInjectionAnalysis}}"
     log: "Saving LLM injection analysis report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{injection_analysis}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{Output}}/links 2>/dev/null || true
+      RAW_FILE="{{Output}}/links/.llm-injection-analysis-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmInjectionReport}} {{injectionPointsFile}} 2>/dev/null || true
         echo "No LLM injection analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{Output}}/links 2>/dev/null || true
       echo "# Injection Point Analysis - {{Target}}" > {{llmInjectionReport}}
       echo "" >> {{llmInjectionReport}}
       echo "**Generated:** $(date)" >> {{llmInjectionReport}}
       echo "" >> {{llmInjectionReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmInjectionReport}}
+      cat "$RAW_FILE" >> {{llmInjectionReport}}
       
       # 提取高概率注入点到单独文件供后续测试
       grep -oE 'https?://[^ ]+' {{llmInjectionReport}} 2>/dev/null  | head -100 > {{injectionPointsFile}} || true

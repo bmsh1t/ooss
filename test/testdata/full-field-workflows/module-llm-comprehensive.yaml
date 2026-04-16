@@ -186,3 +186,16 @@ steps:
       summary: "{{response.content}}"
       model_used: "{{response.model}}"
       tokens_used: "{{response.usage.total_tokens}}"
+
+  # Responses API mode with native built-in tools
+  - name: responses-native-tools
+    type: llm
+    messages:
+      - role: user
+        content: "Search recent reconnaissance guidance for {{target}}"
+    extra_llm_parameters:
+      api_mode: responses
+      tools:
+        - type: web_search_preview
+    exports:
+      responses_summary: "{{response.content}}"

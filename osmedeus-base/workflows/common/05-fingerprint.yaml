@@ -275,27 +275,32 @@ steps:
     exports:
       tech_attack_suggestions: "{{llm_tech_attack_suggestions_content}}"
 
+  - name: persist-llm-tech-attack-raw
+    type: function
+    pre_condition: "{{enableLlmTechAttack}}"
+    functions:
+      - 'save_content(typeof tech_attack_suggestions !== "undefined" ? tech_attack_suggestions : "", "{{outputDir}}/.llm-tech-attack-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-tech-attack-report
     type: bash
     pre_condition: "{{enableLlmTechAttack}}"
     log: "Saving LLM tech attack suggestions report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{tech_attack_suggestions}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      RAW_FILE="{{outputDir}}/.llm-tech-attack-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmTechAttackReport}} 2>/dev/null || true
         echo "No LLM tech attack suggestions available; skipping report write."
         exit 0
       fi
-      mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Tech Stack Attack Suggestions - {{Target}}" > {{llmTechAttackReport}}
       echo "" >> {{llmTechAttackReport}}
       echo "**Generated:** $(date)" >> {{llmTechAttackReport}}
       echo "" >> {{llmTechAttackReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmTechAttackReport}}
+      cat "$RAW_FILE" >> {{llmTechAttackReport}}
     on_error:
       - action: continue
 

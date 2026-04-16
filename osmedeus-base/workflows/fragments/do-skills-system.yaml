@@ -37,6 +37,8 @@ params:
 steps:
   - name: list-available-skills
     type: bash
+    on_error:
+      - action: continue
     command: |
       echo "=== Available Security Testing Skills ==="
       echo ""
@@ -90,7 +92,9 @@ steps:
 
   - name: load-skill-content
     type: bash
-    pre_condition: '"{{skillName}}" != ""'
+    pre_condition: 'typeof skillName !== "undefined" && String(skillName).trim() != ""'
+    on_error:
+      - action: continue
     command: |
       SKILLS_DIR="{{skillsDir}}"
       SKILL_NAME="{{skillName}}"
@@ -156,6 +160,8 @@ steps:
 
   - name: load-multiple-skills
     type: bash
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
       
@@ -234,7 +240,9 @@ steps:
 
   - name: search-skills
     type: bash
-    pre_condition: '"{{searchTerm}}" != ""'
+    pre_condition: 'typeof searchTerm !== "undefined" && String(searchTerm).trim() != ""'
+    on_error:
+      - action: continue
     command: |
       SKILLS_DIR="{{skillsDir}}"
       SEARCH_TERM="{{searchTerm}}"
@@ -281,6 +289,8 @@ steps:
 
   - name: generate-skill-guide
     type: bash
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
       

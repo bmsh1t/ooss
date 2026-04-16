@@ -7,6 +7,7 @@ MAIN_WORKFLOW_DIR="${MAIN_WORKFLOW_DIR:-${ROOT_DIR}/osmedeus-base/workflows}"
 QUEUE_WORKFLOW_DIR="${QUEUE_WORKFLOW_DIR:-${ROOT_DIR}/test/regression/workflows/queue-live}"
 AI_SMOKE_WORKFLOW_DIR="${AI_SMOKE_WORKFLOW_DIR:-${ROOT_DIR}/test/regression/workflows/ai-smoke}"
 AI_SEMANTIC_WORKFLOW_DIR="${AI_SEMANTIC_WORKFLOW_DIR:-${ROOT_DIR}/test/regression/workflows/ai-semantic}"
+LLM_RESPONSES_WORKFLOW_DIR="${LLM_RESPONSES_WORKFLOW_DIR:-${ROOT_DIR}/test/testdata/workflows/agent-and-llm}"
 VALIDATE_BASE="${VALIDATE_BASE:-/tmp/osm-stable-core-validate}"
 
 require_cmd() {
@@ -82,6 +83,12 @@ OSMEDEUS_BIN="$OSMEDEUS_BIN" \
 WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
 bash "${ROOT_DIR}/test/regression/superdomain-stable-flow-smoke.sh"
 
+BASE_DIR=/tmp/osm-stable-core-superdomain-optimized \
+EMBED_PORT=8915 \
+OSMEDEUS_BIN="$OSMEDEUS_BIN" \
+WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
+bash "${ROOT_DIR}/test/regression/superdomain-optimized-flow-smoke.sh"
+
 BASE_DIR=/tmp/osm-stable-core-scan-content \
 OSMEDEUS_BIN="$OSMEDEUS_BIN" \
 WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
@@ -98,6 +105,12 @@ PORT=8906 \
 OSMEDEUS_BIN="$OSMEDEUS_BIN" \
 WORKFLOW_DIR="$MAIN_WORKFLOW_DIR" \
 bash "${ROOT_DIR}/test/regression/api-ai-workbench-live.sh"
+
+BASE_DIR=/tmp/osm-stable-core-llm-responses \
+PORT=18991 \
+OSMEDEUS_BIN="$OSMEDEUS_BIN" \
+WORKFLOW_DIR="$LLM_RESPONSES_WORKFLOW_DIR" \
+bash "${ROOT_DIR}/test/regression/llm-responses-smoke.sh"
 
 BASE_DIR=/tmp/osm-stable-core-knowledge \
 PORT=8907 \

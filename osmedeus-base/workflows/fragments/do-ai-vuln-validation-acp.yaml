@@ -213,6 +213,12 @@ steps:
     exports:
       validation_json: "{{acp_output}}"
 
+  - name: persist-vuln-validation-raw
+    type: function
+    pre_condition: "{{enableVulnValidation}}"
+    functions:
+      - 'save_content(typeof validation_json !== "undefined" ? validation_json : "", "{{Output}}/ai-analysis/validation/.vuln-validation-acp-raw-{{TargetSpace}}.txt")'
+
   - name: log-progress
     type: function
     pre_condition: "{{enableVulnValidation}}"
@@ -239,7 +245,7 @@ steps:
         exit 0
       fi
 
-      printf '%s\n' "{{validation_json}}" > "$RAW_FILE"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
       : > "$JSON_FILE"
 
       awk '
@@ -497,7 +503,7 @@ steps:
       jq -r '.findings[] | select(.status == "confirmed") | .url // empty' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
       touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
 
-      CONFIRMED_COUNT=$(wc -l < {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
+      CONFIRMED_COUNT=$(awk 'END {print NR+0}' {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
       echo "[Vuln Validation] Extracted $CONFIRMED_COUNT confirmed URLs"
 
   - name: log-validation-complete

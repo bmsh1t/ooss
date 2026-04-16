@@ -14,6 +14,9 @@ GLOBAL_WORKSPACE="${GLOBAL_WORKSPACE:-global}"
 MOCK_PROVIDER="${MOCK_PROVIDER:-mock-openai}"
 EMBED_MODEL="${EMBED_MODEL:-test-embedding-3-small}"
 MOCK_SERVER_SCRIPT="${MOCK_SERVER_SCRIPT:-${ROOT_DIR}/test/regression/mock-embedding-server.py}"
+FLOW_NAME="${FLOW_NAME:-superdomain-extensive-ai-stable}"
+FLOW_LABEL="${FLOW_LABEL:-stable}"
+FLOW_SUCCESS_MESSAGE="${FLOW_SUCCESS_MESSAGE:-current-source stable flow executes acp-backed fallback chain, workbench import, and knowledge autolearn closure}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -350,14 +353,14 @@ OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
   --workflow-folder "$WORKFLOW_DIR" \
-  workflow validate superdomain-extensive-ai-stable \
+  workflow validate "$FLOW_NAME" \
   >"$BASE_DIR/validate.log" 2>&1
 
 run_args=(
   --base-folder "$BASE_DIR"
   --workflow-folder "$WORKFLOW_DIR"
   run
-  -f superdomain-extensive-ai-stable
+  -f "$FLOW_NAME"
   -t "$TARGET"
   -p "enablePreScanDecision=false"
   -p "enableSemanticSearch=true"
@@ -546,4 +549,4 @@ assert_contains "$knowledge_log" "Knowledge learning completed" "knowledge learn
 assert_contains "$knowledge_log" "Base folder: $BASE_DIR" "knowledge learning base folder"
 assert_contains "$knowledge_log" "Scope: workspace" "knowledge learning scope"
 
-echo "ok superdomain stable flow smoke regression: current-source stable flow executes acp-backed fallback chain, workbench import, and knowledge autolearn closure"
+echo "ok superdomain ${FLOW_LABEL} flow smoke regression: ${FLOW_SUCCESS_MESSAGE}"

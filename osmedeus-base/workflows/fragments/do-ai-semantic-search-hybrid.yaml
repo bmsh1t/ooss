@@ -17,10 +17,20 @@ params:
     default: "{{Output}}/ai-analysis/semantic-index"
   - name: searchResultsOutput
     default: "{{Output}}/ai-analysis/hybrid-search-results-{{TargetSpace}}.json"
+  - name: agentResultsOutput
+    default: "{{Output}}/ai-analysis/hybrid-agent-results-{{TargetSpace}}.json"
+  - name: embeddingsOutput
+    default: "{{Output}}/ai-analysis/hybrid-embeddings-{{TargetSpace}}.json"
   - name: semanticHighlightsOutput
     default: "{{Output}}/ai-analysis/hybrid-search-highlights-{{TargetSpace}}.json"
+  - name: semanticPriorityTargetsOutput
+    default: "{{Output}}/ai-analysis/hybrid-priority-targets-{{TargetSpace}}.txt"
+  - name: semanticPriorityVulnsOutput
+    default: "{{Output}}/ai-analysis/hybrid-priority-vulns-{{TargetSpace}}.json"
   - name: vectorSearchResultsOutput
     default: "{{Output}}/ai-analysis/hybrid-vector-search-results-{{TargetSpace}}.json"
+  - name: rerankResultsOutput
+    default: "{{Output}}/ai-analysis/hybrid-rerank-results-{{TargetSpace}}.json"
   - name: vectorKnowledgeSearchOutput
     default: "{{Output}}/ai-analysis/hybrid-vector-kb-results-{{TargetSpace}}.json"
   - name: knowledgeSearchOutput
@@ -88,6 +98,22 @@ params:
   - name: maxKnowledgeChunks
     type: integer
     default: 200
+  - name: enableRerank
+    type: bool
+    default: true
+    description: "Enable rerank on kb vector search when rerank_config is available"
+  - name: rerankProvider
+    type: string
+    default: ""
+  - name: rerankModel
+    type: string
+    default: ""
+  - name: rerankTopN
+    type: integer
+    default: 10
+  - name: rerankMaxCandidates
+    type: integer
+    default: 40
 
   # Optional vectorkb provider/model overrides.
   - name: embeddingsProvider
@@ -120,10 +146,19 @@ steps:
     command: |
       mkdir -p {{semanticIndexDir}}
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       BASE_QUERY="{{searchQuery}}"
       STAGE="{{searchStage}}"
       OUTPUT_HINT="{{searchResultsOutput}}"
-      NUCLEI_COUNT=$(wc -l < "{{nucleiFile}}" 2>/dev/null || echo 0)
+      NUCLEI_COUNT=$(count_lines_safe "{{nucleiFile}}")
 
       text_has_lines() {
         file="$1"
@@ -308,6 +343,15 @@ steps:
       mkdir -p "{{semanticIndexDir}}/logs"
       : > "{{knowledgeIndexFile}}"
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
@@ -317,7 +361,7 @@ steps:
         echo "[Hybrid] osmedeus binary not found, skipping knowledge export"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -355,7 +399,7 @@ steps:
       fi
 
       cat "$PRIMARY_TMP" "$SHARED_TMP" "$GLOBAL_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
-      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      KB_LINES=$(count_lines_safe "{{knowledgeIndexFile}}")
       echo "[Hybrid] Exported knowledge corpus: $KB_LINES chunks"
 
   - name: collect-scan-corpus
@@ -364,6 +408,15 @@ steps:
     command: |
       mkdir -p {{semanticIndexDir}}
       : > "{{scanCorpusFile}}"
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
 
       append_prefixed() {
         source_file="$1"
@@ -379,7 +432,7 @@ steps:
       append_prefixed "{{Output}}/content-analysis/js-endpoints-{{TargetSpace}}.txt" "[scan:endpoints] "
 
       awk 'NF && !seen[$0]++' "{{scanCorpusFile}}" > "{{scanCorpusFile}}.tmp" && mv "{{scanCorpusFile}}.tmp" "{{scanCorpusFile}}"
-      SCAN_LINES=$(wc -l < "{{scanCorpusFile}}" 2>/dev/null || echo 0)
+      SCAN_LINES=$(count_lines_safe "{{scanCorpusFile}}")
       echo "[Hybrid] Scan corpus prepared: $SCAN_LINES lines"
 
   - name: search-knowledge-db
@@ -400,6 +453,7 @@ steps:
       fi
       echo '[]' > "{{knowledgeSearchOutput}}"
       echo '[]' > "{{vectorKnowledgeSearchOutput}}"
+      jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,enabled:false,rerank_applied:false,ranking_source:"hybrid",rerank_provider:"",rerank_model:"",total_results:0,results:[]}' > "{{rerankResultsOutput}}"
       jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,provider:"config-default",ready:false,semantic_status:"uninitialized",reason:"semantic vector retrieval not started",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
       OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
@@ -411,7 +465,7 @@ steps:
         echo "[Hybrid] osmedeus binary not found, skipping vector knowledge search"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -435,6 +489,21 @@ steps:
       VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
       if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
         VECTOR_PROVIDER_LABEL="config-default"
+      fi
+      RERANK_ENABLED="{{enableRerank}}"
+      RERANK_PROVIDER="{{rerankProvider}}"
+      RERANK_MODEL="{{rerankModel}}"
+      RERANK_PROVIDER_LABEL=""
+      RERANK_MODEL_LABEL=""
+      if [ "$RERANK_ENABLED" = "true" ]; then
+        RERANK_PROVIDER_LABEL="$RERANK_PROVIDER"
+        RERANK_MODEL_LABEL="$RERANK_MODEL"
+        if [ -z "$RERANK_PROVIDER_LABEL" ]; then
+          RERANK_PROVIDER_LABEL="config-default"
+        fi
+        if [ -z "$RERANK_MODEL_LABEL" ]; then
+          RERANK_MODEL_LABEL="config-default"
+        fi
       fi
       : > "$PRIMARY_VECTOR_LOG"
       : > "$SHARED_VECTOR_LOG"
@@ -473,6 +542,21 @@ steps:
         fi
         if [ -n "$VECTOR_MODEL" ]; then
           set -- "$@" --model "$VECTOR_MODEL"
+        fi
+        if [ "$RERANK_ENABLED" = "true" ]; then
+          set -- "$@" --rerank
+          if [ -n "$RERANK_PROVIDER" ]; then
+            set -- "$@" --rerank-provider "$RERANK_PROVIDER"
+          fi
+          if [ -n "$RERANK_MODEL" ]; then
+            set -- "$@" --rerank-model "$RERANK_MODEL"
+          fi
+          if [ "{{rerankTopN}}" -gt 0 ] 2>/dev/null; then
+            set -- "$@" --rerank-top-n "{{rerankTopN}}"
+          fi
+          if [ "{{rerankMaxCandidates}}" -gt 0 ] 2>/dev/null; then
+            set -- "$@" --rerank-max-candidates "{{rerankMaxCandidates}}"
+          fi
         fi
         if "$@" > "$output_file" 2>"$log_file"; then
           return 0
@@ -585,13 +669,63 @@ steps:
       if [ "$VECTOR_READY_FLAG" = "true" ] && { [ -z "$VECTOR_STATUS_FLAG" ] || [ "$VECTOR_STATUS_FLAG" = "unknown" ]; }; then
         VECTOR_STATUS_FLAG="ready"
       fi
+      VECTOR_RANKING_SOURCE=$(jq -r 'if length > 0 then (.[0].ranking_source // "") else "hybrid" end' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo hybrid)
+      VECTOR_RERANK_APPLIED="false"
+      if [ "$VECTOR_RANKING_SOURCE" = "rerank" ]; then
+        VECTOR_RERANK_APPLIED="true"
+      fi
+
+      jq -n \
+        --arg query "$KB_QUERY" \
+        --arg ranking_source "$VECTOR_RANKING_SOURCE" \
+        --arg rerank_provider "$RERANK_PROVIDER_LABEL" \
+        --arg rerank_model "$RERANK_MODEL_LABEL" \
+        --argjson enabled "$RERANK_ENABLED" \
+        --argjson rerank_applied "$VECTOR_RERANK_APPLIED" \
+        --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
+        {
+          status: "success",
+          query: $query,
+          enabled: $enabled,
+          rerank_applied: $rerank_applied,
+          ranking_source: $ranking_source,
+          rerank_provider: (if $enabled then $rerank_provider else "" end),
+          rerank_model: (if $enabled then $rerank_model else "" end),
+          total_results: ($hits[0] | length),
+          results: (
+            $hits[0]
+            | map({
+                document_id: .document_id,
+                chunk_id: .chunk_id,
+                workspace: (.workspace // ""),
+                title: (.title // ""),
+                source_path: (.source_path // ""),
+                doc_type: (.doc_type // ""),
+                section: (.section // ""),
+                content: (.content // .snippet // ""),
+                snippet: (.snippet // .content // ""),
+                relevance_score: (.relevance_score // .score // 0),
+                base_relevance_score: (.base_relevance_score // 0),
+                rerank_score: (.rerank_score // 0),
+                ranking_source: (.ranking_source // "hybrid"),
+                source: (.source // "vector_kb"),
+                type: (.type // "vector_match"),
+                metadata: (.metadata // null)
+              })
+          )
+        }' > "{{rerankResultsOutput}}" 2>/dev/null || jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,enabled:false,rerank_applied:false,ranking_source:"hybrid",rerank_provider:"",rerank_model:"",total_results:0,results:[]}' > "{{rerankResultsOutput}}"
 
       jq -n \
         --arg query "$KB_QUERY" \
         --arg provider "$VECTOR_PROVIDER_LABEL" \
         --arg semantic_status "$VECTOR_STATUS_FLAG" \
         --arg reason "$VECTOR_REASON_FLAG" \
+        --arg ranking_source "$VECTOR_RANKING_SOURCE" \
+        --arg rerank_provider "$RERANK_PROVIDER_LABEL" \
+        --arg rerank_model "$RERANK_MODEL_LABEL" \
         --argjson ready "$VECTOR_READY_FLAG" \
+        --argjson rerank_enabled "$RERANK_ENABLED" \
+        --argjson rerank_applied "$VECTOR_RERANK_APPLIED" \
         --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
         {
           status: "success",
@@ -600,6 +734,11 @@ steps:
           ready: $ready,
           semantic_status: $semantic_status,
           reason: (if ($reason | length) > 0 then $reason else null end),
+          ranking_source: $ranking_source,
+          rerank_enabled: $rerank_enabled,
+          rerank_applied: $rerank_applied,
+          rerank_provider: (if $rerank_enabled then $rerank_provider else "" end),
+          rerank_model: (if $rerank_enabled then $rerank_model else "" end),
           total_results: ($hits[0] | length),
           results: (
             $hits[0]
@@ -607,6 +746,9 @@ steps:
                 type: (.type // "vector_match"),
                 content: (.content // .snippet // ""),
                 relevance_score: (.relevance_score // .score // 0),
+                base_relevance_score: (.base_relevance_score // 0),
+                rerank_score: (.rerank_score // 0),
+                ranking_source: (.ranking_source // "hybrid"),
                 source: (.source // "vector_kb"),
                 title: (.title // ""),
                 workspace: (.workspace // ""),
@@ -618,6 +760,9 @@ steps:
 
       echo "[Hybrid] Vector KB hits: $VKB_HITS"
       echo "[Hybrid] Knowledge keyword hits: $(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)"
+      if [ "$RERANK_ENABLED" = "true" ]; then
+        echo "[Hybrid] Vector rerank status: applied=$VECTOR_RERANK_APPLIED source=$VECTOR_RANKING_SOURCE provider=${RERANK_PROVIDER_LABEL:-config-default} model=${RERANK_MODEL_LABEL:-config-default}"
+      fi
       if [ "$VECTOR_READY_FLAG" != "true" ] && [ -n "$VECTOR_REASON_FLAG" ]; then
         echo "[Hybrid] Vector retrieval unavailable: $VECTOR_STATUS_FLAG - $VECTOR_REASON_FLAG"
       fi
@@ -678,6 +823,10 @@ steps:
     command: |
       QUERY_FILE="{{resolvedSearchQueryOutput}}"
       RESOLVED_QUERY="{{searchQuery}}"
+      VECTOR_PROVIDER_LABEL="{{embeddingsProvider}}"
+      if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
+        VECTOR_PROVIDER_LABEL="config-default"
+      fi
       if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
         RESOLVED_QUERY=$(tr '\n' ' ' < "$QUERY_FILE" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
       fi
@@ -690,6 +839,7 @@ steps:
         --argjson max_results {{maxSearchResults}} \
         --slurpfile vector_hits "{{vectorKnowledgeSearchOutput}}" \
         --slurpfile keyword_hits "{{knowledgeSearchOutput}}" \
+        --slurpfile rerank_meta "{{rerankResultsOutput}}" \
         --slurpfile scan_hits "{{scanKeywordResultsOutput}}" '
         def textify:
           if . == null then "" else tostring end
@@ -769,6 +919,9 @@ steps:
               source: ($item.source // $kind),
               source_type: $kind,
               relevance_score: $base_score,
+              base_relevance_score: ($item.base_relevance_score // $base_score),
+              rerank_score: ($item.rerank_score // 0),
+              ranking_source: ($item.ranking_source // "hybrid"),
               hybrid_score: $hybrid_score,
               target: $target,
               category: $category,
@@ -785,6 +938,7 @@ steps:
 
         ($vector_hits[0] // []) as $vector_doc
         | ($keyword_hits[0] // []) as $keyword_doc
+        | ($rerank_meta[0] // {}) as $rerank_doc
         | ($scan_hits[0] // []) as $scan_doc
         | ($vector_doc | map(normalize("vector_search"))) as $vector_results
         | ($keyword_doc | map(normalize("knowledge_base"))) as $knowledge_results
@@ -814,6 +968,18 @@ steps:
           ) as $critical_findings
         | (
             [
+              $combined[]
+              | (.target // .source_path // .title // "")
+            ] | unique_nonempty | .[:12]
+          ) as $priority_targets
+        | (
+            [
+              $combined[]
+              | (.target // .source_path // .workspace // "")
+            ] | unique_nonempty | .[:12]
+          ) as $affected_systems
+        | (
+            [
               $knowledge_results[]
               | (.title // .snippet // .content // "")
             ] | unique_nonempty | .[:6]
@@ -830,6 +996,10 @@ steps:
             timestamp: $ts,
             provider: $provider,
             alpha: $alpha,
+            vector_ranking_source: ($rerank_doc.ranking_source // "hybrid"),
+            rerank_applied: ($rerank_doc.rerank_applied // false),
+            rerank_provider: ($rerank_doc.rerank_provider // ""),
+            rerank_model: ($rerank_doc.rerank_model // ""),
             status: (if ($combined | length) > 0 then "success" else "no_results" end),
             vector_recall: {
               count: ($vector_results | length),
@@ -845,17 +1015,97 @@ steps:
             },
             total_results: ($combined | length),
             results: $combined,
+            priority_targets: $priority_targets,
             highlights: {
               critical_findings: $critical_findings,
               relevant_knowledge: $relevant_knowledge,
-              immediate_actions: $immediate_actions
+              immediate_actions: $immediate_actions,
+              affected_systems: $affected_systems
             }
           }
       ' > "{{searchResultsOutput}}"
 
-      jq '.highlights // {"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[]}' "{{searchResultsOutput}}" > "{{semanticHighlightsOutput}}" 2>/dev/null || echo '{"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[]}' > "{{semanticHighlightsOutput}}"
-
       echo "[Hybrid] Results merged and saved to {{searchResultsOutput}}"
+
+  - name: extract-compatibility-artifacts
+    type: bash
+    pre_condition: "{{enableHybridSearch}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis {{semanticIndexDir}}
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      RESULTS_TMP="{{semanticIndexDir}}/.hybrid-results-compat-{{TargetSpace}}.json"
+
+      jq '
+        def textify:
+          if . == null then "" else tostring end
+          | gsub("\\s+"; " ")
+          | gsub("^\\s+|\\s+$"; "");
+
+        def unique_nonempty:
+          reduce .[] as $v ([]; ($v | textify) as $s | if ($s | length) == 0 or index($s) then . else . + [$s] end);
+
+        (.results // []) as $results
+        | ([ $results[]? | (.target // .source_path // .title // "") ] | unique_nonempty | .[:12]) as $priority_targets
+        | ([ $results[]? | (.target // .source_path // .workspace // "") ] | unique_nonempty | .[:12]) as $affected_systems
+        | .priority_targets = $priority_targets
+        | .highlights = {
+            critical_findings: ((.highlights.critical_findings // []) | unique_nonempty),
+            relevant_knowledge: ((.highlights.relevant_knowledge // []) | unique_nonempty),
+            immediate_actions: ((.highlights.immediate_actions // []) | unique_nonempty),
+            affected_systems: $affected_systems
+          }
+      ' "{{searchResultsOutput}}" > "$RESULTS_TMP" 2>/dev/null || cp "{{searchResultsOutput}}" "$RESULTS_TMP"
+      mv "$RESULTS_TMP" "{{searchResultsOutput}}"
+
+      jq '.highlights // {"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[],"affected_systems":[]}' "{{searchResultsOutput}}" > "{{semanticHighlightsOutput}}" 2>/dev/null || echo '{"critical_findings":[],"relevant_knowledge":[],"immediate_actions":[],"affected_systems":[]}' > "{{semanticHighlightsOutput}}"
+
+      jq -r '.highlights.critical_findings[] // empty' "{{searchResultsOutput}}" 2>/dev/null > "{{Output}}/ai-analysis/semantic-critical-findings.txt" || true
+      jq -r '.highlights.immediate_actions[] // empty' "{{searchResultsOutput}}" 2>/dev/null > "{{Output}}/ai-analysis/semantic-immediate-actions.txt" || true
+      jq -r '.highlights.affected_systems[] // empty' "{{searchResultsOutput}}" 2>/dev/null > "{{Output}}/ai-analysis/semantic-affected-systems.txt" || true
+      jq -r '.priority_targets[]? // empty' "{{searchResultsOutput}}" 2>/dev/null > "{{semanticPriorityTargetsOutput}}" || true
+
+      jq '[
+        .results[]?
+        | select(
+            (.severity_hint == "critical") or (.severity_hint == "high")
+            or (.category == "auth_surface")
+            or (.category == "admin_surface")
+            or (.category == "api_surface")
+            or (.category == "business_logic")
+          )
+        | {
+            target: (.target // ""),
+            content,
+            source,
+            source_type,
+            severity_hint,
+            category,
+            action_type,
+            relevance_score,
+            hybrid_score
+          }
+      ]' "{{searchResultsOutput}}" 2>/dev/null > "{{semanticPriorityVulnsOutput}}" || echo '[]' > "{{semanticPriorityVulnsOutput}}"
+
+      if [ ! -f "{{agentResultsOutput}}" ]; then
+        echo '{"status":"not_applicable","source":"ai-semantic-search-hybrid","results":[]}' > "{{agentResultsOutput}}"
+      fi
+
+      if [ ! -f "{{embeddingsOutput}}" ]; then
+        echo '{"status":"not_applicable","source":"ai-semantic-search-hybrid","embeddings":[]}' > "{{embeddingsOutput}}"
+      fi
+
+      PRIORITY_COUNT=$(count_lines_safe "{{semanticPriorityTargetsOutput}}")
+      AFFECTED_COUNT=$(count_lines_safe "{{Output}}/ai-analysis/semantic-affected-systems.txt")
+      echo "[Hybrid] Compatibility outputs ready: priority_targets=$PRIORITY_COUNT affected_systems=$AFFECTED_COUNT"
 
   - name: generate-summary
     type: bash
@@ -873,6 +1123,8 @@ steps:
         VECTOR_COUNT=$(jq '.vector_recall.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
         KB_COUNT=$(jq '.knowledge_base.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
         SCAN_COUNT=$(jq '.scan_data.count // 0' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        RERANK_APPLIED=$(jq -r '.rerank_applied // false' "$RESULTS_FILE" 2>/dev/null || echo false)
+        RANKING_SOURCE=$(jq -r '.vector_ranking_source // "hybrid"' "$RESULTS_FILE" 2>/dev/null || echo hybrid)
 
         echo "[Hybrid] ========== Search Summary =========="
         echo "[Hybrid] Query: $RESOLVED_QUERY"
@@ -880,6 +1132,8 @@ steps:
         echo "[Hybrid] Vector Recall Hits: $VECTOR_COUNT"
         echo "[Hybrid] Knowledge Base Hits: $KB_COUNT"
         echo "[Hybrid] Scan Data Hits: $SCAN_COUNT"
+        echo "[Hybrid] Rerank Applied: $RERANK_APPLIED"
+        echo "[Hybrid] Vector Ranking Source: $RANKING_SOURCE"
         echo "[Hybrid] Output: $RESULTS_FILE"
         echo "[Hybrid] ====================================="
       fi

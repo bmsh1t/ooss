@@ -100,8 +100,8 @@ steps:
           jq -r '\''.vulnerabilities[]? | "|\(.cve.id)|\(.metrics.cvssMetricV31[0].cvssData.baseScore // "N/A")|\(.cve.descriptions[0].value // "" | .[0:150])"'\'' 2>/dev/null || true
         ' _ {} >> {{Output}}/ai-analysis/cve/vuln-type-cve.txt
       
-      TECH_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
-      VULN_CVE_COUNT=$(wc -l < {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
+      TECH_CVE_COUNT=$(awk 'END {print NR+0}' {{Output}}/ai-analysis/cve/tech-cve.txt 2>/dev/null || echo 0)
+      VULN_CVE_COUNT=$(awk 'END {print NR+0}' {{Output}}/ai-analysis/cve/vuln-type-cve.txt 2>/dev/null || echo 0)
       
       echo "[CVE] Pre-query completed, Tech CVEs: $TECH_CVE_COUNT, Vuln Type CVEs: $VULN_CVE_COUNT"
 
@@ -110,20 +110,32 @@ steps:
     pre_condition: "{{enableVulnValidation}}"
     command: |
       echo "[Vuln Validation] Checking data availability..."
+
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       NUCLEI_JSONL_SIZE=0
       CRITICAL_SIZE=0
       HIGH_SIZE=0
       
-      if [ -f "{{nucleiFile}}" ]; then
-        NUCLEI_JSONL_SIZE=$(wc -c < "{{nucleiFile}}" 2>/dev/null || echo 0)
-      fi
-      if [ -f "{{nucleiCriticalFile}}" ]; then
-        CRITICAL_SIZE=$(wc -l < "{{nucleiCriticalFile}}" 2>/dev/null || echo 0)
-      fi
-      if [ -f "{{nucleiHighFile}}" ]; then
-        HIGH_SIZE=$(wc -l < "{{nucleiHighFile}}" 2>/dev/null || echo 0)
-      fi
+      NUCLEI_JSONL_SIZE=$(count_bytes "{{nucleiFile}}")
+      CRITICAL_SIZE=$(count_lines "{{nucleiCriticalFile}}")
+      HIGH_SIZE=$(count_lines "{{nucleiHighFile}}")
       
       echo "[Vuln Validation] Data: nuclei_jsonl=$NUCLEI_JSONL_SIZE bytes, critical=$CRITICAL_SIZE, high=$HIGH_SIZE"
       
@@ -144,6 +156,15 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis/.input
       mkdir -p {{Output}}/ai-analysis/validation
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       # 合并漏洞数据到单个文件（限制大小）
       : > {{Output}}/ai-analysis/.input/vuln-data.txt
@@ -169,7 +190,7 @@ steps:
         echo "" >> {{Output}}/ai-analysis/.input/vuln-data.txt
       fi
       
-      INPUT_SIZE=$(wc -c < {{Output}}/ai-analysis/.input/vuln-data.txt 2>/dev/null || echo 0)
+      INPUT_SIZE=$(count_bytes "{{Output}}/ai-analysis/.input/vuln-data.txt")
       echo "[Vuln Validation] Input prepared: $INPUT_SIZE bytes"
 
   - name: ai-validate-vulns
@@ -253,6 +274,12 @@ steps:
     exports:
       validation_json: "{{agent_content}}"
 
+  - name: persist-vuln-validation-raw
+    type: function
+    pre_condition: "{{enableVulnValidation}}"
+    functions:
+      - 'save_content(typeof validation_json !== "undefined" ? validation_json : "", "{{Output}}/ai-analysis/validation/.vuln-validation-raw-{{TargetSpace}}.txt")'
+
   - name: save-validation-results
     type: bash
     pre_condition: "{{enableVulnValidation}}"
@@ -262,8 +289,7 @@ steps:
       RAW_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/validation/.vuln-validation-json-{{TargetSpace}}.json"
       FALLBACK_LINES="{{Output}}/ai-analysis/validation/.vuln-validation-fallback-lines-{{TargetSpace}}.txt"
-
-      printf '%s' '{{validation_json}}' > "$RAW_FILE"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
       : > "$JSON_FILE"
 
       awk '
@@ -444,7 +470,7 @@ steps:
       jq -r '.findings[] | select(.status == "confirmed") | .url // empty' {{vulnValidationOutput}} 2>/dev/null > {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt || true
       touch {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt
 
-      CONFIRMED_COUNT=$(wc -l < {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
+      CONFIRMED_COUNT=$(awk 'END {print NR+0}' {{Output}}/ai-analysis/confirmed-urls-{{TargetSpace}}.txt 2>/dev/null || echo 0)
       echo "[Vuln Validation] Extracted $CONFIRMED_COUNT confirmed URLs"
 
   - name: log-validation-complete

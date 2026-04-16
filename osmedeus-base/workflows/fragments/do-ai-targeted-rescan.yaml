@@ -207,11 +207,20 @@ steps:
 
       awk 'NF && !seen[$0]++' "$TARGET_TMP" | head -{{maxRescanTargets}} > "{{rescanTargetsFile}}" || true
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       if [ ! -s "{{rescanTargetsFile}}" ]; then
         echo "[Rescan] No actionable targets collected, skipping rescan"
         touch "{{Output}}/ai-analysis/.rescan-skip"
       else
-        TARGET_COUNT=$(wc -l < "{{rescanTargetsFile}}" 2>/dev/null || echo 0)
+        TARGET_COUNT=$(count_lines_safe "{{rescanTargetsFile}}")
         echo "[Rescan] Collected $TARGET_COUNT actionable targets for deep scan"
         rm -f "{{Output}}/ai-analysis/.rescan-skip"
       fi
@@ -349,25 +358,103 @@ steps:
 
       echo "[Rescan] Config saved to $RESCAN_CFG"
 
+  - name: preflight-targeted-rescan-runtime
+    type: bash
+    pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
+    command: |
+      expand_home_path() {
+        value="$1"
+        case "$value" in
+          "~")
+            printf '%s\n' "$HOME"
+            ;;
+          "~/"*)
+            printf '%s/%s\n' "$HOME" "${value#~/}"
+            ;;
+          *)
+            printf '%s\n' "$value"
+            ;;
+        esac
+      }
+
+      TEMPLATE_FILE="{{Output}}/ai-analysis/.rescan-template-dir-{{TargetSpace}}.txt"
+      TEMPLATE_DIR=$(expand_home_path "{{nucleiTemplateConfig}}")
+
+      if ! command -v nuclei >/dev/null 2>&1; then
+        echo "[Rescan] nuclei binary not found, skipping targeted rescan"
+        rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+        touch "{{Output}}/ai-analysis/.rescan-skip"
+        exit 0
+      fi
+
+      if [ ! -d "$TEMPLATE_DIR" ]; then
+        echo "[Rescan] Template directory not found: $TEMPLATE_DIR, skipping targeted rescan"
+        rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+        touch "{{Output}}/ai-analysis/.rescan-skip"
+        exit 0
+      fi
+
+      if ! find "$TEMPLATE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
+        echo "[Rescan] Template directory is empty: $TEMPLATE_DIR, skipping targeted rescan"
+        rm -f "$TEMPLATE_FILE" 2>/dev/null || true
+        touch "{{Output}}/ai-analysis/.rescan-skip"
+        exit 0
+      fi
+
+      printf '%s\n' "$TEMPLATE_DIR" > "$TEMPLATE_FILE"
+      echo "[Rescan] Using template directory: $TEMPLATE_DIR"
+
   - name: run-targeted-nuclei
     type: bash
     pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
     timeout: "{{scanTimeout}}"
+    on_error:
+      - action: continue
     command: |
       RESCAN_CFG="{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
+      TEMPLATE_FILE="{{Output}}/ai-analysis/.rescan-template-dir-{{TargetSpace}}.txt"
       [ -f "$RESCAN_CFG" ] && . "$RESCAN_CFG" 2>/dev/null || true
       SEVERITY=${RESCAN_SEVERITY:-"{{defaultSeverity}}"}
       THREADS=${RESCAN_THREADS:-{{defaultThreads}}}
       RATE_LIMIT=${RESCAN_RATE_LIMIT:-{{defaultRateLimit}}}
       TIMEOUT=${RESCAN_TIMEOUT:-"{{defaultTimeout}}"}
 
-      TARGET_COUNT=$(wc -l < "{{rescanTargetsFile}}" 2>/dev/null || echo 0)
+      expand_home_path() {
+        value="$1"
+        case "$value" in
+          "~")
+            printf '%s\n' "$HOME"
+            ;;
+          "~/"*)
+            printf '%s/%s\n' "$HOME" "${value#~/}"
+            ;;
+          *)
+            printf '%s\n' "$value"
+            ;;
+        esac
+      }
+
+      TEMPLATE_DIR=$(expand_home_path "{{nucleiTemplateConfig}}")
+      if [ -f "$TEMPLATE_FILE" ]; then
+        TEMPLATE_DIR=$(cat "$TEMPLATE_FILE" 2>/dev/null || printf '%s\n' "$TEMPLATE_DIR")
+      fi
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      TARGET_COUNT=$(count_lines_safe "{{rescanTargetsFile}}")
       echo "[Rescan] Running nuclei on $TARGET_COUNT confirmed targets"
-      echo "[Rescan] Params: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+      echo "[Rescan] Params: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT templates=$TEMPLATE_DIR"
 
       nuclei \
         -l "{{rescanTargetsFile}}" \
-        -t "{{nucleiTemplateConfig}}" \
+        -t "$TEMPLATE_DIR" \
         -severity "$SEVERITY" \
         -c $THREADS \
         -rl $RATE_LIMIT \
@@ -377,14 +464,24 @@ steps:
         -silent 2>/dev/null || true
 
       rm -f "{{Output}}/ai-analysis/.rescan-config-{{TargetSpace}}.sh"
+      rm -f "$TEMPLATE_FILE" 2>/dev/null || true
 
-      FOUND=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+      FOUND=$(count_lines_safe "{{rescanOutputJsonl}}")
       echo "[Rescan] Nuclei completed: $FOUND findings"
 
   - name: extract-rescan-findings
     type: bash
     pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
     command: |
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       if [ ! -f "{{rescanOutputJsonl}}" ] || [ ! -s "{{rescanOutputJsonl}}" ]; then
         echo "[Rescan] No new findings from targeted rescan"
         exit 0
@@ -398,14 +495,23 @@ steps:
       jq -r 'select(.info.severity == "high") | "[" + .info.severity + "] " + .host + " - " + .info.name' \
         "{{rescanOutputJsonl}}" 2>/dev/null > "{{rescanHighFile}}" || true
 
-      CRITICAL=$(wc -l < "{{rescanCriticalFile}}" 2>/dev/null || echo 0)
-      HIGH=$(wc -l < "{{rescanHighFile}}" 2>/dev/null || echo 0)
+      CRITICAL=$(count_lines_safe "{{rescanCriticalFile}}")
+      HIGH=$(count_lines_safe "{{rescanHighFile}}")
       echo "[Rescan] Extracted: critical=$CRITICAL high=$HIGH"
 
   - name: merge-rescan-findings-into-main-results
     type: bash
     pre_condition: "{{enableTargetedRescan}} && !file_exists(\"{{Output}}/ai-analysis/.rescan-skip\")"
     command: |
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       if [ ! -f "{{rescanOutputJsonl}}" ] || [ ! -s "{{rescanOutputJsonl}}" ]; then
         echo "[Rescan] No rescan findings to merge"
         exit 0
@@ -456,8 +562,8 @@ steps:
 
       rm -f "$RESCAN_CRIT_JSONL" "$RESCAN_HIGH_JSONL" 2>/dev/null || true
 
-      TOTAL_MAIN=$(wc -l < "{{mainNucleiOutputJsonl}}" 2>/dev/null || echo 0)
-      TOTAL_RESCAN=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+      TOTAL_MAIN=$(count_lines_safe "{{mainNucleiOutputJsonl}}")
+      TOTAL_RESCAN=$(count_lines_safe "{{rescanOutputJsonl}}")
       echo "[Rescan] Merged $TOTAL_RESCAN rescan findings into main vuln results (total=$TOTAL_MAIN)"
 
   - name: refresh-clean-vuln-jsonl

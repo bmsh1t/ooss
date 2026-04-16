@@ -2,13 +2,13 @@
 # Module Workflow: Comprehensive Vulnerability Scanning
 # =============================================================================
 # 合并: scan-vuln-suite.yaml + scan-takeover.yaml + secret-detection.yaml
-# 功能: SSRF, SSTI, CRLF, Comm, LFI, SQLi, Takeover, Secret Detection
+# 功能: SSRF, SSTI, CRLF, Comm, LFI, SQLi, Takeover, Secret Detection, Prototype Pollution
 # =============================================================================
 
 kind: module
 name: vuln-suite
-description: Comprehensive vulnerability scanning - SSRF, SSTI, CRLF, SQLi, LFI, Takeover, Secrets
-tags: vuln, ssrf, ssti, crlf, sqli, lfi, takeover, secret, scanning
+description: Comprehensive vulnerability scanning - SSRF, SSTI, CRLF, SQLi, LFI, Takeover, Secrets, Prototype Pollution
+tags: vuln, ssrf, ssti, crlf, sqli, lfi, takeover, secret, prototype-pollution, scanning
 
 # -----------------------------------------------------------------------------
 # PARAMS SECTION
@@ -79,6 +79,10 @@ params:
     type: bool
     default: true
     description: "Enable password spraying on discovered services"
+  - name: enablePrototypePollutionScan
+    type: bool
+    default: true
+    description: "Enable standalone prototype pollution checks with a bundled nuclei headless template"
   - name: sprayingEngine
     default: "brutespray"
     description: "Spraying engine: brutespray or brutus"
@@ -268,6 +272,12 @@ params:
     default: "20m"
   - name: sprayingTimeout
     default: "1h"
+  - name: testsslTimeout
+    default: "10m"
+    description: "Maximum time per HTTPS target for testssl.sh"
+  - name: testsslTargetLimit
+    default: 50
+    description: "Maximum HTTPS targets to test with testssl.sh"
 
   # Spraying 参数
   - name: brutesprayConcurrency
@@ -328,6 +338,15 @@ params:
     default: "{{vulnSuiteDir}}/nuclei-dast-{{TargetSpace}}.jsonl"
   - name: commandInjectionOutput
     default: "{{vulnSuiteDir}}/command-injection-{{TargetSpace}}.txt"
+  - name: prototypePollutionOutputFile
+    default: "{{vulnSuiteDir}}/prototype-pollution-{{TargetSpace}}.txt"
+  - name: prototypePollutionJsonOutput
+    default: "{{vulnSuiteDir}}/prototype-pollution-{{TargetSpace}}.jsonl"
+  - name: prototypePollutionTemplateFile
+    default: "{{BaseFolder}}/templates/nuclei/prototype-pollution-check.yaml"
+  - name: prototypePollutionTargetLimit
+    default: 200
+    description: "Maximum base URLs to test for prototype pollution"
 
   # LFI 参数
   - name: lfiPayloadsFile
@@ -416,6 +435,11 @@ reports:
     type: folder
     description: Fray WAF bypass test results
 
+  - name: prototype-pollution-results
+    path: "{{prototypePollutionOutputFile}}"
+    type: text
+    description: Prototype pollution findings
+
 # -----------------------------------------------------------------------------
 # STEPS SECTION
 # -----------------------------------------------------------------------------
@@ -470,18 +494,70 @@ steps:
     log: "Prioritizing assets for vulnerability scanning"
     command: |
       mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
-      
+
+      normalize_keyword_pattern() {
+        printf '%s' "$1" \
+          | tr ',' '\n' \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+          | sed '/^$/d' \
+          | awk '!seen[$0]++' \
+          | paste -sd'|' -
+      }
+
+      HIGH_PRIORITY_TMP="{{vulnSuiteDir}}/.high-priority-raw-{{TargetSpace}}.txt"
+      : > "$HIGH_PRIORITY_TMP"
+
       # 提取高优先级资产
-      grep -iE "{{priorityKeywords}}" {{httpFile}} 2>/dev/null  | sort -u > {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt || true
-      
+      KEYWORD_PATTERN=$(normalize_keyword_pattern "{{priorityKeywords}}")
+      if [ -n "$KEYWORD_PATTERN" ]; then
+        grep -iE "$KEYWORD_PATTERN" {{httpFile}} 2>/dev/null >> "$HIGH_PRIORITY_TMP" || true
+      fi
+
+      # 合并 AI 决策推荐目标
+      APPLIED_AI_DECISION_FILE="{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+      AI_DECISION_FILE="{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
+      PRE_AI_DECISION_FILE="{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
+      ACTIVE_AI_DECISION_FILE=""
+
+      if [ -f "$APPLIED_AI_DECISION_FILE" ] && jq empty "$APPLIED_AI_DECISION_FILE" 2>/dev/null; then
+        ACTIVE_AI_DECISION_FILE="$APPLIED_AI_DECISION_FILE"
+      elif [ -f "$AI_DECISION_FILE" ] && jq empty "$AI_DECISION_FILE" 2>/dev/null; then
+        ACTIVE_AI_DECISION_FILE="$AI_DECISION_FILE"
+      elif [ -f "$PRE_AI_DECISION_FILE" ] && jq empty "$PRE_AI_DECISION_FILE" 2>/dev/null; then
+        ACTIVE_AI_DECISION_FILE="$PRE_AI_DECISION_FILE"
+      fi
+
+      AI_PRIORITY_COUNT=0
+      if [ -n "$ACTIVE_AI_DECISION_FILE" ]; then
+        AI_TARGET_RAW_TMP="{{vulnSuiteDir}}/.ai-priority-raw-{{TargetSpace}}.txt"
+        AI_TARGET_TMP="{{vulnSuiteDir}}/.ai-priority-matched-{{TargetSpace}}.txt"
+        jq -r '((.targets.priority_targets // []) + (.targets.rescan_targets // []) + (.priority_targets // []) + (.rescan_targets // []))[]? // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+          | sed '/^$/d' \
+          | awk '!seen[$0]++' > "$AI_TARGET_RAW_TMP" || true
+        grep -Fi -f "$AI_TARGET_RAW_TMP" {{httpFile}} 2>/dev/null > "$AI_TARGET_TMP" || true
+        cat "$AI_TARGET_TMP" >> "$HIGH_PRIORITY_TMP" 2>/dev/null || true
+        AI_PRIORITY_COUNT=$(wc -l < "$AI_TARGET_TMP" 2>/dev/null || echo 0)
+        rm -f "$AI_TARGET_RAW_TMP" "$AI_TARGET_TMP" 2>/dev/null || true
+      fi
+
+      awk 'NF && !seen[$0]++' "$HIGH_PRIORITY_TMP" > {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt || true
+      rm -f "$HIGH_PRIORITY_TMP" 2>/dev/null || true
+
       # 剩余资产
       if [ -s "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
-        comm -23 <(sort -u {{httpFile}}) <(sort {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt)  > {{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt || true
+        HTTP_SORTED="{{vulnSuiteDir}}/.http-sorted-{{TargetSpace}}.txt"
+        HIGH_SORTED="{{vulnSuiteDir}}/.high-sorted-{{TargetSpace}}.txt"
+        sort -u {{httpFile}} > "$HTTP_SORTED" 2>/dev/null || true
+        sort -u {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt > "$HIGH_SORTED" 2>/dev/null || true
+        comm -23 "$HTTP_SORTED" "$HIGH_SORTED" > {{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt || true
+        rm -f "$HTTP_SORTED" "$HIGH_SORTED" 2>/dev/null || true
         
         hp_count=$(wc -l < {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt 2>/dev/null || echo 0)
-        echo "[PRIORITY] Found $hp_count high-priority assets"
+        echo "[PRIORITY] Found $hp_count high-priority assets (ai_candidates=$AI_PRIORITY_COUNT)"
       else
         cp {{httpFile}} {{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt 2>/dev/null || true
+        echo "[PRIORITY] No high-priority assets found (ai_candidates=$AI_PRIORITY_COUNT)"
       fi
     on_error:
       - action: continue
@@ -568,12 +644,18 @@ steps:
       AI_DECISION_FILE="{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
       PRE_AI_DECISION_FILE="{{Output}}/ai-analysis/pre-ai-decision-{{TargetSpace}}.json"
       ACTIVE_AI_DECISION_FILE=""
+      AI_SEVERITY=""
+      AI_THREADS=""
+      AI_RATE_LIMIT=""
+      AI_TIMEOUT=""
+      AI_WAF_BYPASS="false"
+      AI_REASONING=""
 
-      if [ -f "$APPLIED_AI_DECISION_FILE" ]; then
+      if [ -f "$APPLIED_AI_DECISION_FILE" ] && jq empty "$APPLIED_AI_DECISION_FILE" 2>/dev/null; then
         ACTIVE_AI_DECISION_FILE="$APPLIED_AI_DECISION_FILE"
-      elif [ -f "$AI_DECISION_FILE" ]; then
+      elif [ -f "$AI_DECISION_FILE" ] && jq empty "$AI_DECISION_FILE" 2>/dev/null; then
         ACTIVE_AI_DECISION_FILE="$AI_DECISION_FILE"
-      elif [ -f "$PRE_AI_DECISION_FILE" ]; then
+      elif [ -f "$PRE_AI_DECISION_FILE" ] && jq empty "$PRE_AI_DECISION_FILE" 2>/dev/null; then
         ACTIVE_AI_DECISION_FILE="$PRE_AI_DECISION_FILE"
       fi
 
@@ -620,7 +702,9 @@ steps:
         # AI 决策覆盖
         [ -n "$AI_THREADS" ] && THREADS=$AI_THREADS
         [ -n "$AI_RATE_LIMIT" ] && RATELIMIT=$AI_RATE_LIMIT
-        [ -n "$AI_THREADS" ] || [ -n "$AI_RATE_LIMIT" ] && echo "[NUCLEI] Using AI config: threads=$THREADS, rate=$RATELIMIT"
+        if [ -n "$AI_THREADS" ] || [ -n "$AI_RATE_LIMIT" ]; then
+          echo "[NUCLEI] Using AI config: threads=$THREADS, rate=$RATELIMIT"
+        fi
       fi
       
       # 智能模板选择
@@ -663,7 +747,7 @@ steps:
         exit 0
       fi
 
-      if [ "{{enableAssetPrioritization}}" = "true" ] && [ -f "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
+      if [ "{{enableAssetPrioritization}}" = "true" ] && [ -s "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
         # 先扫描高优先级资产
         echo "[NUCLEI] Scanning high-priority assets first..."
         timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>>"$NUCLEI_LOG" || PRIORITY_RC=$?
@@ -695,6 +779,39 @@ steps:
         [ "$MAIN_RC" -ne 0 ] && exit "$MAIN_RC"
         exit "$PRIORITY_RC"
       fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 0.5: Prototype Pollution Checks
+  # ===========================================================================
+  - name: prototype-pollution-scan
+    type: bash
+    pre_condition: '{{enablePrototypePollutionScan}} && file_exists("{{httpFile}}") && file_exists("{{prototypePollutionTemplateFile}}")'
+    log: "Running prototype pollution checks"
+    command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      : > {{prototypePollutionOutputFile}}
+      : > {{prototypePollutionJsonOutput}}
+
+      TARGET_SOURCE="{{httpFile}}"
+      if [ -s "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
+        TARGET_SOURCE="{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt"
+      fi
+
+      TARGETS_TMP="{{vulnSuiteDir}}/.prototype-pollution-targets-{{TargetSpace}}.txt"
+      grep -E '^https?://' "$TARGET_SOURCE" 2>/dev/null | awk 'NF && !seen[$0]++' | head -n {{prototypePollutionTargetLimit}} > "$TARGETS_TMP" || true
+
+      if [ -s "$TARGETS_TMP" ]; then
+        nuclei -headless -silent -rl {{nucleiRateLimit}} -c 5 -l "$TARGETS_TMP" -t "{{prototypePollutionTemplateFile}}" -j -o {{prototypePollutionJsonOutput}} 2>/dev/null || true
+      fi
+
+      if [ -s "{{prototypePollutionJsonOutput}}" ]; then
+        jq -r '"[" + (.["template-id"] // "prototype-pollution") + "] [" + (.info.severity // "unknown") + "] " + (.["matched-at"] // .host // .url // "")' {{prototypePollutionJsonOutput}} 2>/dev/null > {{prototypePollutionOutputFile}} || true
+        cat {{prototypePollutionJsonOutput}} >> {{nucleiOutputJsonl}} 2>/dev/null || true
+      fi
+
+      rm -f "$TARGETS_TMP" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -820,13 +937,13 @@ steps:
   # ===========================================================================
   - name: secret-http-scan
     type: bash
-    pre_condition: '{{enableSecretScan}} && file_exists("{{httpFile}}")'
+    pre_condition: '{{enableSecretScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") > 0'
     log: "Running secret detection on HTTP responses"
     command: |
+      mkdir -p {{vulnSuiteDir}} {{vulnSuiteDir}}/http-content 2>/dev/null || true
       : > {{secretsOutputFile}}
-      mkdir -p {{vulnSuiteDir}}/http-content
       # 并行下载 HTTP 内容 (提高效率)
-      cat {{httpFile}} | head -200 | xargs -P {{secretThreads}} -I URL sh -c 'filename=$(echo "URL" | md5sum | cut -d" " -f1); curl -s -m 10 "URL" 2>/dev/null > "{{vulnSuiteDir}}/http-content/$filename.txt" || true'
+      head -n 200 "{{httpFile}}" | xargs -P {{secretThreads}} -I URL sh -c 'filename=$(printf "%s" "URL" | md5sum | cut -d" " -f1); curl -s -m 10 "URL" 2>/dev/null > "{{vulnSuiteDir}}/http-content/$filename.txt" || true'
       # 使用 trufflehog 扫描目录 (与 reconftw 一致)
       if [ "$(ls -A {{vulnSuiteDir}}/http-content 2>/dev/null)" ]; then
         trufflehog filesystem {{vulnSuiteDir}}/http-content -j 2>/dev/null | jq -c 2>/dev/null >> {{secretsOutputFile}} || true
@@ -841,9 +958,9 @@ steps:
     pre_condition: '{{enableSecretScan}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
     log: "Scanning JavaScript files for secrets (trufflehog)"
     command: |
-      mkdir -p {{vulnSuiteDir}}/js-content
+      mkdir -p {{vulnSuiteDir}} {{vulnSuiteDir}}/js-content 2>/dev/null || true
       # 并行下载 JS 文件 (提高效率)
-      cat {{jsUrlsFile}} | head -100 | xargs -P {{secretThreads}} -I JSURL sh -c 'filename=$(echo "JSURL" | md5sum | cut -d" " -f1); curl -s -m 10 "JSURL" 2>/dev/null > "{{vulnSuiteDir}}/js-content/$filename.js" || true'
+      head -n 100 "{{jsUrlsFile}}" | xargs -P {{secretThreads}} -I JSURL sh -c 'filename=$(printf "%s" "JSURL" | md5sum | cut -d" " -f1); curl -s -m 10 "JSURL" 2>/dev/null > "{{vulnSuiteDir}}/js-content/$filename.js" || true'
       # 使用 trufflehog 扫描目录
       if [ "$(ls -A {{vulnSuiteDir}}/js-content 2>/dev/null)" ]; then
         trufflehog filesystem {{vulnSuiteDir}}/js-content -j 2>/dev/null | jq -c 2>/dev/null >> {{secretsOutputFile}} || true
@@ -861,8 +978,9 @@ steps:
     pre_condition: '{{enableSmugglingScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{smugglingUrlLimit}}'
     log: "Running HTTP Request Smuggling checks"
     functions:
+      - 'exec_cmd("mkdir -p {{vulnSuiteDir}} 2>/dev/null || true")'
       - 'exec_cmd(": > {{smugglingOutputFile}}")'
-      - 'exec_cmd("timeout -k 1m {{smugglingTimeout}} cat {{httpFile}} | smugglex -f plain 2>/dev/null | jq -c 2>/dev/null >> {{smugglingOutputFile}} || true")'
+      - 'exec_cmd("timeout -k 1m {{smugglingTimeout}} sh -c \"cat \\\"{{httpFile}}\\\" | smugglex -f plain 2>/dev/null | jq -c 2>/dev/null >> \\\"{{smugglingOutputFile}}\\\"\" || true")'
     on_error:
       - action: continue
 
@@ -874,6 +992,7 @@ steps:
     pre_condition: '{{enableWebcacheScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{webcacheUrlLimit}}'
     log: "Running Web Cache Poisoning checks"
     functions:
+      - 'exec_cmd("mkdir -p {{vulnSuiteDir}} 2>/dev/null || true")'
       - 'exec_cmd(": > {{webcacheOutputFile}}")'
       - 'exec_cmd("timeout -k 1m {{webcacheTimeout}} sh -c \"cd {{toolsDir}}/Web-Cache-Vulnerability-Scanner && Web-Cache-Vulnerability-Scanner -u file:{{httpFile}} -v 0\" 2>/dev/null | anew -q {{webcacheOutputFile}} || true")'
       - 'exec_cmd("timeout -k 1m {{webcacheTimeout}} toxicache -i {{httpFile}} -o {{vulnSuiteDir}}/webcache_toxicache.txt -t 70 2>/dev/null || true")'
@@ -888,8 +1007,9 @@ steps:
     pre_condition: '{{enable4xxBypassScan}} && file_exists("{{httpFile}}") && file_length("{{httpFile}}") <= {{bypassUrlLimit}}'
     log: "Running 403/4xx bypass checks"
     functions:
+      - 'exec_cmd("mkdir -p {{vulnSuiteDir}} 2>/dev/null || true")'
       - 'exec_cmd(": > {{bypass4xxOutputFile}}")'
-      - 'exec_cmd("if [ -d \"{{toolsDir}}/nomore403\" ]; then timeout -k 1m {{bypassTimeout}} sh -c \"cd {{toolsDir}}/nomore403 && ./nomore403 < {{httpFile}}\" 2>/dev/null >> {{bypass4xxOutputFile}} || true; fi")'
+      - 'exec_cmd("if [ -d \"{{toolsDir}}/nomore403\" ]; then timeout -k 1m {{bypassTimeout}} sh -c \"cd {{toolsDir}}/nomore403 && ./nomore403 < \\\"{{httpFile}}\\\"\" 2>/dev/null >> \"{{bypass4xxOutputFile}}\" || true; fi")'
     on_error:
       - action: continue
 
@@ -902,26 +1022,33 @@ steps:
     log: "Running Fray WAF-aware payload testing"
     command: |
       mkdir -p {{frayOutputDir}} 2>/dev/null || true
+      FRAY_TARGETS_TMP="{{frayOutputDir}}/.fray-targets-{{TargetSpace}}.txt"
+      rm -f "$FRAY_TARGETS_TMP" "{{frayOutputDir}}"/.fray-*.json 2>/dev/null || true
 
       targets="{{httpFile}}"
       url_count=$(wc -l < "$targets" 2>/dev/null || echo 0)
       if [ "$url_count" -gt {{frayUrlLimit}} ]; then
-        head -n {{frayUrlLimit}} "$targets" > .tmp/fray_targets.txt
-        targets=".tmp/fray_targets.txt"
+        head -n {{frayUrlLimit}} "$targets" > "$FRAY_TARGETS_TMP"
+        targets="$FRAY_TARGETS_TMP"
       fi
 
-      IFS=',' read -ra categories <<< "{{frayCategories}}"
-      for category in "${categories[@]}"; do
-        echo "Testing category: $category"
-        cat "$targets" | fray test -c "$category"  --max {{frayMaxPayloads}} -t {{frayTimeout}} -d {{frayDelay}} --json 2>/dev/null | grep '^{' > ".tmp/fray_${category}.json" || true
+      printf '%s\n' "{{frayCategories}}" | tr ',' '\n' | while IFS= read -r raw_category; do
+        category=$(printf "%s" "$raw_category" | xargs)
+        [ -n "$category" ] || continue
+        category_json="{{frayOutputDir}}/.fray-${category}-{{TargetSpace}}.json"
+        category_output="{{frayOutputDir}}/${category}.txt"
 
-        if [ -s ".tmp/fray_${category}.json" ]; then
+        echo "Testing category: $category"
+        rm -f "$category_json" "$category_output" 2>/dev/null || true
+        fray test -c "$category" --max {{frayMaxPayloads}} -t {{frayTimeout}} -d {{frayDelay}} --json < "$targets" 2>/dev/null | grep '^{' > "$category_json" || true
+
+        if [ -s "$category_json" ]; then
           jq -r 'select(.bypassed != null and .bypassed > 0) |
-            "\(.target) [bypass_rate:\(.bypass_rate)] \(.bypassed)/\(.total) payloads bypassed WAF"'  ".tmp/fray_${category}.json" > "{{frayOutputDir}}/${category}.txt" 2>/dev/null || true
+            "\(.target) [bypass_rate:\(.bypass_rate)] \(.bypassed)/\(.total) payloads bypassed WAF"' "$category_json" > "$category_output" 2>/dev/null || true
         fi
       done
 
-      rm -f .tmp/fray_*.json 2>/dev/null || true
+      rm -f "$FRAY_TARGETS_TMP" "{{frayOutputDir}}"/.fray-*.json 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -930,9 +1057,10 @@ steps:
   # ===========================================================================
   - name: nuclei-dast-scan
     type: bash
-    pre_condition: '{{enableNucleiDast}} && file_exists("{{urlExtractFile}}")'
+    pre_condition: '{{enableNucleiDast}} && (file_exists("{{urlExtractFile}}") || file_exists("{{Output}}/links/links-{{TargetSpace}}.txt") || file_exists("{{httpFile}}"))'
     log: "Running Nuclei DAST API fuzzing"
     command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       : > {{nucleiDastOutput}}
       : > {{nucleiDastJsonOutput}}
       
@@ -952,13 +1080,13 @@ steps:
         if [ "$url_count" -le 1500 ]; then
           # 运行 Nuclei DAST
           nuclei -l "$targets" -dast -nh -rl {{nucleiRateLimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
-          
-          if [ -s "{{nucleiDastJsonOutput}}" ]; then
-            jq -r '["[" + .["template-id"] + "] [" + .info.severity + "] " + (.["matched-at"] // .host)] | join(" ")'  {{nucleiDastJsonOutput}} 2>/dev/null > {{nucleiDastOutput}} || true
-          fi
         else
           echo "[nuclei-dast] Too many targets ($url_count), limiting to 1500"
           head -n 1500 "$targets" | nuclei -dast -nh -rl {{nucleiRateLimit}} -silent -retries 2  -t ~/nuclei-templates/dast -j -o {{nucleiDastJsonOutput}} 2>/dev/null || true
+        fi
+
+        if [ -s "{{nucleiDastJsonOutput}}" ]; then
+          jq -r '["[" + .["template-id"] + "] [" + .info.severity + "] " + (.["matched-at"] // .host)] | join(" ")' {{nucleiDastJsonOutput}} 2>/dev/null > {{nucleiDastOutput}} || true
         fi
       fi
     on_error:
@@ -972,28 +1100,36 @@ steps:
     pre_condition: '{{enableCommandInjection}} && file_exists("{{gfRceFile}}")'
     log: "Running command injection detection"
     command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       : > {{commandInjectionOutput}}
+      CMDI_TARGETS_TMP="{{vulnSuiteDir}}/.cmdi-targets-{{TargetSpace}}.txt"
+      CMDI_TARGETS_LIMITED_TMP="{{vulnSuiteDir}}/.cmdi-targets-limited-{{TargetSpace}}.txt"
+
+      extract_commix_results() {
+        if ls {{vulnSuiteDir}}/command-injection-results/*/log.txt 1>/dev/null 2>&1; then
+          grep -r "vulnerable\|injection" {{vulnSuiteDir}}/command-injection-results/ 2>/dev/null > {{commandInjectionOutput}} || true
+        fi
+      }
 
       if [ -s "{{gfRceFile}}" ]; then
-        qsreplace "FUZZ" < {{gfRceFile}} 2>/dev/null | grep "FUZZ" > .tmp/cmdi_targets.txt || true
+        qsreplace "FUZZ" < "{{gfRceFile}}" 2>/dev/null | grep "FUZZ" > "$CMDI_TARGETS_TMP" || true
 
-        if [ -s ".tmp/cmdi_targets.txt" ]; then
-          url_count=$(wc -l < .tmp/cmdi_targets.txt)
+        if [ -s "$CMDI_TARGETS_TMP" ]; then
+          url_count=$(wc -l < "$CMDI_TARGETS_TMP")
           mkdir -p {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
 
           if [ "$url_count" -le 500 ]; then
-            commix --batch -m .tmp/cmdi_targets.txt --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
-            if ls {{vulnSuiteDir}}/command-injection-results/*/log.txt 1>/dev/null 2>&1; then
-              grep -r "vulnerable\|injection" {{vulnSuiteDir}}/command-injection-results/ 2>/dev/null > {{commandInjectionOutput}} || true
-            fi
+            commix --batch -m "$CMDI_TARGETS_TMP" --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
           else
             echo "[command-injection] Too many targets ($url_count), limiting to 500"
-            head -n 500 .tmp/cmdi_targets.txt > .tmp/cmdi_targets_limited.txt
-            commix --batch -m .tmp/cmdi_targets_limited.txt --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
+            head -n 500 "$CMDI_TARGETS_TMP" > "$CMDI_TARGETS_LIMITED_TMP"
+            commix --batch -m "$CMDI_TARGETS_LIMITED_TMP" --output-dir {{vulnSuiteDir}}/command-injection-results 2>/dev/null || true
           fi
+
+          extract_commix_results
         fi
 
-        rm -f .tmp/cmdi_targets.txt .tmp/cmdi_targets_limited.txt 2>/dev/null || true
+        rm -f "$CMDI_TARGETS_TMP" "$CMDI_TARGETS_LIMITED_TMP" 2>/dev/null || true
       fi
     on_error:
       - action: continue
@@ -1006,17 +1142,39 @@ steps:
     pre_condition: '{{enableTestSSL}} && file_exists("{{httpFile}}")'
     log: "Running SSL/TLS security testing with testssl.sh"
     command: |
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       : > {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
 
       TESTSSL_BIN=$(command -v testssl.sh 2>/dev/null || echo "{{toolsDir}}/testssl.sh/testssl.sh")
-      grep -E "^https://" {{httpFile}} 2>/dev/null | head -50 | while read url; do
-        host=$(echo "$url" | awk -F/ '{print $3}' | sed 's/:.*$//')
-        port=$(echo "$url" | awk -F/ '{print $3}' | grep -oE ':[0-9]+$' | sed 's/://' || echo "443")
+      TESTSSL_TARGETS="{{vulnSuiteDir}}/.testssl-targets-{{TargetSpace}}.txt"
+      grep -E "^https://" "{{httpFile}}" 2>/dev/null \
+        | awk -F/ '{
+            authority=$3
+            host=authority
+            port="443"
+            if (authority ~ /:[0-9]+$/) {
+              host=authority
+              sub(/:[0-9]+$/, "", host)
+              port=authority
+              sub(/^.*:/, "", port)
+            }
+            if (host != "") {
+              print host ":" port
+            }
+          }' \
+        | awk '!seen[$0]++' \
+        | head -n {{testsslTargetLimit}} > "$TESTSSL_TARGETS"
 
+      while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        host=${target%:*}
+        port=${target##*:}
         echo "Testing $host:$port" >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
-        "$TESTSSL_BIN" --quiet --color 0 "$host:$port" 2>/dev/null >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt || true
+        timeout -k 30s {{testsslTimeout}} "$TESTSSL_BIN" --quiet --color 0 "$host:$port" 2>/dev/null >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt || true
         echo "---" >> {{vulnSuiteDir}}/testssl-{{TargetSpace}}.txt
-      done
+      done < "$TESTSSL_TARGETS"
+
+      rm -f "$TESTSSL_TARGETS" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -1025,16 +1183,12 @@ steps:
   # ===========================================================================
   - name: spraying-scan
     type: bash
-    pre_condition: '{{enableSpraying}} && file_exists("{{portscanGnmapFile}}")'
+    pre_condition: '{{enableSpraying}} && (file_exists("{{portscanGnmapFile}}") || ("{{sprayingEngine}}" == "brutus" && (file_exists("{{Output}}/ipspace/service_fingerprints.jsonl") || file_exists("{{Output}}/probing/naabu_open.txt"))))'
     log: "Running password spraying on discovered services"
     command: |
+      mkdir -p {{vulnSuiteDir}} {{sprayingOutputDir}} 2>/dev/null || true
       : > {{sprayingOutputFile}}
       mkdir -p {{sprayingOutputDir}} 2>/dev/null || true
-
-      if [ ! -s "{{portscanGnmapFile}}" ]; then
-        echo "No port scan results available for spraying" > {{sprayingOutputFile}}
-        exit 0
-      fi
 
       if [ "{{sprayingEngine}}" = "brutus" ]; then
         brutus_input=""
@@ -1046,15 +1200,26 @@ steps:
         fi
 
         if [ -n "$brutus_input" ]; then
-          brutus_cmd="brutus --json -o {{brutusOutputFile}}"
-          [ -n "{{brutusUsernames}}" ] && [ -s "{{brutusUsernames}}" ] && brutus_cmd="$brutus_cmd -u {{brutusUsernames}}"
-          [ -n "{{brutusPasswords}}" ] && [ -s "{{brutusPasswords}}" ] && brutus_cmd="$brutus_cmd -p {{brutusPasswords}}"
-          timeout -k 1m {{sprayingTimeout}} $brutus_cmd < "$brutus_input" 2>/dev/null || true
-          [ -s "{{brutusOutputFile}}" ] && echo "=== Brutus Results ===" >> {{sprayingOutputFile}} && cat {{brutusOutputFile}} >> {{sprayingOutputFile}}
+          set -- brutus --json -o "{{brutusOutputFile}}"
+          if [ -n "{{brutusUsernames}}" ] && [ -s "{{brutusUsernames}}" ]; then
+            set -- "$@" -u "{{brutusUsernames}}"
+          fi
+          if [ -n "{{brutusPasswords}}" ] && [ -s "{{brutusPasswords}}" ]; then
+            set -- "$@" -p "{{brutusPasswords}}"
+          fi
+          timeout -k 1m {{sprayingTimeout}} "$@" < "$brutus_input" 2>/dev/null || true
+          if [ -s "{{brutusOutputFile}}" ]; then
+            echo "=== Brutus Results ===" >> {{sprayingOutputFile}}
+            cat "{{brutusOutputFile}}" >> {{sprayingOutputFile}} 2>/dev/null || true
+          fi
         else
           echo "No service fingerprint data available for Brutus" > {{sprayingOutputFile}}
         fi
       else
+        if [ ! -s "{{portscanGnmapFile}}" ]; then
+          echo "No port scan results available for spraying" > {{sprayingOutputFile}}
+          exit 0
+        fi
         timeout -k 1m {{sprayingTimeout}} brutespray -f {{portscanGnmapFile}} -T {{brutesprayConcurrency}} -o {{sprayingOutputDir}} 2>/dev/null || true
         if ls {{sprayingOutputDir}}/*.txt 1>/dev/null 2>&1; then
           echo "=== BruteSpray Results ===" >> {{sprayingOutputFile}}
@@ -1098,28 +1263,33 @@ steps:
     exports:
       analysis: "{{llm_vuln_analysis_content}}"
 
+  - name: persist-llm-vuln-analysis-raw
+    type: function
+    pre_condition: "{{enableLlmAnalysis}}"
+    functions:
+      - 'save_content(typeof analysis !== "undefined" ? analysis : "", "{{vulnSuiteDir}}/.llm-analysis-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-analysis
     type: bash
     pre_condition: "{{enableLlmAnalysis}}"
     log: "Saving LLM analysis report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{analysis}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      RAW_FILE="{{vulnSuiteDir}}/.llm-analysis-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmAnalysisOutput}} 2>/dev/null || true
         echo "No LLM vulnerability analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       echo "# LLM Vulnerability Analysis Report" > {{llmAnalysisOutput}}
       echo "" >> {{llmAnalysisOutput}}
       echo "**Target:** {{Target}}" >> {{llmAnalysisOutput}}
       echo "**Generated:** $(date)" >> {{llmAnalysisOutput}}
       echo "" >> {{llmAnalysisOutput}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmAnalysisOutput}}
+      cat "$RAW_FILE" >> {{llmAnalysisOutput}}
     on_error:
       - action: continue
 
@@ -1147,23 +1317,28 @@ steps:
     exports:
       fp_filter: "{{llm_false_positive_filter_content}}"
 
+  - name: persist-llm-fp-filter-raw
+    type: function
+    pre_condition: '{{enableLlmAnalysis}} && {{llmFalsePositiveFilter}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    functions:
+      - 'save_content(typeof fp_filter !== "undefined" ? fp_filter : "", "{{vulnSuiteDir}}/.llm-fp-filter-raw-{{TargetSpace}}.json")'
+
   - name: save-llm-false-positive-filter
     type: bash
     pre_condition: '{{enableLlmAnalysis}} && {{llmFalsePositiveFilter}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
     log: "Saving LLM false-positive review output"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{fp_filter}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      RAW_FILE="{{vulnSuiteDir}}/.llm-fp-filter-raw-{{TargetSpace}}.json"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmFalsePositiveReviewOutput}} 2>/dev/null || true
         echo "No LLM false-positive review available; skipping output write."
         exit 0
       fi
-      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
-      printf '%s\n' "$REPORT_CONTENT" > {{llmFalsePositiveReviewOutput}}
+      cp "$RAW_FILE" {{llmFalsePositiveReviewOutput}}
     on_error:
       - action: continue
 
@@ -1194,23 +1369,28 @@ steps:
     exports:
       priority: "{{llm_risk_prioritization_content}}"
 
+  - name: persist-llm-risk-prioritization-raw
+    type: function
+    pre_condition: '{{enableLlmAnalysis}} && {{llmRiskPrioritization}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
+    functions:
+      - 'save_content(typeof priority !== "undefined" ? priority : "", "{{vulnSuiteDir}}/.llm-priority-raw-{{TargetSpace}}.json")'
+
   - name: save-llm-risk-prioritization
     type: bash
     pre_condition: '{{enableLlmAnalysis}} && {{llmRiskPrioritization}} && file_exists("{{nucleiOutputJsonl}}") && file_length("{{nucleiOutputJsonl}}") > 0'
     log: "Saving LLM vulnerability prioritization output"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{priority}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      RAW_FILE="{{vulnSuiteDir}}/.llm-priority-raw-{{TargetSpace}}.json"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmPrioritizationOutput}} 2>/dev/null || true
         echo "No LLM prioritization output available; skipping output write."
         exit 0
       fi
-      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
-      printf '%s\n' "$REPORT_CONTENT" > {{llmPrioritizationOutput}}
+      cp "$RAW_FILE" {{llmPrioritizationOutput}}
     on_error:
       - action: continue
 
@@ -1269,27 +1449,32 @@ steps:
     exports:
       waf_bypass_strategy: "{{llm_waf_bypass_strategy_content}}"
 
+  - name: persist-llm-waf-bypass-raw
+    type: function
+    pre_condition: "{{enableLlmWafBypass}}"
+    functions:
+      - 'save_content(typeof waf_bypass_strategy !== "undefined" ? waf_bypass_strategy : "", "{{vulnSuiteDir}}/.llm-waf-bypass-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-waf-bypass-report
     type: bash
     pre_condition: "{{enableLlmWafBypass}}"
     log: "Saving LLM WAF bypass strategy report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{waf_bypass_strategy}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
+      RAW_FILE="{{vulnSuiteDir}}/.llm-waf-bypass-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmWafBypassReport}} 2>/dev/null || true
         echo "No LLM WAF bypass assessment available; skipping report write."
         exit 0
       fi
-      mkdir -p {{vulnSuiteDir}} 2>/dev/null || true
       echo "# WAF Bypass Strategy - {{Target}}" > {{llmWafBypassReport}}
       echo "" >> {{llmWafBypassReport}}
       echo "**Generated:** $(date)" >> {{llmWafBypassReport}}
       echo "" >> {{llmWafBypassReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmWafBypassReport}}
+      cat "$RAW_FILE" >> {{llmWafBypassReport}}
     on_error:
       - action: continue
 

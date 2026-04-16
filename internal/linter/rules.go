@@ -15,6 +15,7 @@ var builtInVariables = map[string]bool{
 	"BaseFolder":           true,
 	"OsmedeusBase":         true,
 	"OsmedeusExec":         true,
+	"SettingsFile":         true,
 	"Binaries":             true,
 	"binaries":             true,
 	"Data":                 true,

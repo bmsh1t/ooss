@@ -15,6 +15,8 @@ steps:
   - name: check-input
     type: bash
     command: |
+      mkdir -p {{Output}}/ai-analysis
+      : > {{Output}}/ai-analysis/.viz-status
       INPUT="{{attackChainInput}}"
       if [ ! -f "$INPUT" ]; then
         echo "[ERROR] Attack chain input file not found: $INPUT"
@@ -175,5 +177,7 @@ steps:
   - name: import-attack-chain-visualization
     type: function
     pre_condition: 'file_exists("{{attackChainInput}}")'
+    on_error:
+      - action: continue
     functions:
       - 'db_import_attack_chain("{{TargetSpace}}", "{{attackChainInput}}", "{{Target}}", "", "{{mermaidOutput}}", "{{textOutput}}")'

@@ -44,6 +44,16 @@ params:
     default: "{{Output}}/ai-analysis/retest-targets-{{TargetSpace}}.txt"
   - name: campaignTargetsFile
     default: "{{Output}}/ai-analysis/campaign-targets-{{TargetSpace}}.txt"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
 
   - name: enablePostFollowupCoordination
     type: bool
@@ -138,6 +148,21 @@ steps:
         fi
       }
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      append_passive_urls() {
+        file="$1"
+        [ -f "$file" ] || return 0
+        grep -Eo 'https?://[^[:space:]]+' "$file" 2>/dev/null || true
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -201,19 +226,33 @@ steps:
         RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummary}}" 2>/dev/null || echo not_requested)
       fi
 
+      RESCAN_TOTAL=$(count_lines "{{rescanOutputJsonl}}")
       if [ -f "{{rescanOutputJsonl}}" ]; then
-        RESCAN_TOTAL=$(wc -l < "{{rescanOutputJsonl}}" 2>/dev/null || echo 0)
+        RESCAN_CRITICAL=$(jq -r 'select(.info.severity == "critical") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
+        RESCAN_HIGH=$(jq -r 'select(.info.severity == "high") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
       else
-        RESCAN_TOTAL=0
+        RESCAN_CRITICAL=0
+        RESCAN_HIGH=0
       fi
-      RESCAN_CRITICAL=$(jq -r 'select(.info.severity == "critical") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
-      RESCAN_HIGH=$(jq -r 'select(.info.severity == "high") | 1' "{{rescanOutputJsonl}}" 2>/dev/null | wc -l | tr -d ' ')
+
+      PASSIVE_TARGETS_TMP="{{Output}}/ai-analysis/.followup-passive-targets-{{TargetSpace}}.txt"
+      : > "$PASSIVE_TARGETS_TMP"
+      {
+        append_passive_urls "{{sourceMapExposureFile}}"
+        append_passive_urls "{{apiSurfaceFile}}"
+        append_passive_urls "{{corsCacheHeuristicsFile}}"
+        append_passive_urls "{{cloudLeakFile}}"
+        append_passive_urls "{{passiveWebRiskSummaryFile}}"
+      } | awk 'NF && !seen[$0]++' > "$PASSIVE_TARGETS_TMP" || true
+      PASSIVE_TARGETS_JSON=$(file_to_json_array "$PASSIVE_TARGETS_TMP")
+      PASSIVE_TARGET_COUNT=$(printf '%s\n' "$PASSIVE_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
 
       {
         printf '%s\n' "$BASE_FOCUS_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$BASE_RESCAN_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$RETEST_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$OPERATOR_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$PASSIVE_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
         cat "$ACTIVE_SEMANTIC_PRIORITY_FILE" 2>/dev/null || true
         cat "{{operatorQueueTargetsFile}}" 2>/dev/null || true
         cat "{{retestTargetsFile}}" 2>/dev/null || true
@@ -223,6 +262,7 @@ steps:
 
       {
         printf '%s\n' "$BASE_FOCUS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$PASSIVE_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
         cat "$ACTIVE_SEMANTIC_PRIORITY_FILE" 2>/dev/null || true
         cat "{{operatorQueueTargetsFile}}" 2>/dev/null || true
         head -15 "{{confirmedUrlsFile}}" 2>/dev/null || true
@@ -275,6 +315,9 @@ steps:
       fi
       if [ "$RESCAN_CRITICAL" -gt 0 ] || [ "$RESCAN_HIGH" -gt 0 ]; then
         echo "targeted-rescan" >> "$REUSE_SOURCES_TMP"
+      fi
+      if [ "$PASSIVE_TARGET_COUNT" -gt 0 ]; then
+        echo "passive-web-risk" >> "$REUSE_SOURCES_TMP"
       fi
       REUSE_SOURCES_JSON=$(file_to_json_array "$REUSE_SOURCES_TMP")
 
@@ -336,7 +379,7 @@ steps:
       fi
 
       SEED_SEVERITY="$BASE_SEVERITY"
-      SEED_REASONING="$BASE_REASONING | followup mode=$SEED_PRIORITY_MODE confidence=$SEED_CONFIDENCE_LEVEL operator_tasks=$OPERATOR_TASKS retest_targets=$RETEST_COUNT campaign_targets=$CAMPAIGN_TARGETS queued_retests=$RETEST_QUEUED rescan_critical=$RESCAN_CRITICAL rescan_high=$RESCAN_HIGH campaign_create_status=$CAMPAIGN_CREATE_STATUS queued_campaign_runs=$CAMPAIGN_CREATE_QUEUED_RUNS"
+      SEED_REASONING="$BASE_REASONING | followup mode=$SEED_PRIORITY_MODE confidence=$SEED_CONFIDENCE_LEVEL operator_tasks=$OPERATOR_TASKS retest_targets=$RETEST_COUNT campaign_targets=$CAMPAIGN_TARGETS passive_targets=$PASSIVE_TARGET_COUNT queued_retests=$RETEST_QUEUED rescan_critical=$RESCAN_CRITICAL rescan_high=$RESCAN_HIGH campaign_create_status=$CAMPAIGN_CREATE_STATUS queued_campaign_runs=$CAMPAIGN_CREATE_QUEUED_RUNS"
 
       jq -n \
         --arg generated_at "$(date -Iseconds)" \
@@ -359,6 +402,7 @@ steps:
         --argjson operator_tasks "$OPERATOR_TASKS" \
         --argjson operator_target_list "$OPERATOR_TARGETS_JSON" \
         --argjson campaign_targets "$CAMPAIGN_TARGETS" \
+        --argjson passive_targets "$PASSIVE_TARGET_COUNT" \
         --argjson retest_queued "$RETEST_QUEUED" \
         --argjson rescan_total "$RESCAN_TOTAL" \
         --argjson rescan_critical "$RESCAN_CRITICAL" \
@@ -387,6 +431,7 @@ steps:
             retest_targets: $retest_targets,
             operator_tasks: $operator_tasks,
             campaign_targets: $campaign_targets,
+            passive_targets: $passive_targets,
             retest_queued_targets: $retest_queued,
             rescan_findings: $rescan_total,
             rescan_critical: $rescan_critical,
@@ -428,6 +473,7 @@ steps:
               retest_targets: $retest_targets,
               operator_tasks: $operator_tasks,
               campaign_targets: $campaign_targets,
+              passive_targets: $passive_targets,
               retest_queued_targets: $retest_queued,
               rescan_critical: $rescan_critical,
               rescan_high: $rescan_high,
@@ -449,6 +495,7 @@ steps:
             [
               (if $rescan_total > 0 then "Review targeted rescan hits first and capture proof for all new findings" else empty end),
               (if $operator_tasks > 0 then "Execute P1/P2 operator tasks against refined priority targets" else empty end),
+              (if $passive_targets > 0 then "Keep passive web risk URLs in the refined target pack for low-noise manual validation" else empty end),
               (if ($campaign_ready == true) and ($campaign_targets > 0) then "Use campaign handoff as the next-stage batch execution package" else empty end),
               (if ($campaign_create_status == "created") and ($campaign_create_queued_runs > 0) then ("Track campaign " + $campaign_create_id + " and monitor " + ($campaign_create_queued_runs | tostring) + " queued runs for follow-up evidence") else empty end),
               (if $retest_queued > 0 then "Track queued retest jobs and fold their results back into the knowledge base" else empty end),
@@ -457,7 +504,7 @@ steps:
           )
         }' > "{{followupDecisionOutput}}"
 
-      rm -f "$RESCAN_CRITICAL_TMP" "$RESCAN_HIGH_TMP" "$REUSE_SOURCES_TMP" 2>/dev/null || true
+      rm -f "$RESCAN_CRITICAL_TMP" "$RESCAN_HIGH_TMP" "$REUSE_SOURCES_TMP" "$PASSIVE_TARGETS_TMP" 2>/dev/null || true
 
   - name: render-post-followup-markdown
     type: bash
@@ -470,10 +517,10 @@ steps:
         jq -r '.base_decision | "- Base profile: \(.profile // "focused")\n- Base severity: \(.severity // "critical,high")\n- Reasoning: \(.reasoning // "n/a")"' "{{followupDecisionOutput}}" 2>/dev/null || true
         echo ""
         echo "## Follow-up Summary"
-        jq -r '.followup_summary | "- Retest targets: \(.retest_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)\n- Campaign targets: \(.campaign_targets // 0)\n- Retest queued: \(.retest_queued_targets // 0)\n- Rescan findings: \(.rescan_findings // 0) (critical=\(.rescan_critical // 0), high=\(.rescan_high // 0))\n- Campaign ready: \(.campaign_ready // false)\n- Campaign create: \(.campaign_create_status // "not_requested")\n- Campaign id: \(.campaign_create_id // "")\n- Campaign queued runs: \(.campaign_create_queued_runs // 0)\n- Retest queue: \(.retest_queue_status // "not_requested")"' "{{followupDecisionOutput}}" 2>/dev/null || true
+        jq -r '.followup_summary | "- Retest targets: \(.retest_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)\n- Campaign targets: \(.campaign_targets // 0)\n- Passive targets: \(.passive_targets // 0)\n- Retest queued: \(.retest_queued_targets // 0)\n- Rescan findings: \(.rescan_findings // 0) (critical=\(.rescan_critical // 0), high=\(.rescan_high // 0))\n- Campaign ready: \(.campaign_ready // false)\n- Campaign create: \(.campaign_create_status // "not_requested")\n- Campaign id: \(.campaign_create_id // "")\n- Campaign queued runs: \(.campaign_create_queued_runs // 0)\n- Retest queue: \(.retest_queue_status // "not_requested")"' "{{followupDecisionOutput}}" 2>/dev/null || true
         echo ""
         echo "## Seed Focus"
-        jq -r '.seed_focus | "- Scan profile: \(.scan_profile // "focused")\n- Severity: \(.severity // "critical,high")\n- Priority mode: \(.priority_mode // "knowledge-first")\n- Confidence: \(.confidence_level // "low")\n- Reuse sources: \((.reuse_sources // []) | join(", "))"' "{{followupDecisionOutput}}" 2>/dev/null || true
+        jq -r '.seed_focus | "- Scan profile: \(.scan_profile // "focused")\n- Severity: \(.severity // "critical,high")\n- Next phase: \(.next_phase // "knowledge-consolidation")\n- Priority mode: \(.priority_mode // "knowledge-first")\n- Confidence: \(.confidence_level // "low")\n- Reuse sources: \((.reuse_sources // []) | join(", "))"' "{{followupDecisionOutput}}" 2>/dev/null || true
         echo ""
         echo "## Refined Priority Targets"
         jq -r '.refined_targets.priority_targets[]? | "- \(.)"' "{{followupDecisionOutput}}" 2>/dev/null || echo "- none"

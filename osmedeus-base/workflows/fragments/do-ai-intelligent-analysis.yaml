@@ -50,6 +50,16 @@ params:
     default: "{{Output}}/ai-analysis/semantic-highlights-{{TargetSpace}}.json"
   - name: initialSemanticHighlightsFile
     default: "{{Output}}/ai-analysis/semantic-highlights-early-{{TargetSpace}}.json"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
 
   # 输入文件 - 扫描数据
   - name: subdomainFile
@@ -173,6 +183,15 @@ steps:
       CRITICAL=$(count_lines "{{nucleiCriticalFile}}")
       HIGH=$(count_lines "{{nucleiHighFile}}")
       PRIORITY_COUNT=$(count_lines "{{priorityTargetsFile}}")
+      SOURCEMAP_EXPOSURES=$(count_lines "{{sourceMapExposureFile}}")
+      API_SURFACE=$(count_lines "{{apiSurfaceFile}}")
+      CORS_CACHE=$(count_lines "{{corsCacheHeuristicsFile}}")
+      CLOUD_LEAKS=$(count_lines "{{cloudLeakFile}}")
+      PASSIVE_WEB_RISK_SIGNALS=$((SOURCEMAP_EXPOSURES + API_SURFACE + CORS_CACHE + CLOUD_LEAKS))
+      PASSIVE_WEB_RISK_SUMMARY_AVAILABLE=false
+      if [ -f "{{passiveWebRiskSummaryFile}}" ] && [ -s "{{passiveWebRiskSummaryFile}}" ]; then
+        PASSIVE_WEB_RISK_SUMMARY_AVAILABLE=true
+      fi
 
       # 提取技术栈
       TECH_STACK=""
@@ -194,6 +213,12 @@ steps:
         --argjson critical "$CRITICAL" \
         --argjson high "$HIGH" \
         --argjson priority_targets "$PRIORITY_COUNT" \
+        --argjson source_map_exposures "$SOURCEMAP_EXPOSURES" \
+        --argjson api_surface_candidates "$API_SURFACE" \
+        --argjson cors_cache_review_candidates "$CORS_CACHE" \
+        --argjson cloud_storage_candidates "$CLOUD_LEAKS" \
+        --argjson passive_web_risk_signals "$PASSIVE_WEB_RISK_SIGNALS" \
+        --argjson passive_web_risk_summary_available "$PASSIVE_WEB_RISK_SUMMARY_AVAILABLE" \
         --argjson waf_count "$WAF_COUNT" \
         --arg waf_types "$WAF_TYPES" \
         --arg tech_stack "$TECH_STACK" \
@@ -204,6 +229,12 @@ steps:
           critical: $critical,
           high: $high,
           priority_targets: $priority_targets,
+          source_map_exposures: $source_map_exposures,
+          api_surface_candidates: $api_surface_candidates,
+          cors_cache_review_candidates: $cors_cache_review_candidates,
+          cloud_storage_candidates: $cloud_storage_candidates,
+          passive_web_risk_signals: $passive_web_risk_signals,
+          passive_web_risk_summary_available: $passive_web_risk_summary_available,
           waf_count: $waf_count,
           waf_types: $waf_types,
           tech_stack: $tech_stack
@@ -226,12 +257,21 @@ steps:
 
       echo "[AI Coordinator] Checking submodule results..."
 
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       # 检查并报告各模块状态
       check_file() {
         file="$1"
         name="$2"
         if [ -f "$file" ] && jq empty "$file" 2>/dev/null; then
-          size=$(wc -c < "$file" 2>/dev/null || echo 0)
+          size=$(count_bytes "$file")
           if [ "$size" -gt 50 ]; then
             echo "[OK] [AI Coordinator] $name: available ($size bytes)"
             return 0
@@ -324,9 +364,20 @@ steps:
         VECTOR_KNOWLEDGE_RESULTS=$(jq -r 'length // 0' "{{vectorKnowledgeSearchFile}}" 2>/dev/null || echo 0)
       fi
 
+      PASSIVE_WEB_RISK_STATUS="not_available"
+      PASSIVE_WEB_RISK_SUMMARY_BYTES=0
+      PASSIVE_SOURCE_MAP_COUNT=$(count_lines "{{sourceMapExposureFile}}")
+      PASSIVE_API_SURFACE_COUNT=$(count_lines "{{apiSurfaceFile}}")
+      PASSIVE_CORS_CACHE_COUNT=$(count_lines "{{corsCacheHeuristicsFile}}")
+      PASSIVE_CLOUD_LEAK_COUNT=$(count_lines "{{cloudLeakFile}}")
+      if [ -f "{{passiveWebRiskSummaryFile}}" ] && [ -s "{{passiveWebRiskSummaryFile}}" ]; then
+        PASSIVE_WEB_RISK_STATUS="available"
+        PASSIVE_WEB_RISK_SUMMARY_BYTES=$(count_bytes "{{passiveWebRiskSummaryFile}}")
+      fi
+
       # 检查是否有任何模块产生了有效结果
       ANY_DATA="false"
-      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ] || [ "$INITIAL_SEMANTIC_STATUS" = "available" ] || [ "$KNOWLEDGE_STATUS" = "available" ] || [ "$VECTOR_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_VECTOR_KNOWLEDGE_STATUS" = "available" ]; then
+      if [ "$VULN_STATUS" = "available" ] || [ "$CHAIN_STATUS" = "available" ] || [ "$PLAN_STATUS" = "available" ] || [ "$SEMANTIC_STATUS" = "available" ] || [ "$INITIAL_SEMANTIC_STATUS" = "available" ] || [ "$KNOWLEDGE_STATUS" = "available" ] || [ "$VECTOR_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_KNOWLEDGE_STATUS" = "available" ] || [ "$INITIAL_VECTOR_KNOWLEDGE_STATUS" = "available" ] || [ "$PASSIVE_WEB_RISK_STATUS" = "available" ]; then
         ANY_DATA="true"
       fi
 
@@ -356,6 +407,12 @@ steps:
         --argjson knowledge_results "$KNOWLEDGE_RESULTS" \
         --arg vector_knowledge_status "$VECTOR_KNOWLEDGE_STATUS" \
         --argjson vector_knowledge_results "$VECTOR_KNOWLEDGE_RESULTS" \
+        --arg passive_web_risk_status "$PASSIVE_WEB_RISK_STATUS" \
+        --argjson passive_web_risk_summary_bytes "$PASSIVE_WEB_RISK_SUMMARY_BYTES" \
+        --argjson passive_source_map_count "$PASSIVE_SOURCE_MAP_COUNT" \
+        --argjson passive_api_surface_count "$PASSIVE_API_SURFACE_COUNT" \
+        --argjson passive_cors_cache_count "$PASSIVE_CORS_CACHE_COUNT" \
+        --argjson passive_cloud_leak_count "$PASSIVE_CLOUD_LEAK_COUNT" \
         '{
           aggregation_timestamp: $aggregation_timestamp,
           any_data_available: $any_data_available,
@@ -397,12 +454,20 @@ steps:
             vector_knowledge_search: {
               status: $vector_knowledge_status,
               results: $vector_knowledge_results
+            },
+            passive_web_risk: {
+              status: $passive_web_risk_status,
+              summary_bytes: $passive_web_risk_summary_bytes,
+              source_map_exposures: $passive_source_map_count,
+              api_surface_candidates: $passive_api_surface_count,
+              cors_cache_review_candidates: $passive_cors_cache_count,
+              cloud_storage_candidates: $passive_cloud_leak_count
             }
           }
         }' > {{Output}}/ai-analysis/aggregated-results.json
 
       echo "[AI Coordinator] Results aggregation complete"
-      echo "[AI Coordinator] Summary: Vuln=$CONFIRMED_VULNS confirmed, Chains=$TOTAL_CHAINS, Phases=$TOTAL_PHASES"
+      echo "[AI Coordinator] Summary: Vuln=$CONFIRMED_VULNS confirmed, Chains=$TOTAL_CHAINS, Phases=$TOTAL_PHASES, PassiveRisk=$PASSIVE_WEB_RISK_STATUS"
 
   - name: generate-unified-config
     type: bash
@@ -451,6 +516,15 @@ steps:
         fi
       }
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       ACTIVE_SEMANTIC_PRIORITY_FILE="{{semanticPriorityTargetsFile}}"
       for candidate in "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}"; do
         [ -n "$candidate" ] || continue
@@ -482,6 +556,19 @@ steps:
           WAF_NEEDED="true"
           WAF_TECH="$WAF_TYPES"
         fi
+      fi
+
+      PASSIVE_WEB_RISK_SIGNALS=0
+      PASSIVE_WEB_RISK_SUMMARY_AVAILABLE=false
+      if [ -f "$STATS_FILE" ]; then
+        PASSIVE_WEB_RISK_SIGNALS=$(jq -r '.passive_web_risk_signals // 0' "$STATS_FILE" 2>/dev/null || echo 0)
+        PASSIVE_WEB_RISK_SUMMARY_AVAILABLE=$(jq -r '.passive_web_risk_summary_available // false' "$STATS_FILE" 2>/dev/null || echo false)
+      fi
+      if [ "${PASSIVE_WEB_RISK_SIGNALS:-0}" -gt 0 ] 2>/dev/null; then
+        REASONING="$REASONING + passive web risk signals=$PASSIVE_WEB_RISK_SIGNALS"
+      fi
+      if [ "$PASSIVE_WEB_RISK_SUMMARY_AVAILABLE" = "true" ]; then
+        REASONING="$REASONING + passive web risk summary available"
       fi
 
       # 从漏洞验证结果中提取配置
@@ -707,8 +794,16 @@ steps:
 
       FOCUS_TMP="{{Output}}/ai-analysis/.focus-areas-{{TargetSpace}}.txt"
       RESCAN_TMP="{{Output}}/ai-analysis/.rescan-targets-{{TargetSpace}}.txt"
+      PASSIVE_TARGETS_TMP="{{Output}}/ai-analysis/.passive-targets-{{TargetSpace}}.txt"
       : > "$FOCUS_TMP"
       : > "$RESCAN_TMP"
+      : > "$PASSIVE_TARGETS_TMP"
+
+      append_passive_urls() {
+        file="$1"
+        [ -f "$file" ] || return 0
+        grep -Eo 'https?://[^[:space:]]+' "$file" 2>/dev/null || true
+      }
 
       if [ -f "{{priorityTargetsFile}}" ]; then
         head -15 "{{priorityTargetsFile}}" >> "$FOCUS_TMP" 2>/dev/null || true
@@ -729,6 +824,17 @@ steps:
         head -15 "$ACTIVE_SEMANTIC_PRIORITY_FILE" >> "$FOCUS_TMP" 2>/dev/null || true
         head -20 "$ACTIVE_SEMANTIC_PRIORITY_FILE" >> "$RESCAN_TMP" 2>/dev/null || true
       fi
+      {
+        append_passive_urls "{{sourceMapExposureFile}}"
+        append_passive_urls "{{apiSurfaceFile}}"
+        append_passive_urls "{{corsCacheHeuristicsFile}}"
+        append_passive_urls "{{cloudLeakFile}}"
+        append_passive_urls "{{passiveWebRiskSummaryFile}}"
+      } | awk 'NF && !seen[$0]++' > "$PASSIVE_TARGETS_TMP" || true
+      if [ -s "$PASSIVE_TARGETS_TMP" ]; then
+        head -12 "$PASSIVE_TARGETS_TMP" >> "$FOCUS_TMP" 2>/dev/null || true
+        head -16 "$PASSIVE_TARGETS_TMP" >> "$RESCAN_TMP" 2>/dev/null || true
+      fi
       if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
         jq -r '(.seed_targets.focus_areas // .refined_targets.focus_areas // [])[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$FOCUS_TMP" || true
         jq -r '(.seed_targets.priority_targets // .refined_targets.priority_targets // [])[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$FOCUS_TMP" || true
@@ -747,14 +853,18 @@ steps:
 
       FOCUS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FOCUS_TMP" 2>/dev/null || echo '[]')
       RESCAN_TARGETS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$RESCAN_TMP" 2>/dev/null || echo '[]')
-      FOCUS_COUNT=$(wc -l < "$FOCUS_TMP" 2>/dev/null || echo 0)
-      RESCAN_COUNT=$(wc -l < "$RESCAN_TMP" 2>/dev/null || echo 0)
+      FOCUS_COUNT=$(count_lines "$FOCUS_TMP")
+      RESCAN_COUNT=$(count_lines "$RESCAN_TMP")
+      PASSIVE_TARGET_COUNT=$(count_lines "$PASSIVE_TARGETS_TMP")
 
       if [ "$FOCUS_COUNT" -gt 0 ]; then
         REASONING="$REASONING + $FOCUS_COUNT focus areas"
       fi
       if [ "$RESCAN_COUNT" -gt 0 ]; then
         REASONING="$REASONING + $RESCAN_COUNT retest targets"
+      fi
+      if [ "$PASSIVE_TARGET_COUNT" -gt 0 ]; then
+        REASONING="$REASONING + passive targets=$PASSIVE_TARGET_COUNT"
       fi
 
       if [ "$PREV_FOLLOWUP_PRIORITY_MODE" = "manual-first" ] || [ "$PREV_FOLLOWUP_CONFIDENCE_LEVEL" = "high" ] || [ "${PREV_FOLLOWUP_ESCALATION_SCORE:-0}" -ge 12 ] 2>/dev/null; then
@@ -778,6 +888,9 @@ steps:
         --argjson focus_areas "$FOCUS_JSON" \
         --argjson rescan_targets "$RESCAN_TARGETS_JSON" \
         --argjson knowledge_context_hits "$TOTAL_KNOWLEDGE_HITS" \
+        --argjson passive_web_risk_signals "$PASSIVE_WEB_RISK_SIGNALS" \
+        --argjson passive_web_risk_summary_available "$PASSIVE_WEB_RISK_SUMMARY_AVAILABLE" \
+        --argjson passive_target_count "$PASSIVE_TARGET_COUNT" \
         --arg previous_followup_source_kind "$PREV_FOLLOWUP_SOURCE_KIND" \
         --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGET_COUNT" \
         --argjson previous_followup_focus_count "$PREV_FOLLOWUP_FOCUS_COUNT" \
@@ -817,6 +930,9 @@ steps:
           rescan_targets: $rescan_targets,
           decision_inputs: {
             knowledge_context_hits: $knowledge_context_hits,
+            passive_web_risk_signals: $passive_web_risk_signals,
+            passive_web_risk_summary_available: $passive_web_risk_summary_available,
+            passive_target_count: $passive_target_count,
             focus_area_count: ($focus_areas | length),
             rescan_target_count: ($rescan_targets | length),
             previous_followup_source_kind: $previous_followup_source_kind,
@@ -871,6 +987,8 @@ steps:
   - name: generate-comprehensive-report
     type: bash
     pre_condition: "{{enableIntelligentAnalysis}}"
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
 
@@ -896,7 +1014,16 @@ steps:
 
       # 添加各组件状态
       if [ -f "$AGG_FILE" ]; then
-        jq -r '.components | "### 漏洞验证\n- 状态: \(.vuln_validation.status)\n- 确认漏洞: \(.vuln_validation.confirmed_vulns)\n- 假阳性: \(.vuln_validation.false_positives)\n\n### 攻击链分析\n- 状态: \(.attack_chain.status)\n- 总攻击链: \(.attack_chain.total_chains)\n- 关键攻击链: \(.attack_chain.critical_chains)\n\n### 路径规划\n- 状态: \(.path_planning.status)\n- 规划阶段: \(.path_planning.total_phases)\n\n### 语义搜索\n- 状态: \(.semantic_search.status)\n- 搜索结果: \(.semantic_search.results)\n\n### 知识库上下文\n- 初始知识命中: \(.knowledge_search_initial.results)\n- 初始向量知识命中: \(.vector_knowledge_search_initial.results)\n- 漏洞后知识命中: \(.knowledge_search.results)\n- 漏洞后向量知识命中: \(.vector_knowledge_search.results)\n"' "$AGG_FILE" 2>/dev/null >> {{analysisOutputMd}} || true
+        jq -r '.components | "### 漏洞验证\n- 状态: \(.vuln_validation.status)\n- 确认漏洞: \(.vuln_validation.confirmed_vulns)\n- 假阳性: \(.vuln_validation.false_positives)\n\n### 攻击链分析\n- 状态: \(.attack_chain.status)\n- 总攻击链: \(.attack_chain.total_chains)\n- 关键攻击链: \(.attack_chain.critical_chains)\n\n### 路径规划\n- 状态: \(.path_planning.status)\n- 规划阶段: \(.path_planning.total_phases)\n\n### 语义搜索\n- 状态: \(.semantic_search.status)\n- 搜索结果: \(.semantic_search.results)\n\n### 被动 Web 风险\n- 状态: \(.passive_web_risk.status)\n- Source Map / Debug: \(.passive_web_risk.source_map_exposures)\n- API Surface: \(.passive_web_risk.api_surface_candidates)\n- CORS / Cache: \(.passive_web_risk.cors_cache_review_candidates)\n- Cloud Storage: \(.passive_web_risk.cloud_storage_candidates)\n\n### 知识库上下文\n- 初始知识命中: \(.knowledge_search_initial.results)\n- 初始向量知识命中: \(.vector_knowledge_search_initial.results)\n- 漏洞后知识命中: \(.knowledge_search.results)\n- 漏洞后向量知识命中: \(.vector_knowledge_search.results)\n"' "$AGG_FILE" 2>/dev/null >> {{analysisOutputMd}} || true
+      fi
+
+      if [ -f "{{passiveWebRiskSummaryFile}}" ] && [ -s "{{passiveWebRiskSummaryFile}}" ]; then
+        {
+          echo ""
+          echo "### 被动 Web 风险摘要"
+          echo ""
+          head -40 "{{passiveWebRiskSummaryFile}}" 2>/dev/null || true
+        } >> {{analysisOutputMd}}
       fi
 
       # 添加 AI 决策配置
@@ -917,6 +1044,8 @@ steps:
   - name: save-memory-context
     type: bash
     pre_condition: "{{enableIntelligentAnalysis}} && {{enableMemory}}"
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
 
@@ -954,7 +1083,7 @@ steps:
         "total_findings": $TOTAL,
         "confirmed_findings": $CONFIRMED,
         "attack_chains": $CHAINS,
-        "components_completed": ["vuln_validation", "attack_chain", "path_planning", "semantic_search"],
+        "components_completed": ["vuln_validation", "attack_chain", "path_planning", "semantic_search", "passive_web_risk"],
         "next_phases": ["vuln-suite", "code-review", "report"]
       }
       EOF
@@ -964,13 +1093,25 @@ steps:
   - name: generate-ai-status-report
     type: bash
     pre_condition: "{{enableIntelligentAnalysis}}"
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
 
       REPORT_FILE="{{Output}}/ai-analysis/ai-execution-status.json"
       MARKDOWN_FILE="{{Output}}/ai-analysis/ai-execution-status.md"
+      SUMMARY_FILE="{{analysisOutputJson}}"
 
       echo "[AI Status] Generating execution status report..."
+
+      count_bytes() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
 
       # 收集各模块状态
       check_module() {
@@ -981,7 +1122,7 @@ steps:
         error=""
 
         if [ -f "$file" ]; then
-          size=$(wc -c < "$file" 2>/dev/null || echo 0)
+          size=$(count_bytes "$file")
           if [ "$size" -gt 50 ]; then
             if jq empty "$file" 2>/dev/null; then
               status="completed"
@@ -1163,8 +1304,43 @@ steps:
 
       generate_markdown_report
 
+      jq -n \
+        --arg generated "$(date -Iseconds)" \
+        --arg target "{{Target}}" \
+        --arg overall_status "$OVERALL_STATUS" \
+        --arg stats_file "{{Output}}/ai-analysis/intelligent-stats.json" \
+        --arg aggregated_results_file "{{Output}}/ai-analysis/aggregated-results.json" \
+        --arg decision_file "{{aiDecisionFile}}" \
+        --arg vars_file "{{aiVarsFile}}" \
+        --arg markdown_file "{{analysisOutputMd}}" \
+        --arg status_file "$REPORT_FILE" \
+        --argjson completed_modules "$COMPLETED_COUNT" \
+        --argjson failed_modules "$FAILED_COUNT" \
+        --argjson skipped_modules "$SKIPPED_COUNT" \
+        --argjson recommendations "$RECOMMENDATIONS" \
+        '{
+          generated_at: $generated,
+          target: $target,
+          overall_status: $overall_status,
+          artifacts: {
+            stats_file: $stats_file,
+            aggregated_results_file: $aggregated_results_file,
+            decision_file: $decision_file,
+            vars_file: $vars_file,
+            markdown_file: $markdown_file,
+            status_file: $status_file
+          },
+          module_counts: {
+            completed: $completed_modules,
+            failed: $failed_modules,
+            skipped_or_empty: $skipped_modules
+          },
+          recommendations: $recommendations
+        }' > "$SUMMARY_FILE"
+
       echo "[AI Status] Report saved to $REPORT_FILE"
       echo "[AI Status] Markdown report saved to $MARKDOWN_FILE"
+      echo "[AI Status] Summary saved to $SUMMARY_FILE"
 
       # 输出汇总信息
       echo ""

@@ -6,13 +6,16 @@ steps:
   - name: seed-artifacts
     type: bash
     command: |
-      mkdir -p {{Output}}/ai-analysis {{Output}}/subdomain {{Output}}/probing {{Output}}/fingerprint {{Output}}/vulnscan {{Output}}/fixtures
+      mkdir -p {{Output}}/ai-analysis {{Output}}/subdomain {{Output}}/probing {{Output}}/fingerprint {{Output}}/vulnscan {{Output}}/fixtures {{Output}}/passive-web-risk
 
       LOGIN_URL="https://{{Target}}/login"
       ADMIN_URL="https://{{Target}}/admin"
       API_URL="https://api.{{Target}}/v1/users"
       FILE_URL="https://files.{{Target}}/download"
       PREVIEW_URL="https://{{Target}}/preview"
+      SOURCEMAP_URL="https://{{Target}}/static/app.js.map"
+      AUTH_URL="https://{{Target}}/auth/session"
+      SIGNED_URL="https://files.{{Target}}/download?signature=seedtoken"
 
       cat > {{Output}}/subdomain/subdomain-{{TargetSpace}}.txt <<EOF
       {{Target}}
@@ -210,6 +213,32 @@ steps:
       $LOGIN_URL
       $ADMIN_URL
       $API_URL
+      EOF
+
+      cat > {{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt <<EOF
+      [sourcemap] $SOURCEMAP_URL
+      EOF
+
+      cat > {{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt <<EOF
+      [js-api] $API_URL
+      [url-surface] $AUTH_URL
+      EOF
+
+      cat > {{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt <<EOF
+      [review-cors-cache] $API_URL status=200 content_type=application/json
+      [api-surface-review] $AUTH_URL
+      EOF
+
+      cat > {{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt <<EOF
+      [signed-url] $SIGNED_URL
+      EOF
+
+      cat > {{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md <<EOF
+      # Passive Web Risk Summary
+      - Source map exposure: $SOURCEMAP_URL
+      - API surface candidate: $API_URL
+      - Auth surface candidate: $AUTH_URL
+      - Signed URL candidate: $SIGNED_URL
       EOF
 
       cat > {{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json <<EOF

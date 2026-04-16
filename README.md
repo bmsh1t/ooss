@@ -150,6 +150,7 @@ make test-regression-ai-workflow-smoke
 make test-regression-ai-semantic-vector-smoke
 make test-regression-scan-content-smoke
 make test-regression-superdomain-lite-smoke
+make test-regression-superdomain-optimized-smoke
 make test-regression-queue-live
 make test-regression-stable-core
 ```
@@ -181,11 +182,16 @@ make test-regression-stable-core
   - verifies semantic search, decision artifacts, and KB writeback all stay aligned to the active `base-folder` and `workflow-folder`
   - auto-selects the next free local embeddings mock port when the default regression port is already occupied
   - stores temporary artifacts under `/tmp/osm-superdomain-lite-flow-smoke`
+- `make test-regression-superdomain-optimized-smoke`
+  - runs the real current-source `superdomain-extensive-ai-optimized` flow in a controlled workspace with seeded scan artifacts, live vectorkb retrieval, direct AI decision closure, follow-up packaging, and knowledge auto-learning enabled
+  - verifies the optimized AI chain stays bound to the active `base-folder` and `workflow-folder` while producing reusable decision / retest / operator / campaign / follow-up artifacts
+  - auto-selects the next free local embeddings mock port when the default regression port is already occupied
+  - stores temporary artifacts under `/tmp/osm-superdomain-optimized-flow-smoke`
 - `make test-regression-queue-live`
   - verifies CLI queued runs, vulnerability retest queue consumption, and campaign deep-scan queue consumption against a real worker
   - stores temporary artifacts under `/tmp/osm-queue-live`
 - `make test-regression-stable-core`
-  - runs the core stable-release smoke path serially: superdomain workflow validation, support/common-module validation (`incremental-check`, `osint`, `scan-content`, `scan-backup`, `scan-vuln`, `url-gf`, `iis-shortname`, `04-http-probe`, `05-fingerprint`, `06-web-crawl`, `07-content-analysis`, `09-vuln-suite`, `10-report`), fragment validation (`do-ai-knowledge-autolearn`, `do-scan-content`), AI follow-up smoke, provider-enabled semantic workflow smoke, deterministic local `scan-content` smoke, controlled current-source `superdomain-extensive-ai-lite` flow smoke, controlled current-source `superdomain-extensive-ai-stable` flow smoke, deterministic local `vuln-suite` Nuclei smoke, AI API, knowledge, vectorkb, and queue live regressions
+  - runs the core stable-release smoke path serially: superdomain workflow validation, support/common-module validation (`incremental-check`, `osint`, `scan-content`, `scan-backup`, `scan-vuln`, `url-gf`, `iis-shortname`, `04-http-probe`, `05-fingerprint`, `06-web-crawl`, `07-content-analysis`, `09-vuln-suite`, `10-report`), fragment validation (`do-ai-knowledge-autolearn`, `do-scan-content`), AI follow-up smoke, provider-enabled semantic workflow smoke, deterministic local `scan-content` smoke, controlled current-source `superdomain-extensive-ai-lite` / `superdomain-extensive-ai-stable` / `superdomain-extensive-ai-optimized` flow smoke, deterministic local `vuln-suite` Nuclei smoke, AI API, knowledge, vectorkb, and queue live regressions
   - verifies ACP-timeout fallback closure for vulnerability validation, attack-chain generation, attack-chain visualization, path planning, follow-up packaging, and knowledge auto-learning on the real current-source stable flow
   - verifies the real `scan-content` workflow keeps deparos-first behavior, avoids redundant ffuf fallback after success, and still closes the fingerprint/import path when ffuf fallback is required
   - verifies the real `09-vuln-suite` workflow produces a deterministic local Nuclei hit and report output, guarding against command-line regressions in the main Nuclei scan path
@@ -262,6 +268,8 @@ Notes:
 
 - either a dedicated `embeddings_config` provider, or at least one configured `llm.llm_providers` entry with an OpenAI-compatible `/embeddings` endpoint
   - Enables vectorkb indexing/search and AI workflow semantic retrieval
+- optional `rerank_config` with an OpenAI-compatible `/rerank` endpoint
+  - Enables second-stage reranking for `kb vector search`, `/knowledge/vector/search`, and the AI semantic-search workflow fragments
 - a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model`
   - Keeps vectorkb index/search bound to the same provider/model pair unless you override them explicitly
   - If left empty, Osmedeus now falls back to `embeddings_config.provider` and that provider's configured model
@@ -286,11 +294,22 @@ knowledge_vector:
 
 embeddings_config:
   enabled: true
-  provider: jina
-  jina:
-    api_url: "https://api.jina.ai/v1/embeddings"
-    model: "jina-embeddings-v5-text-small"
-    api_key: "${JINA_API_KEY}"
+  provider: openai
+  openai:
+    api_url: "https://router.tumuer.me/v1/embeddings"
+    model: "BAAI/bge-m3"
+    api_key: "${TUMUER_API_KEY}"
+
+rerank_config:
+  enabled: true
+  provider: openai
+  top_n: 10
+  max_candidates: 40
+  timeout: 15s
+  openai:
+    api_url: "https://router.tumuer.me/v1/rerank"
+    model: "Pro/BAAI/bge-reranker-v2-m3"
+    api_key: "${TUMUER_API_KEY}"
 
 llm_config:
   max_retries: 3
@@ -300,6 +319,7 @@ llm_config:
 ```
 
 There is no separate `semantic_search_config` block anymore. AI semantic retrieval is now driven by workflow parameters plus `knowledge_vector` and `embeddings_config`.
+If `rerank_config.enabled=true`, `ai-semantic-search` and `ai-semantic-search-hybrid` now automatically pass rerank through the same KB retrieval path and surface `rerank_applied` / `vector_ranking_source` metadata in their JSON artifacts.
 
 Reference files:
 
@@ -336,6 +356,7 @@ If vectorkb auto-index is enabled but the embedding provider is not configured y
 osmedeus kb docs -w example.com
 osmedeus kb search --query "authentication bypass" -w example.com
 osmedeus kb vector search --query "authentication bypass" -w example.com
+osmedeus kb vector search --query "authentication bypass" -w example.com --rerank
 osmedeus kb vector doctor -w example.com
 ```
 
@@ -384,12 +405,14 @@ This only changes semantic retrieval. Post-run `ai-knowledge-autolearn` now defa
 - `kb export` turns stored knowledge chunks into a line-oriented corpus for retrieval
 - `ai-semantic-search` now:
   - performs direct `kb vector search` hits against the standalone `vector-kb.sqlite`
+  - automatically applies rerank when `rerank_config.enabled=true` and records `rerank_applied`, `rerank_provider`, `rerank_model`, `vector_ranking_source`
   - merges those results with direct `kb search` keyword hits as fallback/supplement
   - supports layered retrieval with primary/shared/global knowledge workspaces
   - keeps vectorkb bound to the selected provider/model pair
   - feeds both direct knowledge hits and vector recall candidates into the downstream semantic-search agent
 - `ai-semantic-search-hybrid` now:
   - uses vectorkb vector recall plus `kb search` keyword recall
+  - can reuse the same rerank stage and carry rerank metadata into the final hybrid JSON output
   - avoids Chroma/Python runtime-install behavior
   - fuses vector hits, keyword hits, and local scan corpus hits through jq-based ranking
 - `ai-apply-decision` normalizes the AI output into `applied-ai-decision-{{TargetSpace}}.json`, `dynamic-config.yaml`, and `scan-env.sh`, so downstream modules consume one stable decision layer
@@ -410,7 +433,7 @@ curl -X POST http://localhost:8002/osm/api/knowledge/vector/index \
 curl -X POST http://localhost:8002/osm/api/knowledge/vector/search \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"workspace":"example.com","query":"authentication bypass","limit":10}'
+  -d '{"workspace":"example.com","query":"authentication bypass","limit":10,"enable_rerank":true,"rerank_top_n":8}'
 
 curl http://localhost:8002/osm/api/knowledge/vector/stats \
   -H "Authorization: Bearer $TOKEN"

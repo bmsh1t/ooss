@@ -74,6 +74,16 @@ params:
     default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
   - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
 
   # 配置
   - name: enableAttackChain
@@ -168,6 +178,15 @@ steps:
       : > "{{Output}}/ai-analysis/.input/tech-stack.txt"
       : > "{{Output}}/ai-analysis/.input/semantic-context.txt"
       : > "{{Output}}/ai-analysis/.input/knowledge-context.txt"
+      : > "{{Output}}/ai-analysis/.input/passive-web-risk.txt"
+
+      append_passive_context() {
+        file="$1"
+        label="$2"
+        limit="${3:-5}"
+        [ -f "$file" ] || return 0
+        sed -n "1,${limit}p" "$file" 2>/dev/null | sed "s|^|[$label] |" >> "{{Output}}/ai-analysis/.input/passive-web-risk.txt" || true
+      }
 
       # 优先使用已验证/已确认的漏洞数据
       if [ -f "{{vulnValidationFile}}" ] && jq empty "{{vulnValidationFile}}" 2>/dev/null; then
@@ -238,9 +257,23 @@ steps:
         fi
       } | awk 'NF && !seen[$0]++' | head -12 > {{Output}}/ai-analysis/.input/knowledge-context.txt || true
 
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        sed -n '1,40p' "{{passiveWebRiskSummaryFile}}" > "{{Output}}/ai-analysis/.input/passive-web-risk.txt" 2>/dev/null || true
+      else
+        append_passive_context "{{sourceMapExposureFile}}" "source-map" 6
+        append_passive_context "{{apiSurfaceFile}}" "api-surface" 8
+        append_passive_context "{{corsCacheHeuristicsFile}}" "cors-cache" 8
+        append_passive_context "{{cloudLeakFile}}" "cloud-storage" 6
+      fi
+
+      awk 'NF && !seen[$0]++' "{{Output}}/ai-analysis/.input/passive-web-risk.txt" 2>/dev/null > "{{Output}}/ai-analysis/.input/passive-web-risk.txt.tmp" \
+        && mv "{{Output}}/ai-analysis/.input/passive-web-risk.txt.tmp" "{{Output}}/ai-analysis/.input/passive-web-risk.txt" \
+        || true
+
       INPUT_SIZE=$(count_lines "{{Output}}/ai-analysis/.input/confirmed-vulns.txt")
       SEMANTIC_SIZE=$(count_lines "{{Output}}/ai-analysis/.input/semantic-context.txt")
       KNOWLEDGE_SIZE=$(count_lines "{{Output}}/ai-analysis/.input/knowledge-context.txt")
+      PASSIVE_SIZE=$(count_lines "{{Output}}/ai-analysis/.input/passive-web-risk.txt")
 
       jq -n \
         --arg target "{{Target}}" \
@@ -253,9 +286,11 @@ steps:
         --arg tech_stack_file "{{Output}}/ai-analysis/.input/tech-stack.txt" \
         --arg semantic_context_file "{{Output}}/ai-analysis/.input/semantic-context.txt" \
         --arg knowledge_context_file "{{Output}}/ai-analysis/.input/knowledge-context.txt" \
+        --arg passive_web_risk_file "{{Output}}/ai-analysis/.input/passive-web-risk.txt" \
         --argjson confirmed_vuln_count "$INPUT_SIZE" \
         --argjson semantic_context_count "$SEMANTIC_SIZE" \
         --argjson knowledge_context_count "$KNOWLEDGE_SIZE" \
+        --argjson passive_web_risk_count "$PASSIVE_SIZE" \
         '{
           source: "standardized-attack-chain-input",
           target: $target,
@@ -271,13 +306,15 @@ steps:
             tech_stack_file: $tech_stack_file,
             semantic_context_file: $semantic_context_file,
             knowledge_context_file: $knowledge_context_file,
+            passive_web_risk_file: $passive_web_risk_file,
             confirmed_vuln_count: $confirmed_vuln_count,
             semantic_context_count: $semantic_context_count,
-            knowledge_context_count: $knowledge_context_count
+            knowledge_context_count: $knowledge_context_count,
+            passive_web_risk_count: $passive_web_risk_count
           }
         }' > "{{attackChainPreparedInput}}" 2>/dev/null || printf '%s\n' '{}' > "{{attackChainPreparedInput}}"
 
-      echo "[Attack Chain] Input prepared: vulns=$INPUT_SIZE semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      echo "[Attack Chain] Input prepared: vulns=$INPUT_SIZE semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE passive=$PASSIVE_SIZE"
 
   - name: check-attack-chain-data
     type: bash
@@ -378,12 +415,14 @@ steps:
       - 技术栈：{{Output}}/ai-analysis/.input/tech-stack.txt
       - 语义命中/优先目标：{{Output}}/ai-analysis/.input/semantic-context.txt
       - 知识库命中：{{Output}}/ai-analysis/.input/knowledge-context.txt
+      - 被动 Web 风险摘要：{{Output}}/ai-analysis/.input/passive-web-risk.txt
       
       请读取数据文件，分析并输出攻击链。
 
       额外要求：
       - 如果语义搜索和知识库多次指向同一入口、同一产品弱点或同一业务面，显著提高该入口的优先级
       - 优先构造“已验证漏洞 + 语义高价值目标 + 知识库利用经验”三者交集的攻击链
+      - 如果被动 Web 风险摘要指向 source map/debug、API/auth/internal 面、CORS/cache 复核点或 cloud/signed URL 暴露，应把这些入口作为高价值链路前置线索
       - 不要为了凑链而虚构不存在的中间步骤
       
       输出格式：
@@ -397,6 +436,12 @@ steps:
     exports:
       attack_chain_json: "{{agent_content}}"
 
+  - name: persist-attack-chain-raw
+    type: function
+    pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
+    functions:
+      - 'save_content(typeof attack_chain_json !== "undefined" ? attack_chain_json : "", "{{Output}}/ai-analysis/.attack-chain-raw-{{TargetSpace}}.txt")'
+
   - name: save-attack-chain-results
     type: bash
     pre_condition: '{{enableAttackChain}} && !file_exists("{{Output}}/ai-analysis/.attack-chain-skip")'
@@ -407,8 +452,7 @@ steps:
       JSON_FILE="{{Output}}/ai-analysis/.attack-chain-json-{{TargetSpace}}.json"
       FALLBACK_LINES="{{Output}}/ai-analysis/.attack-chain-fallback-lines-{{TargetSpace}}.txt"
       FALLBACK_URLS="{{Output}}/ai-analysis/.attack-chain-fallback-urls-{{TargetSpace}}.txt"
-
-      printf '%s' '{{attack_chain_json}}' > "$RAW_FILE"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -441,29 +485,43 @@ steps:
           awk 'NF { print "confirmed-url | " $0 " | severity=high" }' "{{confirmedUrlsFile}}" 2>/dev/null | awk 'NF && !seen[$0]++' | head -10 > "$FALLBACK_LINES" || true
         fi
 
-        awk -F'|' '
-          NF >= 2 {
-            url=$2
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", url)
-            if (url ~ /^https?:\/\// && !seen[url]++) print url
-          }
-        ' "$FALLBACK_LINES" > "$FALLBACK_URLS" || true
-
-        FALLBACK_URLS_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_URLS" 2>/dev/null || echo '[]')
         jq -R -s '
+          def trim_ws:
+            gsub("^[[:space:]]+|[[:space:]]+$"; "");
+          def parse_structured:
+            capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
+            | if . == null then null else {
+                finding: (.finding | trim_ws),
+                url: (.url | trim_ws),
+                severity: (.severity | trim_ws | ascii_downcase)
+              } end;
+          def parse_generic:
+            . as $line
+            | (($line | capture("(?<url>https?://[^[:space:]\"]+)")?.url) // "") as $url
+            | if $url == "" then null else {
+                finding: (
+                  $line
+                  | sub("^\\[[^]]+\\][[:space:]]*"; "")
+                  | sub("[[:space:]]*-[[:space:]]*" + $url + "$"; "")
+                  | trim_ws
+                ),
+                url: $url,
+                severity: (($line | capture("^\\[(?<sev>[^]]+)\\]")?.sev // "high") | ascii_downcase)
+              } end;
           split("\n")
           | map(select(length > 0))
-          | map(
-              capture("^(?<finding>[^|]+) \\| (?<url>[^|]+) \\| severity=(?<severity>.+)$")?
-              | select(. != null and (.url | test("^https?://")))
-              | {
-                  chain_name: ((.finding // "validated finding") + " -> manual exploitation"),
-                  url: .url,
-                  vulnerability: (.finding // "validated finding"),
-                  severity: (.severity // "high")
-                }
-            )
+          | map((parse_structured // parse_generic))
+          | map(select(. != null and (.url | test("^https?://"))))
+          | map({
+              chain_name: (((.finding // "") | if . == "" then "validated finding" else . end) + " -> manual exploitation"),
+              url: .url,
+              vulnerability: (((.finding // "") | if . == "" then "validated finding" else . end)),
+              severity: (.severity // "high")
+            })
         ' "$FALLBACK_LINES" > "$JSON_FILE"
+
+        FALLBACK_URLS_JSON=$(jq -c '[.[].url // empty] | map(select(length > 0)) | unique' "$JSON_FILE" 2>/dev/null || echo '[]')
+        printf '%s\n' "$FALLBACK_URLS_JSON" | jq -r '.[]' > "$FALLBACK_URLS" 2>/dev/null || true
 
         jq -n \
           --slurpfile chains "$JSON_FILE" \
@@ -478,7 +536,7 @@ steps:
             },
             attack_chains: [
               $chains[0][] | {
-                chain_id: ("fallback-chain-" + ((.url | @base64) | gsub("[/=+]"; "") | .[0:10])),
+                chain_id: ("fallback-chain-" + ((((.vulnerability // "finding") + "|" + (.url // "")) | @base64) | gsub("[/=+]"; "") | .[0:16])),
                 chain_name: .chain_name,
                 entry_point: {
                   vulnerability: .vulnerability,
@@ -525,12 +583,19 @@ steps:
       fi
 
       jq '
-        .attack_chain_summary = ((.attack_chain_summary // {}) + {
-          total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
-          critical_chains: (.attack_chain_summary.critical_chains // 0),
-          high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
-          most_likely_entry_points: (.attack_chain_summary.most_likely_entry_points // [])
-        })
+        ((.attack_chain_summary // {}).most_likely_entry_points // []) as $existing_entry_points
+        | .attack_chain_summary = ((.attack_chain_summary // {}) + {
+            total_chains: (.attack_chain_summary.total_chains // ([.attack_chains[]?] | length)),
+            critical_chains: (.attack_chain_summary.critical_chains // 0),
+            high_impact_chains: (.attack_chain_summary.high_impact_chains // 0),
+            most_likely_entry_points: (
+              if ($existing_entry_points | length) > 0 then
+                $existing_entry_points
+              else
+                ([.attack_chains[]?.entry_point.url | select(. != null and . != "")] | unique)
+              end
+            )
+          })
         | .attack_chains = (.attack_chains // [])
         | .critical_paths = (.critical_paths // [])
         | .defense_recommendations = (.defense_recommendations // [])

@@ -1,0 +1,29 @@
+kind: module
+name: test-llm-responses
+description: Test LLM Responses API mode execution
+tags: test,llm,responses
+
+params:
+  - name: target
+    required: true
+    default: example.com
+
+steps:
+  - name: responses-chat
+    type: llm
+    log: "Running LLM via Responses API"
+    messages:
+      - role: user
+        content: "Search recent reconnaissance guidance for {{Target}}"
+    extra_llm_parameters:
+      api_mode: responses
+      tools:
+        - type: web_search_preview
+    timeout: 60
+    exports:
+      responses_text: "{{responses_chat_content}}"
+
+  - name: verify-responses-output
+    type: bash
+    log: "Printing Responses API result"
+    command: 'echo "Responses summary: {{responses_text}}"'

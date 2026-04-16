@@ -1,0 +1,15 @@
+kind: flow
+name: domain-superdomain-extensive-ai
+description: Exhaustive recon - full port range with DNS bruteforce and permutations
+tags: recon, domain, extensive
+extends: superdomain-extensive-ai-optimized
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f domain-superdomain-extensive-ai -t example.com
+
+override:
+  params:
+    enableDnsBruteForcing: true
+    enablePermutation: true
+    commonHttpsPorts: "1-65535"
+    commonHttpPorts: "1-65535"

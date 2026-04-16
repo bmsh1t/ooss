@@ -111,7 +111,7 @@ func GenerateEmbeddings(ctx context.Context, cfg *config.Config, input []string,
 
 // GenerateEmbeddingsWithProvider generates embeddings using the explicitly selected provider.
 func GenerateEmbeddingsWithProvider(ctx context.Context, cfg *config.Config, providerName string, input []string, modelOverride string) ([][]float64, string, error) {
-	if err := validateEmbeddingConfig(cfg, input); err != nil {
+	if err := validateEmbeddingInput(cfg, input); err != nil {
 		return nil, "", err
 	}
 
@@ -131,12 +131,19 @@ func GenerateEmbeddingsWithProvider(ctx context.Context, cfg *config.Config, pro
 	return requestEmbeddings(ctx, cfg, provider, input, model, getEmbeddingTimeout(cfg))
 }
 
-func validateEmbeddingConfig(cfg *config.Config, input []string) error {
+func validateEmbeddingInput(cfg *config.Config, input []string) error {
 	if cfg == nil {
 		return fmt.Errorf("configuration not loaded")
 	}
 	if len(input) == 0 {
 		return fmt.Errorf("input is required")
+	}
+	return nil
+}
+
+func validateEmbeddingConfig(cfg *config.Config, input []string) error {
+	if err := validateEmbeddingInput(cfg, input); err != nil {
+		return err
 	}
 	if cfg.IsEmbeddingsConfigEnabled() {
 		return nil

@@ -1,22 +1,14 @@
 package functions
 
 import (
-	"bytes"
-	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/dop251/goja"
 	"github.com/j3ssie/osmedeus/v5/internal/config"
-	"github.com/j3ssie/osmedeus/v5/internal/core"
 	"github.com/j3ssie/osmedeus/v5/internal/logger"
-	"github.com/j3ssie/osmedeus/v5/internal/retry"
 	"github.com/j3ssie/osmedeus/v5/internal/terminal"
 	"go.uber.org/zap"
 )
@@ -26,6 +18,7 @@ type llmFuncConfig struct {
 	BaseURL   string
 	AuthToken string
 	Model     string
+	APIMode   string
 }
 
 // getLLMConfig resolves LLM config with environment variable overrides (highest priority)
@@ -52,6 +45,9 @@ func getLLMConfig() (*llmFuncConfig, error) {
 	}
 	if v := os.Getenv("OSM_LLM_MODEL"); v != "" {
 		result.Model = v
+	}
+	if v := os.Getenv("OSM_LLM_API_MODE"); v != "" {
+		result.APIMode = v
 	}
 
 	// Validate we have required configuration
@@ -93,90 +89,6 @@ type llmChatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// sendLLMRequest sends a request to the LLM API with retry logic
-func sendLLMRequest(llmCfg *llmFuncConfig, bodyBytes []byte) (string, error) {
-	// Create request
-	req, err := http.NewRequest("POST", llmCfg.BaseURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", core.DefaultUA)
-	if llmCfg.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+llmCfg.AuthToken)
-	}
-
-	// Create client with timeout and TLS skip verify
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	// Execute request with retry logic (3 attempts, exponential backoff)
-	var resp *http.Response
-	ctx := context.Background()
-	retryCfg := retry.Config{
-		MaxAttempts:  3,
-		InitialDelay: 500 * time.Millisecond,
-		MaxDelay:     5 * time.Second,
-		Multiplier:   2.0,
-	}
-
-	err = retry.Do(ctx, retryCfg, func() error {
-		var reqErr error
-		// Need to recreate body for retries since it may have been consumed
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		resp, reqErr = client.Do(req)
-		if reqErr != nil {
-			return retry.Retryable(reqErr)
-		}
-		// Retry on server errors (5xx) and rate limits (429)
-		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-			_ = resp.Body.Close()
-			return retry.Retryable(fmt.Errorf("server error: %d", resp.StatusCode))
-		}
-		return nil
-	})
-
-	if err != nil {
-		return "", fmt.Errorf("request failed after retries: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Check for non-2xx status codes
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Parse response
-	var llmResp llmChatResponse
-	if err := json.Unmarshal(respBody, &llmResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	// Check for API error in response
-	if llmResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", llmResp.Error.Message)
-	}
-
-	// Extract content from first choice
-	if len(llmResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
-	}
-
-	return llmResp.Choices[0].Message.Content, nil
-}
-
 // llmInvoke makes a simple LLM call with a single message
 // Usage: llm_invoke(message) -> string
 func (vf *vmFunc) llmInvoke(call goja.FunctionCall) goja.Value {
@@ -196,14 +108,18 @@ func (vf *vmFunc) llmInvoke(call goja.FunctionCall) goja.Value {
 	}
 
 	// Build request body
-	reqBody := llmChatRequest{
-		Model: llmCfg.Model,
-		Messages: []llmMessage{
+	body := map[string]interface{}{
+		"model": llmCfg.Model,
+	}
+	if strings.EqualFold(strings.TrimSpace(llmCfg.APIMode), "responses") || strings.HasSuffix(strings.TrimRight(llmCfg.BaseURL, "/"), "/responses") {
+		body["input"] = message
+	} else {
+		body["messages"] = []llmMessage{
 			{Role: "user", Content: message},
-		},
+		}
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		logger.Get().Warn(FnLLMInvoke+": failed to marshal request", zap.Error(err))
 		return vf.vm.ToValue("")
@@ -276,7 +192,7 @@ func (vf *vmFunc) llmInvokeCustom(call goja.FunctionCall) goja.Value {
 
 // llmConversations makes an LLM call with multiple messages
 // Usage: llm_conversations(msg1, msg2, ...) -> string
-// Each message should be in format "role:content" where role is system, user, or assistant
+// Each message should be in format "role:content" where role is system, developer, user, or assistant
 func (vf *vmFunc) llmConversations(call goja.FunctionCall) goja.Value {
 	logger.Get().Debug("Calling "+terminal.HiGreen(FnLLMConversations), zap.Int("argCount", len(call.Arguments)))
 
@@ -312,15 +228,15 @@ func (vf *vmFunc) llmConversations(call goja.FunctionCall) goja.Value {
 		content := strings.TrimSpace(msgStr[colonIdx+1:])
 
 		// Validate role
-		validRoles := map[string]bool{"system": true, "user": true, "assistant": true}
+		validRoles := map[string]bool{"system": true, "developer": true, "user": true, "assistant": true}
 		if !validRoles[role] {
-			logger.Get().Warn(FnLLMConversations+": invalid role (expected system, user, or assistant)",
+			logger.Get().Warn(FnLLMConversations+": invalid role (expected system, developer, user, or assistant)",
 				zap.Int("argIndex", i), zap.String("role", role))
 			return vf.vm.ToValue("")
 		}
 
 		messages = append(messages, llmMessage{
-			Role:    role,
+			Role:    normalizeFuncRole(role),
 			Content: content,
 		})
 	}
@@ -331,12 +247,16 @@ func (vf *vmFunc) llmConversations(call goja.FunctionCall) goja.Value {
 	}
 
 	// Build request body
-	reqBody := llmChatRequest{
-		Model:    llmCfg.Model,
-		Messages: messages,
+	body := map[string]interface{}{
+		"model": llmCfg.Model,
+	}
+	if strings.EqualFold(strings.TrimSpace(llmCfg.APIMode), "responses") || strings.HasSuffix(strings.TrimRight(llmCfg.BaseURL, "/"), "/responses") {
+		body["input"] = convertFuncMessagesToResponsesInput(messages)
+	} else {
+		body["messages"] = messages
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		logger.Get().Warn(FnLLMConversations+": failed to marshal request", zap.Error(err))
 		return vf.vm.ToValue("")

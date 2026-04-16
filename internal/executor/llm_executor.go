@@ -77,6 +77,7 @@ type MergedLLMConfig struct {
 	ResponseFormat *core.LLMResponseFormat
 	CustomHeaders  map[string]string
 	SystemPrompt   string
+	ExtraParams    map[string]interface{}
 }
 
 // ChatCompletionRequest is the OpenAI-compatible request format
@@ -544,6 +545,17 @@ func (e *LLMExecutor) sendChatRequest(
 	request *ChatCompletionRequest,
 	llmConfig *MergedLLMConfig,
 ) (*ChatCompletionResponse, error) {
+	if shouldUseResponsesAPI(provider, llmConfig) {
+		if request.Stream {
+			return e.sendResponsesRequestStreaming(ctx, provider, request, llmConfig, func(token string) {
+				if !e.silent {
+					fmt.Print(token)
+				}
+			})
+		}
+		return e.sendResponsesRequest(ctx, provider, request, llmConfig)
+	}
+
 	if request.Stream {
 		return e.sendChatRequestStreaming(ctx, provider, request, llmConfig, func(token string) {
 			if !e.silent {
@@ -1017,6 +1029,7 @@ func (e *LLMExecutor) getMergedConfig(step *core.Step) *MergedLLMConfig {
 		Stream:        globalLLM.Stream,
 		SystemPrompt:  globalLLM.SystemPrompt,
 		CustomHeaders: make(map[string]string),
+		ExtraParams:   make(map[string]interface{}),
 	}
 
 	// Set default response format if structured JSON is enabled globally
@@ -1078,6 +1091,9 @@ func (e *LLMExecutor) getMergedConfig(step *core.Step) *MergedLLMConfig {
 
 	// Apply extra LLM parameters (these can override anything)
 	if step.ExtraLLMParams != nil {
+		for key, value := range step.ExtraLLMParams {
+			merged.ExtraParams[key] = value
+		}
 		if model, ok := step.ExtraLLMParams["model"].(string); ok {
 			merged.Model = model
 		}

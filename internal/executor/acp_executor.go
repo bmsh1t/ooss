@@ -47,21 +47,18 @@ func (e *ACPExecutor) StepTypes() []core.StepType {
 }
 
 // ResolveAgent resolves the agent command and args from step configuration.
-// It checks step.Agent against the built-in registry first, then falls back to
-// step.ACPConfig.Command/Args for custom agents.
+// Custom commands take precedence over the built-in registry.
 func ResolveAgent(step *core.Step) (command string, args []string, err error) {
-	// Check built-in registry first
+	if step.ACPConfig != nil && step.ACPConfig.Command != "" {
+		return step.ACPConfig.Command, step.ACPConfig.Args, nil
+	}
+
 	if step.Agent != "" {
 		def, ok := core.ResolveBuiltinACPAgent(step.Agent)
 		if !ok {
 			return "", nil, fmt.Errorf("unknown built-in agent: %q (available: %s)", step.Agent, availableAgentNames())
 		}
 		return def.Command, def.Args, nil
-	}
-
-	// Custom agent via acp_config
-	if step.ACPConfig != nil && step.ACPConfig.Command != "" {
-		return step.ACPConfig.Command, step.ACPConfig.Args, nil
 	}
 
 	return "", nil, fmt.Errorf("agent-acp step requires 'agent' field or 'acp_config.command'")
@@ -105,9 +102,9 @@ func (e *ACPExecutor) Execute(ctx context.Context, step *core.Step, execCtx *cor
 		}
 	}
 
-	// Validate we have an agent
+	// Validate we have an agent or a custom ACP command.
 	agentName := step.Agent
-	if agentName == "" {
+	if agentName == "" && (step.ACPConfig == nil || step.ACPConfig.Command == "") {
 		err := fmt.Errorf("agent-acp step requires 'agent' field or 'acp_config.command'")
 		result.Status = core.StepStatusFailed
 		result.Error = err
@@ -143,6 +140,10 @@ func (e *ACPExecutor) Execute(ctx context.Context, step *core.Step, execCtx *cor
 
 	// Environment and write config
 	if step.ACPConfig != nil {
+		if step.ACPConfig.Command != "" {
+			cfg.Command = step.ACPConfig.Command
+			cfg.Args = append([]string(nil), step.ACPConfig.Args...)
+		}
 		cfg.Env = step.ACPConfig.Env
 		cfg.WriteEnabled = step.ACPConfig.WriteEnabled
 	}
@@ -176,6 +177,8 @@ func (e *ACPExecutor) Execute(ctx context.Context, step *core.Step, execCtx *cor
 
 // RunAgentACPConfig holds options for standalone RunAgentACP calls.
 type RunAgentACPConfig struct {
+	Command      string            // Custom agent command (overrides built-in registry)
+	Args         []string          // Custom agent args
 	Cwd          string            // Working directory (default: ".")
 	AllowedPaths []string          // Restrict file reads to these directories
 	Env          map[string]string // Extra environment variables for agent process
@@ -197,18 +200,20 @@ func RunAgentACP(ctx context.Context, prompt, agentName string, cfg *RunAgentACP
 		cfg = &RunAgentACPConfig{}
 	}
 
-	// Default agent
-	if agentName == "" {
-		agentName = core.DefaultACPAgent
-	}
+	command := cfg.Command
+	args := append([]string(nil), cfg.Args...)
+	if command == "" {
+		if agentName == "" {
+			agentName = core.DefaultACPAgent
+		}
 
-	// Resolve agent command from built-in registry
-	def, ok := core.ResolveBuiltinACPAgent(agentName)
-	if !ok {
-		return "", "", fmt.Errorf("unknown agent: %q (available: %s)", agentName, availableAgentNames())
+		def, ok := core.ResolveBuiltinACPAgent(agentName)
+		if !ok {
+			return "", "", fmt.Errorf("unknown agent: %q (available: %s)", agentName, availableAgentNames())
+		}
+		command = def.Command
+		args = def.Args
 	}
-	command := def.Command
-	args := def.Args
 
 	// Verify command exists in PATH
 	cmdPath, err := exec.LookPath(command)
@@ -383,11 +388,11 @@ func ListAgentNames() []string {
 
 // resolveAgentName returns the agent name for exports.
 func resolveAgentName(step *core.Step) string {
-	if step.Agent != "" {
-		return step.Agent
-	}
 	if step.ACPConfig != nil && step.ACPConfig.Command != "" {
 		return step.ACPConfig.Command
+	}
+	if step.Agent != "" {
+		return step.Agent
 	}
 	return "unknown"
 }

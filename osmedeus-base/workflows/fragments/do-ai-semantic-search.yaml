@@ -30,6 +30,8 @@ params:
     default: "{{Output}}/ai-analysis/semantic-priority-vulns-{{TargetSpace}}.json"
   - name: vectorSearchResultsOutput
     default: "{{Output}}/ai-analysis/vector-search-results-{{TargetSpace}}.json"
+  - name: rerankResultsOutput
+    default: "{{Output}}/ai-analysis/rerank-results-{{TargetSpace}}.json"
   - name: vectorKnowledgeSearchOutput
     default: "{{Output}}/ai-analysis/vector-kb-search-results-{{TargetSpace}}.json"
   - name: knowledgeSearchOutput
@@ -158,6 +160,26 @@ params:
     type: bool
     default: true
     description: "Prefer direct search against vector-kb.sqlite before keyword fallback"
+  - name: enableRerank
+    type: bool
+    default: true
+    description: "Enable rerank on kb vector search when rerank_config is available"
+  - name: rerankProvider
+    type: string
+    default: ""
+    description: "Optional rerank provider override; empty uses rerank_config.provider"
+  - name: rerankModel
+    type: string
+    default: ""
+    description: "Optional rerank model override; empty uses rerank provider default"
+  - name: rerankTopN
+    type: integer
+    default: 10
+    description: "Maximum number of reranked hits kept from the candidate set"
+  - name: rerankMaxCandidates
+    type: integer
+    default: 40
+    description: "Maximum number of recall candidates sent to rerank"
   - name: maxKnowledgeChunks
     type: integer
     default: 200
@@ -191,6 +213,9 @@ steps:
     functions:
       - 'log_info("Embeddings provider override: {{embeddingsProvider}}")'
       - 'log_info("Embeddings model override: {{embeddingsModel}}")'
+      - 'log_info("Semantic rerank enabled: {{enableRerank}}")'
+      - 'log_info("Rerank provider override: {{rerankProvider}}")'
+      - 'log_info("Rerank model override: {{rerankModel}}")'
       - 'log_info("Semantic vector retrieval uses kb vector search with optional provider/model overrides")'
 
   - name: check-semantic-data
@@ -198,21 +223,29 @@ steps:
     pre_condition: "{{enableSemanticSearch}}"
     command: |
       echo "[INFO] [Semantic Search] Checking data availability..."
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       # 检查索引数据
-      HTTP_COUNT=0
-      SUBDOMAIN_COUNT=0
-      FINGERPRINT_SIZE=0
-      
-      if [ -f "{{httpFile}}" ]; then
-        HTTP_COUNT=$(wc -l < "{{httpFile}}" 2>/dev/null || echo 0)
-      fi
-      if [ -f "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" ]; then
-        SUBDOMAIN_COUNT=$(wc -l < "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt" 2>/dev/null || echo 0)
-      fi
-      if [ -f "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" ]; then
-        FINGERPRINT_SIZE=$(wc -c < "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl" 2>/dev/null || echo 0)
-      fi
+      HTTP_COUNT=$(count_lines_safe "{{httpFile}}")
+      SUBDOMAIN_COUNT=$(count_lines_safe "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt")
+      FINGERPRINT_SIZE=$(count_bytes_safe "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl")
       
       echo "[INFO] [Semantic Search] Data check: http=$HTTP_COUNT, subdomains=$SUBDOMAIN_COUNT, fingerprint=$FINGERPRINT_SIZE bytes"
       
@@ -227,10 +260,19 @@ steps:
     command: |
       mkdir -p {{semanticIndexDir}}
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       BASE_QUERY="{{searchQuery}}"
       STAGE="{{searchStage}}"
       OUTPUT_HINT="{{searchResultsOutput}}"
-      NUCLEI_COUNT=$(wc -l < "{{nucleiFile}}" 2>/dev/null || echo 0)
+      NUCLEI_COUNT=$(count_lines_safe "{{nucleiFile}}")
 
       text_has_lines() {
         file="$1"
@@ -631,6 +673,15 @@ steps:
       mkdir -p "{{semanticIndexDir}}/logs"
       : > "{{knowledgeIndexFile}}"
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
       if [ -z "$OSM_BIN" ] || [ ! -x "$OSM_BIN" ]; then
         OSM_BIN=$(command -v osmedeus 2>/dev/null || true)
@@ -640,7 +691,7 @@ steps:
         echo "[Semantic] osmedeus binary not found, skipping knowledge corpus export"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -679,7 +730,7 @@ steps:
 
       cat "$PRIMARY_TMP" "$SHARED_TMP" "$GLOBAL_TMP" 2>/dev/null | awk 'NF && !seen[$0]++' > "{{knowledgeIndexFile}}" || true
 
-      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      KB_LINES=$(count_lines_safe "{{knowledgeIndexFile}}")
       echo "[Semantic] Knowledge corpus exported: $KB_LINES chunks"
 
   - name: search-knowledge-db
@@ -700,6 +751,7 @@ steps:
       fi
       echo '[]' > "{{knowledgeSearchOutput}}"
       echo '[]' > "{{vectorKnowledgeSearchOutput}}"
+      jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,enabled:false,rerank_applied:false,ranking_source:"hybrid",rerank_provider:"",rerank_model:"",total_results:0,results:[]}' > "{{rerankResultsOutput}}"
       jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,provider:"config-default",ready:false,semantic_status:"uninitialized",reason:"semantic vector retrieval not started",total_results:0,results:[]}' > "{{vectorSearchResultsOutput}}"
 
       OSM_BIN="${OSMEDEUS_CLI_BIN:-{{OsmedeusExec}}}"
@@ -711,7 +763,7 @@ steps:
         echo "[Semantic] osmedeus binary not found, skipping knowledge DB search"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       PRIMARY_WORKSPACE="{{knowledgeWorkspace}}"
       SHARED_WORKSPACE="{{sharedKnowledgeWorkspace}}"
@@ -735,6 +787,21 @@ steps:
       VECTOR_PROVIDER_LABEL="$VECTOR_PROVIDER"
       if [ -z "$VECTOR_PROVIDER_LABEL" ]; then
         VECTOR_PROVIDER_LABEL="config-default"
+      fi
+      RERANK_ENABLED="{{enableRerank}}"
+      RERANK_PROVIDER="{{rerankProvider}}"
+      RERANK_MODEL="{{rerankModel}}"
+      RERANK_PROVIDER_LABEL=""
+      RERANK_MODEL_LABEL=""
+      if [ "$RERANK_ENABLED" = "true" ]; then
+        RERANK_PROVIDER_LABEL="$RERANK_PROVIDER"
+        RERANK_MODEL_LABEL="$RERANK_MODEL"
+        if [ -z "$RERANK_PROVIDER_LABEL" ]; then
+          RERANK_PROVIDER_LABEL="config-default"
+        fi
+        if [ -z "$RERANK_MODEL_LABEL" ]; then
+          RERANK_MODEL_LABEL="config-default"
+        fi
       fi
       : > "$PRIMARY_VECTOR_LOG"
       : > "$SHARED_VECTOR_LOG"
@@ -773,6 +840,21 @@ steps:
         fi
         if [ -n "$VECTOR_MODEL" ]; then
           set -- "$@" --model "$VECTOR_MODEL"
+        fi
+        if [ "$RERANK_ENABLED" = "true" ]; then
+          set -- "$@" --rerank
+          if [ -n "$RERANK_PROVIDER" ]; then
+            set -- "$@" --rerank-provider "$RERANK_PROVIDER"
+          fi
+          if [ -n "$RERANK_MODEL" ]; then
+            set -- "$@" --rerank-model "$RERANK_MODEL"
+          fi
+          if [ "{{rerankTopN}}" -gt 0 ] 2>/dev/null; then
+            set -- "$@" --rerank-top-n "{{rerankTopN}}"
+          fi
+          if [ "{{rerankMaxCandidates}}" -gt 0 ] 2>/dev/null; then
+            set -- "$@" --rerank-max-candidates "{{rerankMaxCandidates}}"
+          fi
         fi
         if "$@" > "$output_file" 2>"$log_file"; then
           return 0
@@ -905,13 +987,63 @@ steps:
       if [ "$VECTOR_READY_FLAG" = "true" ] && { [ -z "$VECTOR_STATUS_FLAG" ] || [ "$VECTOR_STATUS_FLAG" = "unknown" ]; }; then
         VECTOR_STATUS_FLAG="ready"
       fi
+      VECTOR_RANKING_SOURCE=$(jq -r 'if length > 0 then (.[0].ranking_source // "") else "hybrid" end' "{{vectorKnowledgeSearchOutput}}" 2>/dev/null || echo hybrid)
+      VECTOR_RERANK_APPLIED="false"
+      if [ "$VECTOR_RANKING_SOURCE" = "rerank" ]; then
+        VECTOR_RERANK_APPLIED="true"
+      fi
+
+      jq -n \
+        --arg query "$KB_QUERY" \
+        --arg ranking_source "$VECTOR_RANKING_SOURCE" \
+        --arg rerank_provider "$RERANK_PROVIDER_LABEL" \
+        --arg rerank_model "$RERANK_MODEL_LABEL" \
+        --argjson enabled "$RERANK_ENABLED" \
+        --argjson rerank_applied "$VECTOR_RERANK_APPLIED" \
+        --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
+        {
+          status: "success",
+          query: $query,
+          enabled: $enabled,
+          rerank_applied: $rerank_applied,
+          ranking_source: $ranking_source,
+          rerank_provider: (if $enabled then $rerank_provider else "" end),
+          rerank_model: (if $enabled then $rerank_model else "" end),
+          total_results: ($hits[0] | length),
+          results: (
+            $hits[0]
+            | map({
+                document_id: .document_id,
+                chunk_id: .chunk_id,
+                workspace: (.workspace // ""),
+                title: (.title // ""),
+                source_path: (.source_path // ""),
+                doc_type: (.doc_type // ""),
+                section: (.section // ""),
+                content: (.content // .snippet // ""),
+                snippet: (.snippet // .content // ""),
+                relevance_score: (.relevance_score // .score // 0),
+                base_relevance_score: (.base_relevance_score // 0),
+                rerank_score: (.rerank_score // 0),
+                ranking_source: (.ranking_source // "hybrid"),
+                source: (.source // "vector_kb"),
+                type: (.type // "vector_match"),
+                metadata: (.metadata // null)
+              })
+          )
+        }' > "{{rerankResultsOutput}}" 2>/dev/null || jq -n --arg query "$KB_QUERY" '{status:"success",query:$query,enabled:false,rerank_applied:false,ranking_source:"hybrid",rerank_provider:"",rerank_model:"",total_results:0,results:[]}' > "{{rerankResultsOutput}}"
 
       jq -n \
         --arg query "$KB_QUERY" \
         --arg provider "$VECTOR_PROVIDER_LABEL" \
         --arg semantic_status "$VECTOR_STATUS_FLAG" \
         --arg reason "$VECTOR_REASON_FLAG" \
+        --arg ranking_source "$VECTOR_RANKING_SOURCE" \
+        --arg rerank_provider "$RERANK_PROVIDER_LABEL" \
+        --arg rerank_model "$RERANK_MODEL_LABEL" \
         --argjson ready "$VECTOR_READY_FLAG" \
+        --argjson rerank_enabled "$RERANK_ENABLED" \
+        --argjson rerank_applied "$VECTOR_RERANK_APPLIED" \
         --slurpfile hits "{{vectorKnowledgeSearchOutput}}" '
         {
           status: "success",
@@ -920,6 +1052,11 @@ steps:
           ready: $ready,
           semantic_status: $semantic_status,
           reason: (if ($reason | length) > 0 then $reason else null end),
+          ranking_source: $ranking_source,
+          rerank_enabled: $rerank_enabled,
+          rerank_applied: $rerank_applied,
+          rerank_provider: (if $rerank_enabled then $rerank_provider else "" end),
+          rerank_model: (if $rerank_enabled then $rerank_model else "" end),
           total_results: ($hits[0] | length),
           results: (
             $hits[0]
@@ -927,6 +1064,9 @@ steps:
                 type: (.type // "vector_match"),
                 content: (.content // .snippet // ""),
                 relevance_score: (.relevance_score // .score // 0),
+                base_relevance_score: (.base_relevance_score // 0),
+                rerank_score: (.rerank_score // 0),
+                ranking_source: (.ranking_source // "hybrid"),
                 source: (.source // "vector_kb"),
                 title: (.title // ""),
                 workspace: (.workspace // ""),
@@ -938,6 +1078,9 @@ steps:
 
       echo "[Semantic] Vector KB hits: $VKB_HITS"
       echo "[Semantic] Knowledge DB merged hits: $KB_HITS"
+      if [ "$RERANK_ENABLED" = "true" ]; then
+        echo "[Semantic] Vector rerank status: applied=$VECTOR_RERANK_APPLIED source=$VECTOR_RANKING_SOURCE provider=${RERANK_PROVIDER_LABEL:-config-default} model=${RERANK_MODEL_LABEL:-config-default}"
+      fi
       if [ "$VECTOR_READY_FLAG" != "true" ] && [ -n "$VECTOR_REASON_FLAG" ]; then
         echo "[Semantic] Vector retrieval unavailable: $VECTOR_STATUS_FLAG - $VECTOR_REASON_FLAG"
       fi
@@ -948,6 +1091,24 @@ steps:
     command: |
       set +e
       mkdir -p {{semanticIndexDir}}
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      count_bytes_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -c < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       echo "=== Semantic Search Index ===" > {{semanticIndexDir}}/index.log
       echo "Created: $(date)" >> {{semanticIndexDir}}/index.log
@@ -986,7 +1147,7 @@ steps:
       INDEXED_VULNS=0
       for f in {{Output}}/vulnscan/nuclei-*.txt {{Output}}/vuln-scan-suite/*.txt; do
         if [ -f "$f" ]; then
-          fsize=$(wc -c < "$f" 2>/dev/null || echo 0)
+          fsize=$(count_bytes_safe "$f")
           if [ "$fsize" -gt 100 ]; then
             echo "Indexing: $f ($fsize bytes)" >> {{semanticIndexDir}}/index.log
             cat "$f" >> {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || true
@@ -996,11 +1157,11 @@ steps:
       done
       
       # 创建索引元数据
-      SUBDOMAINS_COUNT=$(wc -l < {{semanticIndexDir}}/subdomains-index.txt 2>/dev/null || echo 0)
-      TECH_COUNT=$(wc -l < {{semanticIndexDir}}/tech-index.txt 2>/dev/null || echo 0)
-      HTTP_COUNT=$(wc -l < {{semanticIndexDir}}/http-index.txt 2>/dev/null || echo 0)
-      ENDPOINTS_COUNT=$(wc -l < {{semanticIndexDir}}/endpoints-index.txt 2>/dev/null || echo 0)
-      VULNS_COUNT=$(wc -l < {{semanticIndexDir}}/vulns-index.txt 2>/dev/null || echo 0)
+      SUBDOMAINS_COUNT=$(count_lines_safe "{{semanticIndexDir}}/subdomains-index.txt")
+      TECH_COUNT=$(count_lines_safe "{{semanticIndexDir}}/tech-index.txt")
+      HTTP_COUNT=$(count_lines_safe "{{semanticIndexDir}}/http-index.txt")
+      ENDPOINTS_COUNT=$(count_lines_safe "{{semanticIndexDir}}/endpoints-index.txt")
+      VULNS_COUNT=$(count_lines_safe "{{semanticIndexDir}}/vulns-index.txt")
       
       cat > {{semanticIndexDir}}/metadata.json << EOF
       {
@@ -1032,6 +1193,15 @@ steps:
       mkdir -p {{semanticIndexDir}}
       : > "{{vectorCorpusFile}}"
 
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       append_prefixed() {
         source_file="$1"
         prefix="$2"
@@ -1054,14 +1224,23 @@ steps:
 
       awk 'NF && !seen[$0]++' "{{vectorCorpusFile}}" > "{{vectorCorpusFile}}.tmp" && mv "{{vectorCorpusFile}}.tmp" "{{vectorCorpusFile}}"
 
-      CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
+      CORPUS_LINES=$(count_lines_safe "{{vectorCorpusFile}}")
       echo "[Semantic] Vector corpus prepared: $CORPUS_LINES lines"
 
   - name: validate-semantic-corpus
     type: bash
     pre_condition: "{{enableSemanticSearch}}"
     command: |
-      CORPUS_LINES=$(wc -l < "{{vectorCorpusFile}}" 2>/dev/null || echo 0)
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
+      CORPUS_LINES=$(count_lines_safe "{{vectorCorpusFile}}")
       if [ "$CORPUS_LINES" -eq 0 ]; then
         echo "[WARN] [Semantic Search] No semantic corpus available, skipping agent refinement"
         : > {{semanticSkipFile}}
@@ -1107,12 +1286,14 @@ steps:
       5. {{knowledgeIndexFile}} - 已导入/自动学习的知识库 chunks
       6. {{vectorSearchResultsOutput}} - 基于 embeddings 计算出的向量召回结果
       7. {{knowledgeSearchOutput}} - 知识库数据库直接检索结果
+      8. {{rerankResultsOutput}} - 启用 rerank 时的精排结果与元数据
 
       默认兜底查询：{{searchQuery}}
 
       要求：
       - 如果第 6 个文件存在且有内容，优先使用其中的向量召回结果作为候选
       - 如果第 7 个文件存在且有命中，把它作为高价值上下文
+      - 如果第 8 个文件存在且 rerank_applied=true，优先使用其中 results 作为最终向量候选，并保留 ranking_source 信息
       - 如果索引文件存在且有内容，进行语义分析
       - 如果没有数据，返回 {"error": "no_data", "results": [], "total_results": 0}
       - 按 relevance_score 降序排序
@@ -1132,6 +1313,7 @@ steps:
       INDEX_DIR="{{semanticIndexDir}}"
       AGENT_RESULTS_FILE="{{agentResultsOutput}}"
       VECTOR_RESULTS_FILE="{{vectorSearchResultsOutput}}"
+      RERANK_RESULTS_FILE="{{rerankResultsOutput}}"
       QUERY_FILE="{{resolvedSearchQueryOutput}}"
       RESOLVED_QUERY="{{searchQuery}}"
       if [ -f "$QUERY_FILE" ] && [ -s "$QUERY_FILE" ]; then
@@ -1139,9 +1321,19 @@ steps:
       fi
       AGENT_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-agent-clean-{{TargetSpace}}.json"
       VECTOR_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-vector-clean-{{TargetSpace}}.json"
+      RERANK_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-rerank-clean-{{TargetSpace}}.json"
       KB_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json"
       SCAN_LINES_FILE="{{Output}}/ai-analysis/.semantic-scan-lines-{{TargetSpace}}.txt"
       SCAN_CLEAN_FILE="{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json"
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
 
       json_result_count() {
         file="$1"
@@ -1153,15 +1345,16 @@ steps:
       }
       
       # 收集统计数据
-      VULNS_LINES=$(wc -l < "$INDEX_DIR/vulns-index.txt" 2>/dev/null || echo 0)
-      TECH_LINES=$(wc -l < "$INDEX_DIR/tech-index.txt" 2>/dev/null || echo 0)
-      SUBDOMAIN_LINES=$(wc -l < "$INDEX_DIR/subdomains-index.txt" 2>/dev/null || echo 0)
-      HTTP_LINES=$(wc -l < "$INDEX_DIR/http-index.txt" 2>/dev/null || echo 0)
-      KB_LINES=$(wc -l < "{{knowledgeIndexFile}}" 2>/dev/null || echo 0)
+      VULNS_LINES=$(count_lines_safe "$INDEX_DIR/vulns-index.txt")
+      TECH_LINES=$(count_lines_safe "$INDEX_DIR/tech-index.txt")
+      SUBDOMAIN_LINES=$(count_lines_safe "$INDEX_DIR/subdomains-index.txt")
+      HTTP_LINES=$(count_lines_safe "$INDEX_DIR/http-index.txt")
+      KB_LINES=$(count_lines_safe "{{knowledgeIndexFile}}")
       VECTOR_COUNT=$(json_result_count "$VECTOR_RESULTS_FILE")
+      RERANK_COUNT=$(json_result_count "$RERANK_RESULTS_FILE")
       KB_SEARCH_COUNT=$(jq 'length' "{{knowledgeSearchOutput}}" 2>/dev/null || echo 0)
       
-      echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES, knowledge=$KB_LINES, vector=$VECTOR_COUNT, kb_search=$KB_SEARCH_COUNT"
+      echo "[Semantic] Index stats: vulns=$VULNS_LINES, tech=$TECH_LINES, subdomains=$SUBDOMAIN_LINES, http=$HTTP_LINES, knowledge=$KB_LINES, vector=$VECTOR_COUNT, rerank=$RERANK_COUNT, kb_search=$KB_SEARCH_COUNT"
       
       # 构建基础结果（保证单一合法 JSON）
       jq -n \
@@ -1267,6 +1460,12 @@ steps:
         echo '{"results":[],"total_results":0}' > "$VECTOR_CLEAN_FILE"
       fi
 
+      if [ -f "$RERANK_RESULTS_FILE" ] && jq empty "$RERANK_RESULTS_FILE" >/dev/null 2>&1; then
+        cp "$RERANK_RESULTS_FILE" "$RERANK_CLEAN_FILE"
+      else
+        echo '{"results":[],"total_results":0,"rerank_applied":false,"ranking_source":"hybrid","rerank_provider":"","rerank_model":""}' > "$RERANK_CLEAN_FILE"
+      fi
+
       if [ -f "{{knowledgeSearchOutput}}" ] && jq empty "{{knowledgeSearchOutput}}" >/dev/null 2>&1; then
         cp "{{knowledgeSearchOutput}}" "$KB_CLEAN_FILE"
       else
@@ -1291,6 +1490,7 @@ steps:
       export OSM_SEMANTIC_HTTP="$HTTP_LINES"
       export OSM_SEMANTIC_KNOWLEDGE="$KB_LINES"
       export OSM_SEMANTIC_VECTOR_COUNT="$VECTOR_COUNT"
+      export OSM_SEMANTIC_RERANK_COUNT="$RERANK_COUNT"
       export OSM_SEMANTIC_KB_SEARCH_COUNT="$KB_SEARCH_COUNT"
 
       python3 << 'PY'
@@ -1317,6 +1517,7 @@ steps:
 
       agent = load_json("{{Output}}/ai-analysis/.semantic-agent-clean-{{TargetSpace}}.json", {"results": [], "highlights": {}, "insights": [], "recommendations": []})
       vector = load_json("{{Output}}/ai-analysis/.semantic-vector-clean-{{TargetSpace}}.json", {"results": [], "total_results": 0})
+      rerank = load_json("{{Output}}/ai-analysis/.semantic-rerank-clean-{{TargetSpace}}.json", {"results": [], "total_results": 0, "rerank_applied": False, "ranking_source": "hybrid", "rerank_provider": "", "rerank_model": ""})
       kb = load_json("{{Output}}/ai-analysis/.semantic-kb-clean-{{TargetSpace}}.json", [])
       scan = load_json("{{Output}}/ai-analysis/.semantic-scan-clean-{{TargetSpace}}.json", [])
 
@@ -1478,10 +1679,15 @@ steps:
           }.get(category or "general", 0.0)
 
       agent_results = [normalize(item, "llm_agent") for item in agent.get("results", [])]
-      vector_results = [normalize(item, "vector_search") for item in vector.get("results", [])]
+      active_vector = rerank if isinstance(rerank, dict) and rerank.get("results") else vector
+      vector_results = [normalize(item, "vector_search") for item in active_vector.get("results", [])]
       kb_results = [normalize(item, "knowledge_base") for item in kb]
       scan_results = [normalize(item, "scan_index") for item in scan]
-      vector_total = result_count(vector)
+      vector_total = result_count(active_vector)
+      vector_ranking_source = textify(active_vector.get("ranking_source") if isinstance(active_vector, dict) else "") or "hybrid"
+      rerank_applied = bool(active_vector.get("rerank_applied")) if isinstance(active_vector, dict) else False
+      rerank_provider = textify(active_vector.get("rerank_provider") if isinstance(active_vector, dict) else "")
+      rerank_model = textify(active_vector.get("rerank_model") if isinstance(active_vector, dict) else "")
 
       all_items = agent_results + vector_results + kb_results + scan_results
       target_source_map = {}
@@ -1554,6 +1760,7 @@ steps:
 
       insights = unique_keep_order(
           [str(v) for v in (agent.get("insights") or [])]
+          + (["向量召回结果已完成 rerank 精排"] if rerank_applied else [])
           + (["向量召回结果已纳入语义搜索结果"] if vector_total > 0 else [])
           + (["工作区知识库命中已纳入实战上下文"] if kb else [])
       )[:8]
@@ -1572,6 +1779,10 @@ steps:
               else ("vector_knowledge_fallback" if (vector_total > 0 or len(kb) > 0) else "scan_index_fallback")
           ),
           "vector_search_used": vector_total > 0,
+          "vector_ranking_source": vector_ranking_source,
+          "rerank_applied": rerank_applied,
+          "rerank_provider": rerank_provider,
+          "rerank_model": rerank_model,
           "knowledge_search_used": len(kb) > 0,
           "provider": provider,
           "status": ("completed" if agent_status == "valid" else "fallback_completed") if combined else ("no_results" if agent_status == "valid" else "fallback_no_results"),
@@ -1583,6 +1794,7 @@ steps:
               "http": int(os.environ.get("OSM_SEMANTIC_HTTP", "0") or "0"),
               "knowledge": int(os.environ.get("OSM_SEMANTIC_KNOWLEDGE", "0") or "0"),
               "vector_candidates": int(os.environ.get("OSM_SEMANTIC_VECTOR_COUNT", "0") or "0"),
+              "rerank_candidates": int(os.environ.get("OSM_SEMANTIC_RERANK_COUNT", "0") or "0"),
               "knowledge_search_hits": int(os.environ.get("OSM_SEMANTIC_KB_SEARCH_COUNT", "0") or "0"),
           },
           "results": combined,
@@ -1623,6 +1835,15 @@ steps:
       VECTOR_JSON="{{vectorSearchResultsOutput}}"
       VECTOR_KB_JSON="{{vectorKnowledgeSearchOutput}}"
       echo "[Knowledge Base] Searching security knowledge..."
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
 
       strip_frontmatter() {
         awk '
@@ -1808,8 +2029,8 @@ steps:
         esac
       done
       
-      KB_LINES=$(wc -l < "$KB_OUTPUT" 2>/dev/null || echo 0)
-      SKILLS_LINES=$(wc -l < "$SKILLS_COMBINED" 2>/dev/null || echo 0)
+      KB_LINES=$(count_lines_safe "$KB_OUTPUT")
+      SKILLS_LINES=$(count_lines_safe "$SKILLS_COMBINED")
       echo "[Knowledge Base] Results saved: $KB_OUTPUT ($KB_LINES lines)"
       echo "[Knowledge Base] Skills library: $SKILLS_COMBINED ($SKILLS_LINES lines)"
 
@@ -1818,6 +2039,15 @@ steps:
     pre_condition: "{{enableSemanticSearch}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+
+      count_lines_safe() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
       
       # 提取高危发现供 vuln-validation 使用
       if [ -f "{{searchResultsOutput}}" ]; then
@@ -1853,8 +2083,8 @@ steps:
             }
         ]' {{searchResultsOutput}} 2>/dev/null > {{semanticPriorityVulnsOutput}} || echo '[]' > {{semanticPriorityVulnsOutput}}
         
-        CRITICAL_COUNT=$(wc -l < {{Output}}/ai-analysis/semantic-critical-findings.txt 2>/dev/null || echo 0)
-        PRIORITY_COUNT=$(wc -l < {{semanticPriorityTargetsOutput}} 2>/dev/null || echo 0)
+        CRITICAL_COUNT=$(count_lines_safe "{{Output}}/ai-analysis/semantic-critical-findings.txt")
+        PRIORITY_COUNT=$(count_lines_safe "{{semanticPriorityTargetsOutput}}")
         echo "[Semantic] Extracted $CRITICAL_COUNT critical findings and $PRIORITY_COUNT priority targets for downstream modules"
       fi
 

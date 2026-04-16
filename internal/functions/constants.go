@@ -864,7 +864,7 @@ func FunctionRegistry() map[string][]FunctionInfo {
 		},
 		CategoryLLM: {
 			{FnLLMInvoke, "llm_invoke(message)", "Simple LLM call with direct message, returns response content", "string", "llm_invoke('Analyze security posture of {{Target}}')"},
-			{FnLLMInvokeCustom, "llm_invoke_custom(message, body_json)", "LLM call with custom POST body ({{message}} placeholder)", "string", "llm_invoke_custom('Summarize: {{Target}}', '{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"{{message}}\"}]}')"},
+			{FnLLMInvokeCustom, "llm_invoke_custom(message, body_json)", "LLM call with custom POST body ({{message}} placeholder)", "string", "llm_invoke_custom('Summarize: {{Target}}', '{\"model\":\"gpt-5.4\",\"input\":\"{{message}}\",\"tools\":[{\"type\":\"web_search_preview\"}]}')"},
 			{FnLLMConversations, "llm_conversations(msg1, msg2, ...)", "Multi-turn conversation with 'role:content' format messages", "string", "llm_conversations('system:Be brief', 'user:Analyze {{Target}}')"},
 		},
 		CategoryGeneration: {
@@ -1000,7 +1000,7 @@ func FunctionRegistry() map[string][]FunctionInfo {
 			{FnDBImportVuln, "db_import_vuln(workspace, json_data)", "Import single vulnerability from JSON (nuclei format)", "bool", "db_import_vuln('{{TargetSpace}}', '{\"template-id\":\"...\",\"info\":{\"name\":\"...\",\"severity\":\"high\"}}')"},
 			{FnDBImportVulnFromFile, "db_import_vuln_from_file(workspace, file_path)", "Import vulnerabilities from JSONL file (nuclei format)", "int", "db_import_vuln_from_file('{{TargetSpace}}', '{{Output}}/nuclei.jsonl')"},
 			{FnDBImportDNSAsset, "db_import_dns_asset(workspace, file_path)", "Import DNS records from zone-style file (domain TYPE value per line), groups by domain", "int", "db_import_dns_asset('{{TargetSpace}}', '{{Output}}/dns-records.txt')"},
-			{FnDBImportCustomAsset, "db_import_custom_asset(workspace, file_path, [asset_type], [source])", "Import assets from JSONL file with direct field mapping; optional asset_type/source defaults apply when line has no value", "map", "db_import_custom_asset('{{TargetSpace}}', '{{Output}}/custom-assets.jsonl', 'subdomain', 'recon')"},
+			{FnDBImportCustomAsset, "db_import_custom_asset(workspace, file_path, [asset_type], [source])", "Import assets from JSONL file with direct field mapping; supports httpx/custom/vigolium-style envelope records and optional asset_type/source defaults when line data has no value", "map", "db_import_custom_asset('{{TargetSpace}}', '{{Output}}/custom-assets.jsonl', 'subdomain', 'recon')"},
 			{FnDBImportSARIF, "db_import_sarif(workspace, file_path)", "Import vulnerabilities from SARIF file (Semgrep, Trivy, etc.)", "map", "db_import_sarif('{{TargetSpace}}', '{{Output}}/semgrep.sarif')"},
 			{FnDBImportPortAssets, "db_import_port_assets(workspace, file_path, [source])", "Import port scan data from JSONL (nmap_to_jsonl output) with asset_type=ip and source=portscan", "map", "db_import_port_assets('{{TargetSpace}}', '{{Output}}/nmap-scan.jsonl')"},
 			{FnDBImportAttackChain, "db_import_attack_chain(workspace, file_path, [target], [run_uuid], [mermaid_path], [text_path])", "Import AI attack-chain JSON into the local workbench store for API usage", "map", "db_import_attack_chain('{{TargetSpace}}', '{{Output}}/ai-analysis/attack-chain-{{TargetSpace}}.json', '{{Target}}')"},

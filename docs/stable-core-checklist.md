@@ -84,6 +84,11 @@ What it covers:
   - verifies ACP-timeout fallback closure for vulnerability validation, attack-chain generation, attack-chain visualization, path planning, follow-up packaging, and knowledge auto-learning
   - verifies the stable-flow artifacts are persisted and the learned KB metadata stays searchable after the workflow completes
   - auto-selects the next free local embeddings mock port when the default regression port is already occupied
+- current-source `superdomain-extensive-ai-optimized` controlled flow smoke:
+  - runs the real current-source optimized workflow from `osmedeus-base/workflows`
+  - seeds realistic subdomain, probing, fingerprint, vuln, and knowledge-layer artifacts into a temporary workspace
+  - verifies the optimized AI closure persists semantic / decision / retest / operator / campaign / follow-up artifacts and keeps KB writeback searchable after the workflow completes
+  - auto-selects the next free local embeddings mock port when the default regression port is already occupied
 - current-source `vuln-suite` Nuclei smoke:
   - starts a loopback-only local HTTP server with a deterministic marker page
   - runs the real `09-vuln-suite` workflow path against a custom local Nuclei template
@@ -119,6 +124,7 @@ Temporary artifact roots:
 - `/tmp/osm-stable-core-ai-semantic`
 - `/tmp/osm-stable-core-superdomain-lite`
 - `/tmp/osm-stable-core-superdomain-stable`
+- `/tmp/osm-stable-core-superdomain-optimized`
 - `/tmp/osm-stable-core-scan-content`
 - `/tmp/osm-stable-core-vuln-suite`
 - `/tmp/osm-stable-core-ai`
@@ -143,6 +149,6 @@ The branch is in the current "stable core" band when all of the following are tr
 - unit tests have a trustworthy pass signal
 - `make test-regression-stable-core` passes end-to-end
 - no new workflow lint warnings were introduced in modified AI fragments
-- controlled current-source `superdomain-extensive-ai-stable` and `superdomain-extensive-ai-lite` closure smokes stay green inside the stable-core regression
+- controlled current-source `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-optimized`, and `superdomain-extensive-ai-lite` closure smokes stay green inside the stable-core regression
 - the deterministic local `scan-content` smoke stays green inside the stable-core regression
 - the deterministic local `vuln-suite` Nuclei smoke stays green inside the stable-core regression

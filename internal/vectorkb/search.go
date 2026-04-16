@@ -12,6 +12,7 @@ import (
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
 	illm "github.com/j3ssie/osmedeus/v5/internal/llm"
+	"github.com/j3ssie/osmedeus/v5/internal/rerank"
 	"github.com/uptrace/bun"
 )
 
@@ -159,10 +160,136 @@ func Search(ctx context.Context, cfg *config.Config, opts SearchOptions, query s
 		}
 		return results[i].RelevanceScore > results[j].RelevanceScore
 	})
-	if len(results) > limit {
+
+	for i := range results {
+		results[i].BaseRelevanceScore = results[i].RelevanceScore
+		results[i].RankingSource = "hybrid"
+	}
+
+	if opts.EnableRerank && cfg.IsRerankEnabled() && len(results) > 0 {
+		reranked, err := applySearchRerank(ctx, cfg, opts, query, results)
+		if err == nil && len(reranked) > 0 {
+			results = reranked
+		} else {
+			for i := range results {
+				results[i].RankingSource = "fallback_hybrid"
+			}
+		}
+	}
+
+	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func applySearchRerank(ctx context.Context, cfg *config.Config, opts SearchOptions, query string, hits []SearchHit) ([]SearchHit, error) {
+	provider, err := cfg.ResolveRerankProvider(strings.TrimSpace(opts.RerankProvider))
+	if err != nil {
+		return nil, err
+	}
+
+	maxCandidates := opts.RerankMaxCandidates
+	if maxCandidates <= 0 {
+		maxCandidates = cfg.GetRerankMaxCandidates()
+	}
+	if maxCandidates <= 0 || maxCandidates > len(hits) {
+		maxCandidates = len(hits)
+	}
+	if maxCandidates == 0 {
+		return nil, nil
+	}
+
+	topN := opts.RerankTopN
+	if topN <= 0 {
+		topN = cfg.GetRerankTopN()
+	}
+
+	candidates := hits[:maxCandidates]
+	docs := make([]rerank.Document, 0, len(candidates))
+	byID := make(map[string]SearchHit, len(candidates))
+	for _, hit := range candidates {
+		docID := buildSearchRerankDocumentID(hit)
+		docs = append(docs, rerank.Document{
+			ID:       docID,
+			Text:     buildSearchRerankDocumentText(hit),
+			Metadata: buildSearchRerankMetadata(hit),
+		})
+		byID[docID] = hit
+	}
+
+	client := rerank.NewClient(provider, cfg.GetRerankTimeout())
+	resp, err := client.Rerank(ctx, rerank.Request{
+		Query:         query,
+		Documents:     docs,
+		TopN:          topN,
+		MaxCandidates: maxCandidates,
+		MinScore:      cfg.Rerank.MinScore,
+		ModelOverride: strings.TrimSpace(opts.RerankModel),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ordered := make([]SearchHit, 0, len(resp.Results))
+	for _, item := range resp.Results {
+		hit, ok := byID[item.ID]
+		if !ok {
+			continue
+		}
+		hit.RelevanceScore = item.Score
+		hit.RerankScore = item.Score
+		hit.RankingSource = "rerank"
+		ordered = append(ordered, hit)
+	}
+
+	if maxCandidates < len(hits) {
+		ordered = append(ordered, hits[maxCandidates:]...)
+	}
+
+	return ordered, nil
+}
+
+func buildSearchRerankDocumentID(hit SearchHit) string {
+	return fmt.Sprintf("%s#%d", strings.TrimSpace(hit.SourcePath), hit.ChunkID)
+}
+
+func buildSearchRerankDocumentText(hit SearchHit) string {
+	parts := make([]string, 0, 4)
+	if title := strings.TrimSpace(hit.Title); title != "" {
+		parts = append(parts, "title: "+title)
+	}
+	if section := strings.TrimSpace(hit.Section); section != "" {
+		parts = append(parts, "section: "+section)
+	}
+	if snippet := strings.TrimSpace(hit.Snippet); snippet != "" {
+		parts = append(parts, "snippet: "+snippet)
+	}
+	meta := make([]string, 0, 2)
+	if workspace := strings.TrimSpace(hit.Workspace); workspace != "" {
+		meta = append(meta, "workspace="+workspace)
+	}
+	if docType := strings.TrimSpace(hit.DocType); docType != "" {
+		meta = append(meta, "doc_type="+docType)
+	}
+	if len(meta) > 0 {
+		parts = append(parts, "meta: "+strings.Join(meta, ", "))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func buildSearchRerankMetadata(hit SearchHit) map[string]string {
+	metadata := map[string]string{
+		"workspace": strings.TrimSpace(hit.Workspace),
+		"doc_type":  strings.TrimSpace(hit.DocType),
+	}
+	if title := strings.TrimSpace(hit.Title); title != "" {
+		metadata["title"] = title
+	}
+	if section := strings.TrimSpace(hit.Section); section != "" {
+		metadata["section"] = section
+	}
+	return metadata
 }
 
 func normalizeVectorWorkspaceLayers(workspace string, layers []string) []string {

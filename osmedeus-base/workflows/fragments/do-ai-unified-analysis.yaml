@@ -249,14 +249,21 @@ steps:
     pre_condition: "{{enableUnifiedAnalysis}}"
     functions:
       - 'log_info("Unified AI analysis completed")'
+      - 'save_content(typeof unified_analysis !== "undefined" ? unified_analysis : "", "{{Output}}/ai-analysis/.unified-analysis-raw-{{TargetSpace}}.txt")'
 
   - name: validate-json-output
     type: bash
     pre_condition: "{{enableUnifiedAnalysis}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      RAW_FILE="{{Output}}/ai-analysis/.unified-analysis-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
-      echo '{{unified_analysis}}' > {{unifiedOutputJson}} 2>/dev/null || echo '{"error": "no data"}' > {{unifiedOutputJson}}
+      if [ -s "$RAW_FILE" ] && jq empty "$RAW_FILE" 2>/dev/null; then
+        cp "$RAW_FILE" {{unifiedOutputJson}}
+      else
+        echo '{"error": "no data"}' > {{unifiedOutputJson}}
+      fi
 
       # 验证 JSON 格式
       if ! jq empty {{unifiedOutputJson}} 2>/dev/null; then

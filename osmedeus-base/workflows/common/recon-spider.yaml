@@ -109,7 +109,7 @@ steps:
   - name: check-skip-spidering
     type: function
     log: "Checking if spidering should be skipped"
-    pre_condition: '"{{skipSpidering}}" == "true"'
+    pre_condition: 'typeof skipSpidering !== "undefined" && (skipSpidering === true || String(skipSpidering).trim() == "true")'
     functions:
       - 'log_error("Filter", "Skipping spidering")'
       - 'skip()'
@@ -185,4 +185,3 @@ steps:
   #   commands:
   #     - "sort -u {{linkFile}} -o {{linkFile}}"
   #     - "cat {{linkFile}} | httpx -silent -nf -no-color -title -t {{httpThreads}} -H '{{defaultUA}}' --store-response-dir {{httpResponse}}"
-

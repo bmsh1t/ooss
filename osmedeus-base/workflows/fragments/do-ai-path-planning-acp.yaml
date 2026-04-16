@@ -67,6 +67,16 @@ params:
     default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
   - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
   - name: fingerprintFile
     default: "{{Output}}/fingerprint/http-fingerprint-{{TargetSpace}}.jsonl"
   - name: osintFile
@@ -165,6 +175,16 @@ steps:
       ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
       ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
       ACTIVE_VECTOR_KNOWLEDGE_FILE=$(pick_list_file "{{vectorKnowledgeSearchFile}}" "{{fallbackVectorKnowledgeSearchFile}}" "{{secondFallbackVectorKnowledgeSearchFile}}" "{{thirdFallbackVectorKnowledgeSearchFile}}")
+      PASSIVE_COUNT=0
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        PASSIVE_COUNT=$(count_lines "{{passiveWebRiskSummaryFile}}")
+      else
+        for candidate in "{{sourceMapExposureFile}}" "{{apiSurfaceFile}}" "{{corsCacheHeuristicsFile}}" "{{cloudLeakFile}}"; do
+          if text_has_lines "$candidate"; then
+            PASSIVE_COUNT=$((PASSIVE_COUNT + $(count_lines "$candidate")))
+          fi
+        done
+      fi
 
       CHAINS=0
       if [ -f "{{attackChainFile}}" ] && jq empty "{{attackChainFile}}" 2>/dev/null; then
@@ -186,7 +206,7 @@ steps:
         VECTOR_KNOWLEDGE_COUNT=$(jq -r 'length // 0' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || echo 0)
       fi
 
-      echo "[INFO] [Path Planning] Attack chains=$CHAINS confirmed=$CONFIRMED_COUNT entry_points=$ENTRY_COUNT best_path=$BEST_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT vector=$VECTOR_KNOWLEDGE_COUNT"
+      echo "[INFO] [Path Planning] Attack chains=$CHAINS confirmed=$CONFIRMED_COUNT entry_points=$ENTRY_COUNT best_path=$BEST_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT vector=$VECTOR_KNOWLEDGE_COUNT passive=$PASSIVE_COUNT"
       echo "[INFO] [Path Planning] Active inputs: semantic=$ACTIVE_SEMANTIC_FILE semantic_targets=$ACTIVE_SEMANTIC_PRIORITY_FILE knowledge=$ACTIVE_KNOWLEDGE_FILE vector=$ACTIVE_VECTOR_KNOWLEDGE_FILE"
       echo "[INFO] [Path Planning] Input data check complete"
 
@@ -202,6 +222,7 @@ steps:
       : > "$INPUT_DIR/priority-targets.txt"
       : > "$INPUT_DIR/semantic-priority.txt"
       : > "$INPUT_DIR/knowledge-priority.txt"
+      : > "$INPUT_DIR/passive-web-risk.txt"
       : > "$INPUT_DIR/fingerprint.jsonl"
       : > "$INPUT_DIR/waf.txt"
 
@@ -278,6 +299,14 @@ steps:
         fi
       }
 
+      append_passive_context() {
+        file="$1"
+        label="$2"
+        limit="${3:-5}"
+        [ -f "$file" ] || return 0
+        sed -n "1,${limit}p" "$file" 2>/dev/null | sed "s|^|[$label] |" >> "$INPUT_DIR/passive-web-risk.txt" || true
+      }
+
       ACTIVE_SEMANTIC_FILE=$(pick_semantic_file "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}")
       ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
       ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
@@ -345,6 +374,19 @@ steps:
         fi
       } | awk 'NF && !seen[$0]++' | head -12 > "$INPUT_DIR/knowledge-priority.txt" || true
 
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        sed -n '1,40p' "{{passiveWebRiskSummaryFile}}" > "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null || true
+      else
+        append_passive_context "{{sourceMapExposureFile}}" "source-map" 6
+        append_passive_context "{{apiSurfaceFile}}" "api-surface" 8
+        append_passive_context "{{corsCacheHeuristicsFile}}" "cors-cache" 8
+        append_passive_context "{{cloudLeakFile}}" "cloud-storage" 6
+      fi
+
+      awk 'NF && !seen[$0]++' "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null > "$INPUT_DIR/passive-web-risk.txt.tmp" \
+        && mv "$INPUT_DIR/passive-web-risk.txt.tmp" "$INPUT_DIR/passive-web-risk.txt" \
+        || true
+
       if [ -f "{{fingerprintFile}}" ]; then
         sed -n '1,60p' "{{fingerprintFile}}" > "$INPUT_DIR/fingerprint.jsonl" 2>/dev/null || true
       fi
@@ -356,6 +398,7 @@ steps:
       TARGET_COUNT=$(count_lines "$INPUT_DIR/priority-targets.txt")
       SEMANTIC_COUNT=$(count_lines "$INPUT_DIR/semantic-priority.txt")
       KNOWLEDGE_COUNT=$(count_lines "$INPUT_DIR/knowledge-priority.txt")
+      PASSIVE_COUNT=$(count_lines "$INPUT_DIR/passive-web-risk.txt")
       FINGERPRINT_COUNT=$(count_lines "$INPUT_DIR/fingerprint.jsonl")
       WAF_COUNT=$(count_lines "$INPUT_DIR/waf.txt")
 
@@ -370,12 +413,14 @@ steps:
         --arg priority_targets_file "$INPUT_DIR/priority-targets.txt" \
         --arg semantic_priority_file "$INPUT_DIR/semantic-priority.txt" \
         --arg knowledge_priority_file "$INPUT_DIR/knowledge-priority.txt" \
+        --arg passive_web_risk_file "$INPUT_DIR/passive-web-risk.txt" \
         --arg fingerprint_file "$INPUT_DIR/fingerprint.jsonl" \
         --arg waf_file "$INPUT_DIR/waf.txt" \
         --argjson chain_size "$CHAIN_SIZE" \
         --argjson priority_targets "$TARGET_COUNT" \
         --argjson semantic_hits "$SEMANTIC_COUNT" \
         --argjson knowledge_hits "$KNOWLEDGE_COUNT" \
+        --argjson passive_hits "$PASSIVE_COUNT" \
         --argjson fingerprint_hits "$FINGERPRINT_COUNT" \
         --argjson waf_hits "$WAF_COUNT" \
         '{
@@ -391,6 +436,7 @@ steps:
             priority_targets: $priority_targets,
             semantic_hits: $semantic_hits,
             knowledge_hits: $knowledge_hits,
+            passive_hits: $passive_hits,
             fingerprint_hits: $fingerprint_hits,
             waf_hits: $waf_hits
           },
@@ -400,12 +446,13 @@ steps:
             priority_targets: $priority_targets_file,
             semantic_priority: $semantic_priority_file,
             knowledge_priority: $knowledge_priority_file,
+            passive_web_risk: $passive_web_risk_file,
             fingerprint: $fingerprint_file,
             waf: $waf_file
           }
         }' > "$INPUT_DIR/planning-context.json"
 
-      if [ "$CHAIN_SIZE" -lt 50 ] && [ "$TARGET_COUNT" -eq 0 ] && [ "$SEMANTIC_COUNT" -eq 0 ] && [ "$KNOWLEDGE_COUNT" -eq 0 ]; then
+      if [ "$CHAIN_SIZE" -lt 50 ] && [ "$TARGET_COUNT" -eq 0 ] && [ "$SEMANTIC_COUNT" -eq 0 ] && [ "$KNOWLEDGE_COUNT" -eq 0 ] && [ "$PASSIVE_COUNT" -eq 0 ]; then
         echo "[WARN] [Path Planning] No useful planning context available"
         echo '{"error": "no_data", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.path-planning-skip
@@ -413,7 +460,7 @@ steps:
         rm -f {{Output}}/ai-analysis/.path-planning-skip 2>/dev/null || true
       fi
 
-      echo "[INFO] [Path Planning] Prepared context: chains=$CHAIN_SIZE priority_targets=$TARGET_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT"
+      echo "[INFO] [Path Planning] Prepared context: chains=$CHAIN_SIZE priority_targets=$TARGET_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT passive=$PASSIVE_COUNT"
 
   - name: ai-generate-attack-plan
     type: agent-acp
@@ -453,6 +500,7 @@ steps:
           - {{Output}}/ai-analysis/.input/priority-targets.txt
           - {{Output}}/ai-analysis/.input/semantic-priority.txt
           - {{Output}}/ai-analysis/.input/knowledge-priority.txt
+          - {{Output}}/ai-analysis/.input/passive-web-risk.txt
           - {{Output}}/ai-analysis/.input/fingerprint.jsonl
           - {{Output}}/ai-analysis/.input/waf.txt
 
@@ -517,10 +565,17 @@ steps:
           - 优先围绕“攻击链入口 + confirmed URLs / best-path / semantic priority + knowledge 高频命中点”来规划阶段
           - 如果攻击链不完整，也要根据已验证漏洞、确认 URL 和高价值入口生成可执行计划
           - 把知识库里提示高价值的认证面、后台面、API 面、文件处理面和业务逻辑面前置
+          - 如果 passive web risk 摘要指向 source map/debug、API/auth/internal 面、CORS/cache 复核点或 cloud/signed URL 暴露，要把对应低噪音验证动作前置
           - 计划要尽量低噪音、可验证、适合真实复测与人工跟进
 
     exports:
       path_planning_json: "{{acp_output}}"
+
+  - name: persist-path-planning-raw
+    type: function
+    pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
+    functions:
+      - 'save_content(typeof path_planning_json !== "undefined" ? path_planning_json : "", "{{Output}}/ai-analysis/.path-plan-acp-raw-{{TargetSpace}}.txt")'
 
   - name: log-progress
     type: function
@@ -538,10 +593,7 @@ steps:
       RAW_FILE="{{Output}}/ai-analysis/.path-plan-acp-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/.path-plan-acp-json-{{TargetSpace}}.json"
       FALLBACK_TARGETS="{{Output}}/ai-analysis/.path-plan-acp-fallback-targets-{{TargetSpace}}.txt"
-
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{path_planning_json}}
-      AIEOF
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -576,6 +628,7 @@ steps:
           cat "{{confirmedUrlsFile}}" 2>/dev/null || true
           cat "{{entryPointsFile}}" 2>/dev/null || true
           cat "{{bestPathTargetsFile}}" 2>/dev/null || true
+          grep -Eo 'https?://[^[:space:]]+' "{{Output}}/ai-analysis/.input/passive-web-risk.txt" 2>/dev/null || true
         } | awk 'NF && !seen[$0]++' | head -8 > "$FALLBACK_TARGETS" || true
 
         FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')

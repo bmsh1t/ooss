@@ -141,17 +141,28 @@ steps:
     exports:
       code_review_json: "{{acp_output}}"
 
+  - name: persist-code-review-raw
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'save_content(typeof code_review_json !== "undefined" ? code_review_json : "", "{{Output}}/ai-analysis/.code-review-acp-raw-{{TargetSpace}}.txt")'
+
   - name: save-code-review-results
     type: bash
     pre_condition: "{{enableLlmCodeReview}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      RAW_FILE="{{Output}}/ai-analysis/.code-review-acp-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      RAW_HAS_CONTENT=false
+      if [ -s "$RAW_FILE" ] && ! grep -Eq '^[[:space:]]*(null|\{\})[[:space:]]*$' "$RAW_FILE"; then
+        RAW_HAS_CONTENT=true
+      fi
 
       # 容错：处理可能的空输出
-      if [ -n "{{code_review_json}}" ] && [ "{{code_review_json}}" != "null" ] && [ "{{code_review_json}}" != "{}" ]; then
-        cat > {{codeReviewOutput}} << 'AIEOF'
-        {{code_review_json}}
-        AIEOF
+      if [ "$RAW_HAS_CONTENT" = "true" ]; then
+        cp "$RAW_FILE" {{codeReviewOutput}}
         
         if jq empty {{codeReviewOutput}} 2>/dev/null; then
           TOTAL=$(jq -r '.code_review_summary.total_issues // 0' {{codeReviewOutput}} 2>/dev/null || echo 0)

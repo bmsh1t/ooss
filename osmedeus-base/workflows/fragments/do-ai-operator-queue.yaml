@@ -107,6 +107,30 @@ steps:
         fi
       done
 
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      DECISION_SOURCE_KIND="none"
+      DECISION_FOCUS_JSON='[]'
+      DECISION_PRIORITY_JSON='[]'
+      DECISION_RESCAN_JSON='[]'
+      DECISION_TARGET_COUNT=0
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+        DECISION_SOURCE_KIND="applied-ai-decision"
+      elif [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+        DECISION_SOURCE_KIND="ai-decision"
+      fi
+      if [ "$DECISION_SOURCE_KIND" != "none" ] && [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        DECISION_FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_PRIORITY_JSON=$(jq -c '.targets.priority_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_TARGET_COUNT=$(jq -nr \
+          --argjson focus "$DECISION_FOCUS_JSON" \
+          --argjson priority "$DECISION_PRIORITY_JSON" \
+          --argjson rescan "$DECISION_RESCAN_JSON" \
+          '($focus + $priority + $rescan) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' 2>/dev/null || echo 0)
+      fi
+
       VULN_COUNT=$(jq -r '.confirmed_real // .validation_summary.confirmed_real // 0' "{{vulnValidationFile}}" 2>/dev/null || echo 0)
       CHAIN_COUNT=$(jq -r '.attack_chain_summary.total_chains // 0' "{{attackChainFile}}" 2>/dev/null || echo 0)
       PHASE_COUNT=$(jq -r '.plan_summary.total_phases // 0' "{{pathPlanningFile}}" 2>/dev/null || echo 0)
@@ -141,6 +165,7 @@ steps:
         --arg retest_file "{{retestPlanOutput}}" \
         --arg decision_file "{{aiDecisionFile}}" \
         --arg applied_decision_file "{{appliedDecisionFile}}" \
+        --arg active_decision_file "$ACTIVE_DECISION_FILE" \
         --arg previous_followup_file "{{previousFollowupDecisionFile}}" \
         --argjson vuln_count "$VULN_COUNT" \
         --argjson chain_count "$CHAIN_COUNT" \
@@ -148,6 +173,11 @@ steps:
         --argjson retest_count "$RETEST_COUNT" \
         --argjson semantic_count "$SEMANTIC_COUNT" \
         --argjson semantic_target_count "$SEMANTIC_TARGET_COUNT" \
+        --arg decision_source_kind "$DECISION_SOURCE_KIND" \
+        --argjson decision_target_count "$DECISION_TARGET_COUNT" \
+        --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
+        --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
+        --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
         --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGETS" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
@@ -160,9 +190,9 @@ steps:
             path_planning: $path_planning_file,
             semantic_search: $semantic_file,
             retest_plan: $retest_file,
-            ai_decision: $decision_file
-            ,
+            ai_decision: $decision_file,
             applied_ai_decision: $applied_decision_file,
+            active_ai_decision: $active_decision_file,
             previous_followup: $previous_followup_file
           },
           counts: {
@@ -172,7 +202,14 @@ steps:
             retest_targets: $retest_count,
             semantic_results: $semantic_count,
             semantic_targets: $semantic_target_count,
+            decision_targets: $decision_target_count,
             previous_followup_targets: $previous_followup_targets
+          },
+          decision: {
+            source_kind: $decision_source_kind,
+            focus_targets: $decision_focus_targets,
+            priority_targets: $decision_priority_targets,
+            rescan_targets: $decision_rescan_targets
           },
           previous_followup: {
             priority_mode: $previous_followup_priority_mode,
@@ -181,7 +218,7 @@ steps:
           }
         }' > {{Output}}/ai-analysis/.input/operator-queue-context.json
 
-      if [ "$VULN_COUNT" -eq 0 ] && [ "$CHAIN_COUNT" -eq 0 ] && [ "$RETEST_COUNT" -eq 0 ] && [ "$SEMANTIC_TARGET_COUNT" -eq 0 ] && [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ]; then
+      if [ "$VULN_COUNT" -eq 0 ] && [ "$CHAIN_COUNT" -eq 0 ] && [ "$RETEST_COUNT" -eq 0 ] && [ "$SEMANTIC_TARGET_COUNT" -eq 0 ] && [ "$DECISION_TARGET_COUNT" -eq 0 ] && [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ]; then
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.operator-queue-skip
       else
         rm -f {{Output}}/ai-analysis/.operator-queue-skip 2>/dev/null || true
@@ -228,12 +265,14 @@ steps:
       约束：
       - target 必须是具体 URL、主机或服务
       - 任务要偏人工验证、权限提升、横向移动、鉴权边界、业务逻辑验证
+      - 如果 ai decision / applied decision 的 focus_areas、priority_targets、rescan_targets 指向 auth、admin、api、file、business 入口，应优先生成 P1/P2 任务
       - 优先输出 P1/P2，不要堆无意义低优先级条目
     query: |
       为 {{Target}} 生成 operator queue。
 
       先读取 {{Output}}/ai-analysis/.input/operator-queue-context.json。
       然后按需读取里面列出的文件，结合 vuln validation、attack chain、path planning、semantic search、retest plan 和 ai decision 生成操作员任务队列。
+      优先消费 active_ai_decision / applied_ai_decision 中的 focus_areas、priority_targets、rescan_targets，把它们转成真正可执行的 P1/P2 跟进任务。
 
       最终输出：
       1. 简短分析
@@ -244,6 +283,12 @@ steps:
       - preset: save_content
     exports:
       operator_queue_raw: "{{agent_content}}"
+
+  - name: persist-operator-queue-raw
+    type: function
+    pre_condition: "{{enableOperatorQueue}}"
+    functions:
+      - 'save_content(typeof operator_queue_raw !== "undefined" ? operator_queue_raw : "", "{{Output}}/ai-analysis/.operator-queue-raw-{{TargetSpace}}.txt")'
 
   - name: save-operator-queue
     type: bash
@@ -286,13 +331,33 @@ steps:
         fi
       done
 
+      ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+      DECISION_SOURCE_KIND="none"
+      DECISION_FOCUS_JSON='[]'
+      DECISION_PRIORITY_JSON='[]'
+      DECISION_RESCAN_JSON='[]'
+      if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
+        DECISION_SOURCE_KIND="applied-ai-decision"
+      elif [ -f "{{aiDecisionFile}}" ] && jq empty "{{aiDecisionFile}}" 2>/dev/null; then
+        ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
+        DECISION_SOURCE_KIND="ai-decision"
+      fi
+      if [ "$DECISION_SOURCE_KIND" != "none" ] && [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
+        DECISION_FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_PRIORITY_JSON=$(jq -c '.targets.priority_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+      fi
+      DECISION_TARGET_COUNT=$(jq -nr \
+        --argjson focus "$DECISION_FOCUS_JSON" \
+        --argjson priority "$DECISION_PRIORITY_JSON" \
+        --argjson rescan "$DECISION_RESCAN_JSON" \
+        '($focus + $priority + $rescan) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' 2>/dev/null || echo 0)
+
       RAW_FILE="{{Output}}/ai-analysis/.operator-queue-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/.operator-queue-json-{{TargetSpace}}.json"
       FALLBACK_TARGETS="{{Output}}/ai-analysis/.operator-queue-fallback-targets-{{TargetSpace}}.txt"
-
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{operator_queue_raw}}
-      AIEOF
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -306,17 +371,31 @@ steps:
       fi
 
       if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
-        jq '
+        jq \
+          --arg decision_source_kind "$DECISION_SOURCE_KIND" \
+          --argjson decision_target_count "$DECISION_TARGET_COUNT" \
+          --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
+          --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
+          --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
+          '
           .summary = ((.summary // {}) + {
             total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
             p1_tasks: (.summary.p1_tasks // 0),
-            p2_tasks: (.summary.p2_tasks // 0)
+            p2_tasks: (.summary.p2_tasks // 0),
+            decision_source_kind: $decision_source_kind,
+            decision_target_count: $decision_target_count
           })
-          | .focus_targets = (.focus_targets // [])
+          | .focus_targets = (((.focus_targets // []) + $decision_focus_targets + $decision_priority_targets + $decision_rescan_targets) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end))
           | .tasks = (.tasks // [])
         ' "$JSON_FILE" > {{operatorQueueOutput}}
       else
-        if [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
+        if [ "$DECISION_TARGET_COUNT" -gt 0 ] 2>/dev/null; then
+          {
+            printf '%s\n' "$DECISION_FOCUS_JSON" | jq -r '.[]? // empty' 2>/dev/null
+            printf '%s\n' "$DECISION_PRIORITY_JSON" | jq -r '.[]? // empty' 2>/dev/null
+            printf '%s\n' "$DECISION_RESCAN_JSON" | jq -r '.[]? // empty' 2>/dev/null
+          } | awk 'NF && !seen[$0]++' > "$FALLBACK_TARGETS" || true
+        elif [ -f "{{retestPlanOutput}}" ] && jq empty "{{retestPlanOutput}}" 2>/dev/null; then
           jq -r '[.targets[]?.target, .automation_queue[]?.target] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | .[]' "{{retestPlanOutput}}" 2>/dev/null > "$FALLBACK_TARGETS" || true
         else
           : > "$FALLBACK_TARGETS"
@@ -348,22 +427,30 @@ steps:
                 priority: (if $i < 3 then "P1" else "P2" end),
                 target: $fallback_targets[$i],
                 title: "Manual validation follow-up",
-                reason: "fallback task derived from retest plan or semantic targets",
+                reason: "fallback task derived from ai decision / retest plan / semantic targets",
                 procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
                 expected_outcome: "Confirm whether the target can be exploited or chained further",
-                evidence: ["semantic_search", "fallback_generation"]
+                evidence: ["ai_decision", "semantic_search", "fallback_generation"]
               }
             ]
           }' > {{operatorQueueOutput}}
       fi
 
-      jq '
+      jq \
+        --arg decision_source_kind "$DECISION_SOURCE_KIND" \
+        --argjson decision_target_count "$DECISION_TARGET_COUNT" \
+        --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
+        --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
+        --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
+        '
         .summary = ((.summary // {}) + {
           total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
           p1_tasks: (.summary.p1_tasks // 0),
-          p2_tasks: (.summary.p2_tasks // 0)
+          p2_tasks: (.summary.p2_tasks // 0),
+          decision_source_kind: $decision_source_kind,
+          decision_target_count: $decision_target_count
         })
-        | .focus_targets = (.focus_targets // [])
+        | .focus_targets = (((.focus_targets // []) + $decision_focus_targets + $decision_priority_targets + $decision_rescan_targets) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end))
         | .tasks = (.tasks // [])
       ' {{operatorQueueOutput}} > {{operatorQueueOutput}}.tmp 2>/dev/null && mv {{operatorQueueOutput}}.tmp {{operatorQueueOutput}} || true
 

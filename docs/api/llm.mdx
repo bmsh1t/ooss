@@ -1,11 +1,133 @@
 ---
 title: "LLM API"
-description: "OpenAI-compatible chat completions and embeddings"
+description: "OpenAI-compatible chat completions, responses, and embeddings"
 ---
 
 # LLM API
 
 Direct API access to Large Language Model capabilities without requiring workflow execution.
+
+## Responses API
+
+Send a focused OpenAI-compatible responses request to the configured LLM provider.
+
+> Current behavior:
+> - text input / message-array input work through the compatibility layer
+> - function tools work through compatibility mapping
+> - built-in Responses tools such as `web_search_preview` use the native `/responses` path when the upstream provider exposes it
+> - `stream: true` is supported for both native Responses streaming and compatibility-mode text streaming
+
+```bash
+curl -X POST http://localhost:8002/osm/api/llm/v1/responses \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4",
+    "instructions": "You are a security analyst.",
+    "input": "Summarize the attack surface of example.com",
+    "max_output_tokens": 800
+  }'
+```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `input` | string / array / object | Yes | String input, a single message object, or a message array |
+| `model` | string | No | Model to use (defaults to provider's default model) |
+| `instructions` | string | No | Top-level instruction text, mapped into a system message |
+| `max_output_tokens` | int | No | Maximum output tokens, mapped to chat `max_tokens` |
+| `temperature` | float | No | Sampling temperature |
+| `top_p` | float | No | Top-p sampling |
+| `tools` | array | No | Function tools in Responses-style or chat-style shape |
+| `tool_choice` | string/object | No | Tool selection strategy |
+| `stream` | bool | No | Enable SSE streaming output |
+
+**Supported message roles:**
+- `user`
+- `assistant`
+- `system`
+- `developer` → normalized to `system`
+
+**Notes:**
+- If your configured provider URL ends with `/chat/completions`, Osmedeus will auto-derive `/responses` when native Responses-only features are needed.
+- Built-in tools such as `web_search_preview` depend on the upstream provider actually supporting the Responses API.
+
+### Workflow / CLI Quick Checks
+
+**Workflow step using native Responses tools**
+
+```yaml
+- name: responses-native-tools
+  type: llm
+  messages:
+    - role: user
+      content: "Search recent reconnaissance guidance for {{Target}}"
+  extra_llm_parameters:
+    api_mode: responses
+    tools:
+      - type: web_search_preview
+```
+
+**CLI function preserving `{{message}}` for `llm_invoke_custom` runtime replacement**
+
+```bash
+osmedeus func e 'llm_invoke_custom("Summarize {{target}}", "{\"model\":\"gpt-5.4\",\"input\":\"{{message}}\",\"tools\":[{\"type\":\"web_search_preview\"}]}")' -t example.com
+```
+
+**CLI function forcing Responses mode for multi-turn conversations**
+
+```bash
+OSM_LLM_API_MODE=responses \
+  osmedeus func e 'llm_conversations("system:Be brief", "user:Analyze {{target}}")' \
+  -t example.com
+```
+
+**Local smoke script**
+
+```bash
+test/regression/llm-responses-smoke.sh
+```
+
+That smoke script validates:
+- workflow `api_mode: responses`
+- workflow `use_responses_api: true`
+- `llm_invoke`
+- `llm_invoke_custom`
+- `llm_conversations`
+
+**Response:**
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "response",
+  "created_at": 1710000000,
+  "status": "completed",
+  "model": "gpt-5.4",
+  "output": [
+    {
+      "id": "msg_chatcmpl-abc123",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Based on the scan results..."
+        }
+      ]
+    }
+  ],
+  "output_text": "Based on the scan results...",
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 120,
+    "total_tokens": 170
+  }
+}
+```
+
+---
 
 ## Chat Completion
 

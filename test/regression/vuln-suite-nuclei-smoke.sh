@@ -16,6 +16,19 @@ require_cmd() {
   }
 }
 
+ensure_stub_command() {
+  local bin_dir="$1"
+  local name="$2"
+  if command -v "$name" >/dev/null 2>&1; then
+    return 0
+  fi
+  cat >"$bin_dir/$name" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$bin_dir/$name"
+}
+
 assert_file_contains() {
   local file="$1"
   local needle="$2"
@@ -71,11 +84,22 @@ fi
 rm -rf "$BASE_DIR"
 mkdir -p "$BASE_DIR" "$WORKSPACES_DIR"
 
+BIN_DIR="$BASE_DIR/external-binaries"
+mkdir -p "$BIN_DIR"
+
+# This smoke only validates the deterministic Nuclei path.
+# Some optional tools are disabled below but still listed in module-level
+# dependency checks, so provide lightweight local stubs when absent.
+for optional_cmd in TInjA titus fray brutus nerva; do
+  ensure_stub_command "$BIN_DIR" "$optional_cmd"
+done
+
 cat >"$BASE_DIR/osm-settings.yaml" <<EOF
 base_folder: "$BASE_DIR"
 environments:
   workspaces: "$WORKSPACES_DIR"
   workflows: "$WORKFLOW_DIR"
+  external_binaries_path: "$BIN_DIR"
 database:
   db_engine: sqlite
   db_path: "{{base_folder}}/database-osm.sqlite"
@@ -171,6 +195,7 @@ run_args=(
   -p "enableCommandInjection=false"
   -p "enableTestSSL=false"
   -p "enableSpraying=false"
+  -p "enablePrototypePollutionScan=false"
 )
 
 OSM_SKIP_PATH_SETUP=1 \

@@ -388,7 +388,28 @@ steps:
     type: bash
     log: "Enumerating company GitHub repos"
     pre_condition: "{{enableGithubRepos}}"
-    command: 'COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}") && if [ -f "{{githubTokensFile}}" ]; then GH_TOKEN=$(head -n 1 {{githubTokensFile}} 2>/dev/null) && [ -n "$GH_TOKEN" ] && echo "$COMPANY" | enumerepo -token - -o {{Output}}/.tmp/company_repos.json 2>/dev/null <<< "$GH_TOKEN" || true; fi && if [ -s "{{Output}}/.tmp/company_repos.json" ]; then jq -r ".[].repos[].url" {{Output}}/.tmp/company_repos.json 2>/dev/null > {{Output}}/.tmp/company_repos_url.txt || true; fi && if [ -s "{{Output}}/.tmp/company_repos_url.txt" ]; then while read repo; do git clone "$repo" {{Output}}/.tmp/github_repos/$(basename "$repo" .git) 2>/dev/null || true; done < {{Output}}/.tmp/company_repos_url.txt; fi'
+    command: |
+      mkdir -p "{{outputDir}}" "{{Output}}/.tmp/github_repos" "{{Output}}/.tmp/github" 2>/dev/null || true
+      COMPANY_REPOS_JSON="{{Output}}/.tmp/company_repos.json"
+      COMPANY_REPOS_URLS="{{Output}}/.tmp/company_repos_url.txt"
+      rm -f "$COMPANY_REPOS_JSON" "$COMPANY_REPOS_URLS" 2>/dev/null || true
+
+      COMPANY=$(echo "{{Target}}" | unfurl format %r 2>/dev/null || echo "{{Target}}")
+      if [ -s "{{githubTokensFile}}" ]; then
+        printf '%s\n' "$COMPANY" | enumerepo -token-file "{{githubTokensFile}}" -o "$COMPANY_REPOS_JSON" 2>/dev/null || true
+      fi
+
+      if [ -s "$COMPANY_REPOS_JSON" ]; then
+        jq -r '.[].repos[].url' "$COMPANY_REPOS_JSON" 2>/dev/null > "$COMPANY_REPOS_URLS" || true
+      fi
+
+      if [ -s "$COMPANY_REPOS_URLS" ]; then
+        while IFS= read -r repo; do
+          [ -n "$repo" ] || continue
+          repo_name=$(basename "$repo" .git)
+          git clone "$repo" "{{Output}}/.tmp/github_repos/$repo_name" 2>/dev/null || true
+        done < "$COMPANY_REPOS_URLS"
+      fi
     on_error:
       - action: continue
 
@@ -397,23 +418,25 @@ steps:
     log: "Scanning cloned repos for secrets"
     pre_condition: "{{enableGithubRepos}}"
     command: |
+      mkdir -p "{{outputDir}}" "{{Output}}/.tmp/github" "{{Output}}/.tmp/github_repos" 2>/dev/null || true
       if [ "{{secretsEngine}}" = "titus" ]; then
-        for dir in {{Output}}/.tmp/github_repos/*/; do
-          [ -d "$dir" ] && titus scan --format json "$dir" 2>/dev/null > {{Output}}/.tmp/github/titus_secret_$(basename "$dir").json || true
+        for dir in "{{Output}}"/.tmp/github_repos/*/; do
+          [ -d "$dir" ] && titus scan --format json "$dir" 2>/dev/null > "{{Output}}/.tmp/github/titus_secret_$(basename "$dir").json" || true
         done
       fi
       if [ "{{secretsEngine}}" = "noseyparker" ]; then
-        for dir in {{Output}}/.tmp/github_repos/*/; do
-          [ -d "$dir" ] && noseyparker scan --datastore {{Output}}/.tmp/github/np_ds_$(basename "$dir") "$dir" 2>/dev/null && noseyparker report --datastore {{Output}}/.tmp/github/np_ds_$(basename "$dir") --format json > {{Output}}/.tmp/github/nosey_$(basename "$dir").json 2>/dev/null || true
+        for dir in "{{Output}}"/.tmp/github_repos/*/; do
+          [ -d "$dir" ] && noseyparker scan --datastore "{{Output}}/.tmp/github/np_ds_$(basename "$dir")" "$dir" 2>/dev/null && noseyparker report --datastore "{{Output}}/.tmp/github/np_ds_$(basename "$dir")" --format json > "{{Output}}/.tmp/github/nosey_$(basename "$dir").json" 2>/dev/null || true
         done
       fi
       if [ -s "{{Output}}/.tmp/company_repos_url.txt" ]; then
-        while read repo; do
-          trufflehog git "$repo" -j 2>/dev/null >> {{Output}}/.tmp/github/trufflehog.json || true
+        while IFS= read -r repo; do
+          [ -n "$repo" ] || continue
+          trufflehog git "$repo" -j 2>/dev/null >> "{{Output}}/.tmp/github/trufflehog.json" || true
         done < {{Output}}/.tmp/company_repos_url.txt
       fi
-      if ls {{Output}}/.tmp/github/*.json 1>/dev/null 2>&1; then
-        cat {{Output}}/.tmp/github/*.json 2>/dev/null | jq -c 2>/dev/null > {{githubReposOutput}}
+      if ls "{{Output}}"/.tmp/github/*.json 1>/dev/null 2>&1; then
+        cat "{{Output}}"/.tmp/github/*.json 2>/dev/null | jq -c 2>/dev/null > "{{githubReposOutput}}"
       fi
     on_error:
       - action: continue

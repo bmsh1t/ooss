@@ -81,27 +81,35 @@ type SearchOptions struct {
 	MinSourceConfidence float64
 	SampleTypes         []string
 	ExcludeSampleTypes  []string
+	EnableRerank        bool
+	RerankProvider      string
+	RerankModel         string
+	RerankTopN          int
+	RerankMaxCandidates int
 }
 
 // SearchHit is a normalized vector knowledge result.
 type SearchHit struct {
-	DocumentID     int64                              `json:"document_id"`
-	ChunkID        int64                              `json:"chunk_id"`
-	Workspace      string                             `json:"workspace"`
-	Title          string                             `json:"title"`
-	SourcePath     string                             `json:"source_path"`
-	DocType        string                             `json:"doc_type"`
-	Section        string                             `json:"section,omitempty"`
-	Content        string                             `json:"content"`
-	Snippet        string                             `json:"snippet"`
-	Provider       string                             `json:"provider"`
-	Model          string                             `json:"model"`
-	RelevanceScore float64                            `json:"relevance_score"`
-	VectorScore    float64                            `json:"vector_score"`
-	KeywordScore   float64                            `json:"keyword_score"`
-	Type           string                             `json:"type"`
-	Metadata       *database.KnowledgeMetadataSummary `json:"metadata,omitempty"`
-	ContentHash    string                             `json:"-"`
+	DocumentID         int64                              `json:"document_id"`
+	ChunkID            int64                              `json:"chunk_id"`
+	Workspace          string                             `json:"workspace"`
+	Title              string                             `json:"title"`
+	SourcePath         string                             `json:"source_path"`
+	DocType            string                             `json:"doc_type"`
+	Section            string                             `json:"section,omitempty"`
+	Content            string                             `json:"content"`
+	Snippet            string                             `json:"snippet"`
+	Provider           string                             `json:"provider"`
+	Model              string                             `json:"model"`
+	RelevanceScore     float64                            `json:"relevance_score"`
+	BaseRelevanceScore float64                            `json:"base_relevance_score,omitempty"`
+	RerankScore        float64                            `json:"rerank_score,omitempty"`
+	RankingSource      string                             `json:"ranking_source,omitempty"`
+	VectorScore        float64                            `json:"vector_score"`
+	KeywordScore       float64                            `json:"keyword_score"`
+	Type               string                             `json:"type"`
+	Metadata           *database.KnowledgeMetadataSummary `json:"metadata,omitempty"`
+	ContentHash        string                             `json:"-"`
 }
 
 // Stats reports high-level vector knowledge DB statistics.

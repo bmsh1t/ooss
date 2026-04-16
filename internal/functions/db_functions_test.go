@@ -1374,3 +1374,83 @@ func TestDbImportCustomAsset_ContentDiscovery(t *testing.T) {
 	assert.Contains(t, asset6.Remarks, "Modern-App")
 	assert.Contains(t, asset6.Remarks, "SGW")
 }
+
+func TestDbImportCustomAsset_VigoliumEnvelope(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "vigolium-envelope.jsonl")
+	content := `{"type":"scan","data":{"name":"skip-me"}}` + "\n" +
+		`{"type":"http_record","data":{"url":"https://portal.example.com","hostname":"portal.example.com","ip":"203.0.113.10","status_code":200,"response_content_type":"text/html","response_content_length":12345,"response_words":678,"response_title":"Portal Login","tech":["nginx"],"webserver":"nginx"}}` + "\n"
+	err := os.WriteFile(testFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	registry := NewRegistry()
+	result, err := registry.Execute(
+		`db_import_custom_asset("test-workspace", "`+testFile+`")`,
+		map[string]interface{}{},
+	)
+	require.NoError(t, err)
+
+	stats := result.(map[string]interface{})
+	assert.Equal(t, 1, stats["new"])
+	assert.Equal(t, 1, stats["total"])
+	assert.Equal(t, 0, stats["errors"])
+
+	ctx := context.Background()
+	db := database.GetDB()
+
+	var asset database.Asset
+	err = db.NewSelect().Model(&asset).
+		Where("workspace = ?", "test-workspace").
+		Where("asset_value = ?", "https://portal.example.com").
+		Scan(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "https://portal.example.com", asset.URL)
+	assert.Equal(t, "portal.example.com", asset.Input)
+	assert.Equal(t, "203.0.113.10", asset.HostIP)
+	assert.Equal(t, "text/html", asset.ContentType)
+	assert.Equal(t, int64(12345), asset.ContentLength)
+	assert.Equal(t, 678, asset.Words)
+	assert.Equal(t, "Portal Login", asset.Title)
+	assert.Equal(t, "web", asset.AssetType)
+	assert.Contains(t, asset.Technologies, "nginx")
+	assert.Contains(t, asset.Remarks, "nginx")
+	assert.Contains(t, asset.RawJsonData, `"title":"Portal Login"`)
+	assert.NotContains(t, asset.RawJsonData, `"type":"http_record"`)
+}
+
+func TestDbImportCustomAsset_VigoliumWithSourceOverride(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "vigolium-source.jsonl")
+	content := `{"type":"http_record","data":{"url":"https://admin.example.com","hostname":"admin.example.com","response_title":"Admin Console"}}` + "\n"
+	err := os.WriteFile(testFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	registry := NewRegistry()
+	result, err := registry.Execute(
+		`db_import_custom_asset("test-workspace", "`+testFile+`", "", "vigolium")`,
+		map[string]interface{}{},
+	)
+	require.NoError(t, err)
+
+	stats := result.(map[string]interface{})
+	assert.Equal(t, 1, stats["new"])
+
+	ctx := context.Background()
+	db := database.GetDB()
+
+	var asset database.Asset
+	err = db.NewSelect().Model(&asset).
+		Where("workspace = ?", "test-workspace").
+		Where("asset_value = ?", "https://admin.example.com").
+		Scan(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "web", asset.AssetType)
+	assert.Equal(t, "vigolium", asset.Source)
+	assert.Equal(t, "Admin Console", asset.Title)
+}

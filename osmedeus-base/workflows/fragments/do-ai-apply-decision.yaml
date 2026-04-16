@@ -91,6 +91,15 @@ steps:
     command: |
       mkdir -p {{Output}}/ai-analysis 2>/dev/null || true
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       normalize_int() {
         value="$1"
         case "$value" in
@@ -675,9 +684,9 @@ steps:
         printf 'waf_bypass_needed: %s\n' "$WAF_BYPASS"
         printf 'waf_bypass_techniques: %s\n' "$(printf '%s' "$WAF_TECH" | sed 's/["\\]/\\&/g')"
         printf 'waf_recommended_delay: %s\n' "$(printf '%s' "$WAF_DELAY" | sed 's/["\\]/\\&/g')"
-        printf 'focus_area_count: %s\n' "$(wc -l < "{{focusAreasOutput}}" 2>/dev/null || echo 0)"
+        printf 'focus_area_count: %s\n' "$(count_lines "{{focusAreasOutput}}")"
         printf 'priority_target_count: %s\n' "$PRIORITY_COUNT"
-        printf 'rescan_target_count: %s\n' "$(wc -l < "{{rescanTargetsOutput}}" 2>/dev/null || echo 0)"
+        printf 'rescan_target_count: %s\n' "$(count_lines "{{rescanTargetsOutput}}")"
         printf 'followup_used: %s\n' "$FOLLOWUP_AVAILABLE"
         printf 'followup_source_kind: %s\n' "$(printf '%s' "$FOLLOWUP_SOURCE_KIND" | sed 's/["\\]/\\&/g')"
         printf 'followup_target_count: %s\n' "$FOLLOWUP_TARGET_COUNT"

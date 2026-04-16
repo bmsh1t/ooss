@@ -361,3 +361,19 @@ embeddings_config:
     api_url: "http://localhost:11434/api/embeddings"
     model: "nomic-embed-text"
     api_key: ""
+
+# =============================================================================
+# Rerank Configuration (Optional)
+# =============================================================================
+rerank_config:
+  enabled: false
+  provider: openai
+  top_n: 10
+  max_candidates: 40
+  timeout: 15s
+  min_score: 0.0
+
+  openai:
+    api_url: "https://router.tumuer.me/v1/rerank"
+    model: "Pro/BAAI/bge-reranker-v2-m3"
+    api_key: "${TUMUER_API_KEY}"

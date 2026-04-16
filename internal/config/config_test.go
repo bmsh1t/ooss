@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,12 +52,21 @@ database:
 	cfg, err := LoadFromFile(settingsPath)
 	require.NoError(t, err)
 
+	assert.Equal(t, settingsPath, filepath.Clean(cfg.GetSettingsFilePath()))
 	assert.Equal(t, "/tmp/osmedeus-base/external-data", filepath.Clean(cfg.DataPath))
 	assert.Equal(t, "/tmp/osmedeus-base/external-configs", filepath.Clean(cfg.ConfigsPath))
 	assert.Equal(t, "/tmp/osmedeus-base/workspaces", filepath.Clean(cfg.WorkspacesPath))
 	assert.Equal(t, "/tmp/osmedeus-base/workflows", filepath.Clean(cfg.WorkflowsPath))
 	assert.Equal(t, "/tmp/osmedeus-base/external-scripts", filepath.Clean(cfg.ExternalScriptsPath))
 	assert.Equal(t, "/tmp/osmedeus-base/database-osm.sqlite", filepath.Clean(cfg.GetDBPath()))
+}
+
+func TestGetSettingsFilePathFallsBackToBaseFolder(t *testing.T) {
+	cfg := &Config{
+		BaseFolder: "/tmp/osmedeus-base",
+	}
+
+	assert.Equal(t, "/tmp/osmedeus-base/osm-settings.yaml", filepath.Clean(cfg.GetSettingsFilePath()))
 }
 
 func TestServerConfig_GetServerURL(t *testing.T) {
@@ -201,6 +211,36 @@ knowledge_vector:
 	assert.Contains(t, cfg.ListEmbeddingProviderModels(), "jina:jina-embeddings-v5-text-small")
 }
 
+func TestKnowledgeVectorFallsBackToEmbeddingsProviderWhenEmbeddingsDisabled(t *testing.T) {
+	cfg, err := LoadFromBytes([]byte(`
+base_folder: /tmp/osmedeus-base
+embeddings_config:
+  enabled: false
+  provider: jina
+  jina:
+    api_url: https://api.jina.ai/v1/embeddings
+    model: jina-embeddings-v5-text-small
+    api_key: test-key
+knowledge_vector:
+  enabled: true
+  db_path: "{{base_folder}}/knowledge/vector-kb.sqlite"
+`))
+	require.NoError(t, err)
+
+	assert.False(t, cfg.IsEmbeddingsConfigEnabled())
+	assert.Equal(t, "jina", cfg.GetKnowledgeVectorProvider())
+	assert.Equal(t, "jina-embeddings-v5-text-small", cfg.GetKnowledgeVectorModel(""))
+
+	provider, source, err := cfg.ResolveEmbeddingProvider("jina")
+	require.NoError(t, err)
+	require.NotNil(t, provider)
+	assert.Equal(t, "embeddings_config", source)
+	assert.Equal(t, "https://api.jina.ai/v1/embeddings", provider.BaseURL)
+	assert.Equal(t, "jina-embeddings-v5-text-small", provider.Model)
+	assert.Contains(t, cfg.ListEmbeddingProviders(), "jina")
+	assert.Contains(t, cfg.ListEmbeddingProviderModels(), "jina:jina-embeddings-v5-text-small")
+}
+
 func TestResolveEmbeddingProviderPrefersEmbeddingsConfigOverLLMProvider(t *testing.T) {
 	cfg := &Config{
 		BaseFolder: "/tmp/osmedeus-base",
@@ -230,6 +270,89 @@ func TestResolveEmbeddingProviderPrefersEmbeddingsConfigOverLLMProvider(t *testi
 	assert.Equal(t, "https://embed.example/v1/embeddings", provider.BaseURL)
 	assert.Equal(t, "text-embedding-3-small", provider.Model)
 	assert.Equal(t, "embed-key", provider.AuthToken)
+}
+
+func TestResolveRerankProviderFromDedicatedConfig(t *testing.T) {
+	cfg, err := LoadFromBytes([]byte(`
+base_folder: /tmp/osmedeus-base
+rerank_config:
+  enabled: true
+  provider: openai
+  top_n: 12
+  max_candidates: 50
+  timeout: 20s
+  min_score: 0.25
+  openai:
+    api_url: https://router.tumuer.me/v1/rerank
+    model: Pro/BAAI/bge-reranker-v2-m3
+    api_key: ${TUMUER_API_KEY}
+`))
+	require.NoError(t, err)
+
+	assert.True(t, cfg.IsRerankEnabled())
+	assert.Equal(t, 12, cfg.GetRerankTopN())
+	assert.Equal(t, 50, cfg.GetRerankMaxCandidates())
+	assert.Equal(t, 20*time.Second, cfg.GetRerankTimeout())
+
+	provider, err := cfg.ResolveRerankProvider("")
+	require.NoError(t, err)
+	require.NotNil(t, provider)
+	assert.Equal(t, "openai", provider.Provider)
+	assert.Equal(t, "https://router.tumuer.me/v1/rerank", provider.BaseURL)
+	assert.Equal(t, "Pro/BAAI/bge-reranker-v2-m3", provider.Model)
+	assert.Equal(t, "${TUMUER_API_KEY}", provider.AuthToken)
+}
+
+func TestResolveRerankProviderRejectsUnknownProvider(t *testing.T) {
+	cfg := &Config{
+		BaseFolder: "/tmp/osmedeus-base",
+		Rerank: RerankConfig{
+			Provider: "openai",
+			OpenAI: RerankProviderConfig{
+				APIURL: "https://router.tumuer.me/v1/rerank",
+				Model:  "Pro/BAAI/bge-reranker-v2-m3",
+				APIKey: "${TUMUER_API_KEY}",
+			},
+		},
+	}
+
+	provider, err := cfg.ResolveRerankProvider("jina")
+	require.Error(t, err)
+	assert.Nil(t, provider)
+	assert.Contains(t, err.Error(), "not supported")
+}
+
+func TestResolveRerankProviderRequiresOpenAIURL(t *testing.T) {
+	cfg := &Config{
+		BaseFolder: "/tmp/osmedeus-base",
+		Rerank: RerankConfig{
+			Provider: "openai",
+			OpenAI: RerankProviderConfig{
+				Model:  "Pro/BAAI/bge-reranker-v2-m3",
+				APIKey: "${TUMUER_API_KEY}",
+			},
+		},
+	}
+
+	provider, err := cfg.ResolveRerankProvider("")
+	require.Error(t, err)
+	assert.Nil(t, provider)
+	assert.Contains(t, err.Error(), "rerank_config.openai.api_url")
+}
+
+func TestRerankDefaultsAndTimeoutFallback(t *testing.T) {
+	cfg := &Config{}
+
+	assert.False(t, cfg.IsRerankEnabled())
+	assert.Equal(t, 10, cfg.GetRerankTopN())
+	assert.Equal(t, 40, cfg.GetRerankMaxCandidates())
+	assert.Equal(t, 15*time.Second, cfg.GetRerankTimeout())
+
+	cfg.Rerank.Timeout = ""
+	assert.Equal(t, 15*time.Second, cfg.GetRerankTimeout())
+
+	cfg.Rerank.Timeout = "not-a-duration"
+	assert.Equal(t, 15*time.Second, cfg.GetRerankTimeout())
 }
 
 func TestLLMRetrySettingsParse(t *testing.T) {

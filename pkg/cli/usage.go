@@ -252,6 +252,12 @@ func UsageFunction() string {
   ` + terminal.Green("# Query filtered assets from database") + `
   osmedeus func e 'db_select_assets_filtered("example.com", 200, "subdomain", "jsonl")'
 
+  ` + terminal.Green("# Call llm_invoke_custom with {{message}} placeholder preserved for runtime replacement") + `
+  osmedeus func e 'llm_invoke_custom("Summarize {{target}}", "{\"model\":\"gpt-5.4\",\"input\":\"{{message}}\",\"tools\":[{\"type\":\"web_search_preview\"}]}")' ` + terminal.Yellow("-t") + ` example.com
+
+  ` + terminal.Green("# Use llm_conversations with Responses mode via environment variable") + `
+  OSM_LLM_API_MODE=responses osmedeus func e 'llm_conversations("system:Be brief", "user:Analyze {{target}}")' ` + terminal.Yellow("-t") + ` example.com
+
   ` + terminal.Green("# Read script from stdin") + `
   echo 'log_info("hello")' | osmedeus func e ` + terminal.Yellow("--stdin") + `
 
@@ -306,6 +312,12 @@ func UsageFunctionEval() string {
 
   ` + terminal.Green("# Query database - get all vulnerabilities for a workspace") + `
   osmedeus func e 'db_select_vulnerabilities("example.com", "markdown")'
+
+  ` + terminal.Green("# LLM custom request body keeps {{message}} for llm_invoke_custom runtime substitution") + `
+  osmedeus func e 'llm_invoke_custom("Summarize {{target}}", "{\"model\":\"gpt-5.4\",\"input\":\"{{message}}\",\"tools\":[{\"type\":\"web_search_preview\"}]}")' ` + terminal.Yellow("-t") + ` example.com
+
+  ` + terminal.Green("# Force functions to use Responses API with env mode") + `
+  OSM_LLM_API_MODE=responses osmedeus func e 'llm_conversations("system:Be brief", "user:Analyze {{target}}")' ` + terminal.Yellow("-t") + ` example.com
 
   ` + terminal.Green("# Read script from stdin") + `
   echo 'print_markdown_from_file("README.md")' | osmedeus func e --stdin

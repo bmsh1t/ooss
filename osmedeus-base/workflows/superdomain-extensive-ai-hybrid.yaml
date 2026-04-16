@@ -50,6 +50,14 @@ params:
     type: bool
     default: true
     description: "Enable AI-powered vulnerability analysis"
+  - name: enableIntelligentAnalysis
+    type: bool
+    default: true
+    description: "Enable the AI coordinator that aggregates findings into an exploitation decision"
+  - name: enableAiDecision
+    type: bool
+    default: true
+    description: "Enable application of AI-generated decision artifacts and scan parameters"
   - name: enablePreScanDecision
     type: bool
     default: true
@@ -114,6 +122,14 @@ params:
     type: bool
     default: false
     description: "Queue AI-selected retest targets into worker queue"
+  - name: enableTargetedRescan
+    type: bool
+    default: true
+    description: "Run targeted nuclei rescans against AI-selected follow-up targets"
+  - name: enablePostFollowupCoordination
+    type: bool
+    default: true
+    description: "Aggregate follow-up execution outputs into a final reusable decision package"
   - name: knowledgeWorkspace
     default: "{{TargetSpace}}"
   - name: sharedKnowledgeWorkspace
@@ -302,6 +318,13 @@ modules:
     depends_on: [http-probe, web-crawl]
 
   # ===========================================================================
+  # Phase 5b: Passive Web Risk
+  # ===========================================================================
+  - name: passive-web-risk
+    path: common/07b-passive-web-risk.yaml
+    depends_on: [content-analysis, http-probe]
+
+  # ===========================================================================
   # Phase 6: Service Scan & Backup
   # ===========================================================================
   - name: service-scan
@@ -342,6 +365,9 @@ modules:
     pre_condition: "{{enablePreScanDecision}}"
 
   # AI 语义搜索 - 依赖指纹识别（需要 tech stack 数据）
+  # 这里故意复用统一的 do-ai-semantic-search.yaml，而不是 standalone 的
+  # do-ai-semantic-search-hybrid.yaml。原因是主链需要保留 semantic-agent
+  # 精炼和完整的下游 artifact 契约，避免削弱 follow-up AI 闭环。
   - name: ai-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [fingerprint]
@@ -431,8 +457,8 @@ modules:
   # AI 协调器 - 汇总所有 AI 分析结果，生成决策配置
   - name: ai-intelligent-analysis
     path: fragments/do-ai-intelligent-analysis.yaml
-    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-post-vuln-semantic-search, ai-skills-loader]
-    pre_condition: "{{enableLlmAnalysis}}"
+    depends_on: [ai-vuln-validation, ai-attack-chain, ai-path-planning, ai-semantic-search, ai-post-vuln-semantic-search, ai-skills-loader, passive-web-risk]
+    pre_condition: '{{enableLlmAnalysis}} && ("{{enableIntelligentAnalysis}}" == "" || "{{enableIntelligentAnalysis}}" == "true")'
     params:
       semanticSearchFile: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
       semanticHighlightsFile: "{{Output}}/ai-analysis/semantic-highlights-post-vuln-{{TargetSpace}}.json"
@@ -448,7 +474,7 @@ modules:
   - name: ai-apply-decision
     path: fragments/do-ai-apply-decision.yaml
     depends_on: [ai-intelligent-analysis]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: '{{enableLlmAnalysis}} && ("{{enableAiDecision}}" == "" || "{{enableAiDecision}}" == "true")'
 
   # ===========================================================================
   # Phase 10: Code Review
@@ -529,7 +555,7 @@ modules:
   - name: ai-targeted-rescan
     path: fragments/do-ai-targeted-rescan.yaml
     depends_on: [ai-apply-decision, ai-retest-planning, ai-operator-queue, ai-decision-semantic-search]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enableTargetedRescan}}"
     params:
       semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
 
@@ -546,7 +572,7 @@ modules:
   - name: ai-post-followup-coordination
     path: fragments/do-ai-post-followup-coordination.yaml
     depends_on: [ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enablePostFollowupCoordination}}"
     params:
       followupDecisionOutput: "{{followupDecisionOutput}}"
       semanticPriorityTargetsFile: "{{Output}}/ai-analysis/semantic-priority-targets-decision-followup-{{TargetSpace}}.txt"
@@ -556,7 +582,7 @@ modules:
   # ===========================================================================
   - name: report
     path: common/10-report.yaml
-    depends_on: [vuln-suite, ai-intelligent-analysis, ai-code-review, ai-targeted-rescan, ai-campaign-handoff, ai-retest-queue, ai-post-followup-coordination]
+    depends_on: [vuln-suite, passive-web-risk, ai-intelligent-analysis, ai-code-review, ai-post-followup-coordination]
     on_error:
       - action: continue
 

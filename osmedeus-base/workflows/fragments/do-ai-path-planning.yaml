@@ -62,6 +62,16 @@ params:
     default: "{{Output}}/ai-analysis/vector-kb-search-results-post-vuln-{{TargetSpace}}.json"
   - name: thirdFallbackVectorKnowledgeSearchFile
     default: "{{Output}}/ai-analysis/vector-kb-search-results-early-{{TargetSpace}}.json"
+  - name: passiveWebRiskSummaryFile
+    default: "{{Output}}/passive-web-risk/passive-web-risk-summary-{{TargetSpace}}.md"
+  - name: sourceMapExposureFile
+    default: "{{Output}}/passive-web-risk/source-map-exposure-{{TargetSpace}}.txt"
+  - name: apiSurfaceFile
+    default: "{{Output}}/passive-web-risk/api-surface-{{TargetSpace}}.txt"
+  - name: corsCacheHeuristicsFile
+    default: "{{Output}}/passive-web-risk/cors-cache-heuristics-{{TargetSpace}}.txt"
+  - name: cloudLeakFile
+    default: "{{Output}}/passive-web-risk/cloud-storage-leaks-{{TargetSpace}}.txt"
 
   # 配置
   - name: enablePathPlanning
@@ -89,6 +99,7 @@ steps:
       : > "$INPUT_DIR/priority-targets.txt"
       : > "$INPUT_DIR/semantic-priority.txt"
       : > "$INPUT_DIR/knowledge-priority.txt"
+      : > "$INPUT_DIR/passive-web-risk.txt"
 
       text_has_lines() {
         file="$1"
@@ -163,6 +174,14 @@ steps:
         fi
       }
 
+      append_passive_context() {
+        file="$1"
+        label="$2"
+        limit="${3:-5}"
+        [ -f "$file" ] || return 0
+        sed -n "1,${limit}p" "$file" 2>/dev/null | sed "s|^|[$label] |" >> "$INPUT_DIR/passive-web-risk.txt" || true
+      }
+
       ACTIVE_SEMANTIC_FILE=$(pick_semantic_file "{{semanticSearchFile}}" "{{fallbackSemanticSearchFile}}" "{{secondFallbackSemanticSearchFile}}" "{{thirdFallbackSemanticSearchFile}}")
       ACTIVE_SEMANTIC_PRIORITY_FILE=$(pick_text_file "{{semanticPriorityTargetsFile}}" "{{fallbackSemanticPriorityTargetsFile}}" "{{secondFallbackSemanticPriorityTargetsFile}}" "{{thirdFallbackSemanticPriorityTargetsFile}}")
       ACTIVE_KNOWLEDGE_FILE=$(pick_list_file "{{knowledgeSearchFile}}" "{{fallbackKnowledgeSearchFile}}" "{{secondFallbackKnowledgeSearchFile}}" "{{thirdFallbackKnowledgeSearchFile}}")
@@ -233,12 +252,26 @@ steps:
           ] | @tsv' "$ACTIVE_KNOWLEDGE_FILE" 2>/dev/null || true
         fi
       } | awk 'NF && !seen[$0]++' | head -12 > "$INPUT_DIR/knowledge-priority.txt" || true
+
+      if text_has_lines "{{passiveWebRiskSummaryFile}}"; then
+        sed -n '1,40p' "{{passiveWebRiskSummaryFile}}" > "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null || true
+      else
+        append_passive_context "{{sourceMapExposureFile}}" "source-map" 6
+        append_passive_context "{{apiSurfaceFile}}" "api-surface" 8
+        append_passive_context "{{corsCacheHeuristicsFile}}" "cors-cache" 8
+        append_passive_context "{{cloudLeakFile}}" "cloud-storage" 6
+      fi
+
+      awk 'NF && !seen[$0]++' "$INPUT_DIR/passive-web-risk.txt" 2>/dev/null > "$INPUT_DIR/passive-web-risk.txt.tmp" \
+        && mv "$INPUT_DIR/passive-web-risk.txt.tmp" "$INPUT_DIR/passive-web-risk.txt" \
+        || true
       
       CHAIN_SIZE=$(count_bytes "$INPUT_DIR/chains.json")
       TARGET_COUNT=$(count_lines "$INPUT_DIR/priority-targets.txt")
       SEMANTIC_SIZE=$(count_lines "$INPUT_DIR/semantic-priority.txt")
       KNOWLEDGE_SIZE=$(count_lines "$INPUT_DIR/knowledge-priority.txt")
-      echo "[Path Planning] Input prepared: chains=$CHAIN_SIZE priority_targets=$TARGET_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE"
+      PASSIVE_SIZE=$(count_lines "$INPUT_DIR/passive-web-risk.txt")
+      echo "[Path Planning] Input prepared: chains=$CHAIN_SIZE priority_targets=$TARGET_COUNT semantic=$SEMANTIC_SIZE knowledge=$KNOWLEDGE_SIZE passive=$PASSIVE_SIZE"
       echo "[Path Planning] Active inputs: semantic=$ACTIVE_SEMANTIC_FILE semantic_targets=$ACTIVE_SEMANTIC_PRIORITY_FILE knowledge=$ACTIVE_KNOWLEDGE_FILE vector=$ACTIVE_VECTOR_KNOWLEDGE_FILE"
 
   - name: check-path-planning-data
@@ -267,8 +300,9 @@ steps:
       PRIORITY_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/priority-targets.txt")
       SEMANTIC_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/semantic-priority.txt")
       KNOWLEDGE_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/knowledge-priority.txt")
+      PASSIVE_COUNT=$(count_lines "{{Output}}/ai-analysis/.input/passive-web-risk.txt")
       
-      if [ "$CHAIN_SIZE" -lt 50 ] && [ "$PRIORITY_COUNT" -eq 0 ] && [ "$SEMANTIC_COUNT" -eq 0 ] && [ "$KNOWLEDGE_COUNT" -eq 0 ]; then
+      if [ "$CHAIN_SIZE" -lt 50 ] && [ "$PRIORITY_COUNT" -eq 0 ] && [ "$SEMANTIC_COUNT" -eq 0 ] && [ "$KNOWLEDGE_COUNT" -eq 0 ] && [ "$PASSIVE_COUNT" -eq 0 ]; then
         echo "[WARN] Insufficient data for path planning"
         echo '{"error": "no_data", "plan_summary": {"total_phases": 0}, "execution_phases": [], "verification_checklist": []}' > {{pathPlanningOutput}}
         echo "SKIP_AI=true" > {{Output}}/ai-analysis/.path-planning-skip
@@ -276,7 +310,7 @@ steps:
       fi
       
       rm -f {{Output}}/ai-analysis/.path-planning-skip 2>/dev/null || true
-      echo "[Path Planning] Proceeding with planning (chains=$CHAIN_SIZE priority_targets=$PRIORITY_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT)"
+      echo "[Path Planning] Proceeding with planning (chains=$CHAIN_SIZE priority_targets=$PRIORITY_COUNT semantic=$SEMANTIC_COUNT knowledge=$KNOWLEDGE_COUNT passive=$PASSIVE_COUNT)"
 
   - name: ai-generate-attack-plan
     type: agent
@@ -359,6 +393,7 @@ steps:
       优先目标与确认入口：{{Output}}/ai-analysis/.input/priority-targets.txt
       语义优先目标：{{Output}}/ai-analysis/.input/semantic-priority.txt
       知识库利用经验：{{Output}}/ai-analysis/.input/knowledge-priority.txt
+      被动 Web 风险摘要：{{Output}}/ai-analysis/.input/passive-web-risk.txt
       
       请读取数据，生成执行计划。
 
@@ -366,6 +401,7 @@ steps:
       - 优先围绕“攻击链入口 + confirmed URLs / best-path / semantic priority + 知识库命中经验”的交集来规划执行顺序
       - 如果攻击链不完整，也要根据已验证漏洞、确认 URL 和高价值入口生成可执行计划
       - 如果知识库提示某类入口通常伴随认证、权限、文件处理或业务逻辑问题，要把对应验证动作前移
+      - 如果 passive web risk 摘要中出现 source map/debug、API/auth/internal 面、CORS/cache 复核点或 cloud/signed URL 暴露，要把这些验证动作前置进低噪音阶段
       - 每个阶段优先选择真实可执行、可验证、低噪音的动作
       
       输出格式：
@@ -379,6 +415,12 @@ steps:
     exports:
       path_planning_json: "{{agent_content}}"
 
+  - name: persist-path-planning-raw
+    type: function
+    pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
+    functions:
+      - 'save_content(typeof path_planning_json !== "undefined" ? path_planning_json : "", "{{Output}}/ai-analysis/.path-plan-raw-{{TargetSpace}}.txt")'
+
   - name: save-path-planning-results
     type: bash
     pre_condition: '{{enablePathPlanning}} && !file_exists("{{Output}}/ai-analysis/.path-planning-skip")'
@@ -388,10 +430,7 @@ steps:
       RAW_FILE="{{Output}}/ai-analysis/.path-plan-raw-{{TargetSpace}}.txt"
       JSON_FILE="{{Output}}/ai-analysis/.path-plan-json-{{TargetSpace}}.json"
       FALLBACK_TARGETS="{{Output}}/ai-analysis/.path-plan-fallback-targets-{{TargetSpace}}.txt"
-
-      cat > "$RAW_FILE" << 'AIEOF'
-      {{path_planning_json}}
-      AIEOF
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       awk '
         BEGIN { capture = 0 }
@@ -426,6 +465,7 @@ steps:
           cat "{{entryPointsFile}}" 2>/dev/null || true
           cat "{{confirmedUrlsFile}}" 2>/dev/null || true
           cat "{{bestPathTargetsFile}}" 2>/dev/null || true
+          grep -Eo 'https?://[^[:space:]]+' "{{Output}}/ai-analysis/.input/passive-web-risk.txt" 2>/dev/null || true
         } | awk 'NF && !seen[$0]++' | head -8 > "$FALLBACK_TARGETS" || true
 
         FALLBACK_JSON=$(jq -R -s 'split("\n") | map(select(length > 0))' "$FALLBACK_TARGETS" 2>/dev/null || echo '[]')
@@ -536,6 +576,20 @@ steps:
       } > {{attackPlanFile}}
 
       echo "[Path Planning] Plan saved to {{attackPlanFile}}"
+
+  - name: generate-execution-checklist
+    type: bash
+    pre_condition: "{{enablePathPlanning}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ -f "{{pathPlanningOutput}}" ] && jq empty {{pathPlanningOutput}} 2>/dev/null; then
+        jq -r '.verification_checklist[] | "\(.step). [\((.critical // false) | if . then "CRITICAL" else "OPTIONAL" end)] \(.verification_point)\nCommand: \(.command)\nExpected: \(.expected)\n---"' {{pathPlanningOutput}} 2>/dev/null > {{executionChecklistFile}} || true
+      else
+        echo "# No execution checklist available" > {{executionChecklistFile}}
+      fi
+
+      echo "[Path Planning] Execution checklist saved to {{executionChecklistFile}}"
 
   - name: log-path-planning-complete
     type: function

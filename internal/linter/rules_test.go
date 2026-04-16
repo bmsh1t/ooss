@@ -810,7 +810,7 @@ kind: module
 steps:
   - name: step1
     type: bash
-    command: echo "{{OsmedeusBase}} {{OsmedeusExec}} {{BaseFolder}}"
+    command: echo "{{OsmedeusBase}} {{OsmedeusExec}} {{BaseFolder}} {{SettingsFile}}"
 `)
 	issues := rule.Check(ast)
 	assert.Empty(t, issues)

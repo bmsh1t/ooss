@@ -394,6 +394,7 @@ func (s *Server) setupRoutes() {
 
 	// LLM endpoints (OpenAI-compatible)
 	api.Post("/llm/v1/chat/completions", handlers.LLMChat(s.config))
+	api.Post("/llm/v1/responses", handlers.LLMResponses(s.config))
 	api.Post("/llm/v1/embeddings", handlers.LLMEmbedding(s.config))
 
 	// Agent ACP endpoints (OpenAI-compatible)

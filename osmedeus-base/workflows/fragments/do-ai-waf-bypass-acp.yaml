@@ -113,17 +113,28 @@ steps:
     exports:
       waf_bypass_json: "{{acp_output}}"
 
+  - name: persist-waf-bypass-raw
+    type: function
+    pre_condition: "{{enableWafBypass}}"
+    functions:
+      - 'save_content(typeof waf_bypass_json !== "undefined" ? waf_bypass_json : "", "{{Output}}/ai-analysis/.waf-bypass-acp-raw-{{TargetSpace}}.txt")'
+
   - name: save-waf-bypass-results
     type: bash
     pre_condition: "{{enableWafBypass}}"
     command: |
       mkdir -p {{Output}}/ai-analysis
+      RAW_FILE="{{Output}}/ai-analysis/.waf-bypass-acp-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      RAW_HAS_CONTENT=false
+      if [ -s "$RAW_FILE" ] && ! grep -Eq '^[[:space:]]*(null|\{\})[[:space:]]*$' "$RAW_FILE"; then
+        RAW_HAS_CONTENT=true
+      fi
 
       # 容错：处理可能的空输出
-      if [ -n "{{waf_bypass_json}}" ] && [ "{{waf_bypass_json}}" != "null" ] && [ "{{waf_bypass_json}}" != "{}" ]; then
-        cat > {{wafBypassOutput}} << 'AIEOF'
-        {{waf_bypass_json}}
-        AIEOF
+      if [ "$RAW_HAS_CONTENT" = "true" ]; then
+        cp "$RAW_FILE" {{wafBypassOutput}}
       else
         echo '{"waf_analysis_summary":{"waf_detected":false},"bypass_techniques":[]}' > {{wafBypassOutput}}
       fi

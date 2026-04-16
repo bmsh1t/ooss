@@ -102,8 +102,11 @@ Dependencies for richer document ingestion:
 Optional vector-search dependencies:
 
 - at least one configured `llm.llm_providers` entry that exposes an OpenAI-compatible `/embeddings` endpoint
+- optional `rerank_config` pointing at an OpenAI-compatible `/rerank` endpoint
 - a matching `knowledge_vector.default_provider` / `knowledge_vector.default_model` pair, or explicit provider/model overrides when calling `kb vector`
 
 The standalone vector knowledge DB defaults to `{{base_folder}}/knowledge/vector-kb.sqlite` and can be queried from both CLI and API.
+
+When `rerank_config.enabled=true`, both `kb vector search` and `POST /knowledge/vector/search` can apply rerank and return `ranking_source` / `rerank_applied` metadata for downstream workflows.
 
 `superdomain-extensive-ai-optimized`, `superdomain-extensive-ai-stable`, `superdomain-extensive-ai-hybrid`, and `superdomain-extensive-ai-lite` consume the same knowledge workspace during semantic search, then persist normalized `applied-ai-decision` and `followup-decision` artifacts for downstream retest, operator, and campaign handling. Queued reruns also carry normalized `previous_followup_*` parameters so pre-scan and follow-up stages can restore prior manual-first or campaign-driven context even when only queue metadata is available.

@@ -374,6 +374,25 @@ llm_config:
   tool_choice: auto
 ```
 
+**Responses API Mode / Native Responses Tools:**
+```yaml
+- name: responses-native-tools
+  type: llm
+  messages:
+    - role: user
+      content: "Search recent reconnaissance guidance for {{Target}}"
+  extra_llm_parameters:
+    api_mode: responses
+    tools:
+      - type: web_search_preview
+```
+
+Notes:
+- `extra_llm_parameters.api_mode: responses` forces the LLM step transport to use `/responses`
+- `extra_llm_parameters.use_responses_api: true` can be used as a boolean alias
+- if the configured provider `base_url` already ends with `/responses`, the step automatically uses Responses mode
+- for native Responses built-in tools, put raw tool objects in `extra_llm_parameters.tools`
+
 **Auto-Exports:**
 - `<step_name>_llm_resp` - Full response object (id, model, usage, content, tool_calls)
 - `<step_name>_content` - Just the content string for easy access

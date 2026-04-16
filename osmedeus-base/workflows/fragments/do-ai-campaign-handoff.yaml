@@ -158,6 +158,7 @@ steps:
 
       FOCUS_JSON='[]'
       DECISION_RESCAN_JSON='[]'
+      DECISION_FOCUS_COUNT=0
       ACTIVE_DECISION_FILE="{{aiDecisionFile}}"
       if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
         ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
@@ -165,6 +166,7 @@ steps:
       if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
         FOCUS_JSON=$(jq -c '.targets.focus_areas // .focus_areas // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
         DECISION_RESCAN_JSON=$(jq -c '.targets.rescan_targets // .rescan_targets // .priority_targets // []' "$ACTIVE_DECISION_FILE" 2>/dev/null || echo '[]')
+        DECISION_FOCUS_COUNT=$(printf '%s\n' "$FOCUS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
       fi
 
       RETEST_TARGETS_JSON='[]'
@@ -213,6 +215,7 @@ steps:
       fi
 
       {
+        printf '%s\n' "$FOCUS_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$DECISION_RESCAN_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$RETEST_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$OPERATOR_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
@@ -241,6 +244,7 @@ steps:
         --arg rescan_summary "{{rescanSummaryFile}}" \
         --arg semantic_priority_file "$ACTIVE_SEMANTIC_PRIORITY_FILE" \
         --arg previous_followup_file "{{previousFollowupDecisionFile}}" \
+        --arg active_ai_decision "$ACTIVE_DECISION_FILE" \
         --argjson focus_areas "$FOCUS_JSON" \
         --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
         --argjson retest_targets "$RETEST_TARGETS_JSON" \
@@ -253,6 +257,7 @@ steps:
         --argjson best_path_count "$BEST_PATH_COUNT" \
         --argjson semantic_priority_count "$SEMANTIC_PRIORITY_COUNT" \
         --argjson previous_followup_count "$PREVIOUS_FOLLOWUP_COUNT" \
+        --argjson decision_focus_count "$DECISION_FOCUS_COUNT" \
         --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
         --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
         --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
@@ -280,6 +285,7 @@ steps:
             best_path_targets: $best_path_count,
             semantic_priority_targets: $semantic_priority_count,
             previous_followup_targets: $previous_followup_count,
+            decision_focus_targets: $decision_focus_count,
             decision_rescan_targets: ($decision_rescan_targets | length),
             retest_targets: ($retest_targets | length),
             operator_targets: ($operator_targets | length),
@@ -287,6 +293,7 @@ steps:
             campaign_targets: $campaign_targets
           },
           targets: {
+            decision_focus: $focus_areas,
             decision_rescan: $decision_rescan_targets,
             retest: $retest_targets,
             operator_focus: $operator_targets,
@@ -295,6 +302,7 @@ steps:
           },
           artifacts: {
             ai_decision: $ai_decision,
+            active_ai_decision: $active_ai_decision,
             retest_plan: $retest_plan,
             operator_queue: $operator_queue,
             rescan_summary: $rescan_summary,
@@ -407,7 +415,7 @@ steps:
           }' > "{{campaignCreateOutput}}"
         exit 0
       fi
-      OSM_CLI_BASE_ARGS="--base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
+      OSM_CLI_BASE_ARGS="--settings-file {{SettingsFile}} --base-folder {{BaseFolder}} --workflow-folder {{Workflows}}"
 
       WORKFLOW_FLAG="-f"
       if [ "{{campaignWorkflowKind}}" = "module" ]; then
@@ -416,6 +424,7 @@ steps:
 
       set -- \
         "$OSM_BIN" \
+        --settings-file "{{SettingsFile}}" \
         --base-folder "{{BaseFolder}}" \
         --workflow-folder "{{Workflows}}" \
         --json campaign create \
@@ -565,7 +574,7 @@ steps:
         jq -r '.campaign_profile | "- Recommended flow: \(.recommended_flow // "web-analysis")\n- Retest priority: \(.retest_priority // "high")"' {{campaignHandoffOutput}} 2>/dev/null || true
         echo ""
         echo "## Counts"
-        jq -r '.counts | "- Confirmed URLs: \(.confirmed_urls // 0)\n- Attack-chain entry points: \(.attack_chain_entry_points // 0)\n- Best path targets: \(.best_path_targets // 0)\n- Semantic priority targets: \(.semantic_priority_targets // 0)\n- Decision rescan targets: \(.decision_rescan_targets // 0)\n- Retest targets: \(.retest_targets // 0)\n- Operator targets: \(.operator_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)"' {{campaignHandoffOutput}} 2>/dev/null || true
+        jq -r '.counts | "- Confirmed URLs: \(.confirmed_urls // 0)\n- Attack-chain entry points: \(.attack_chain_entry_points // 0)\n- Best path targets: \(.best_path_targets // 0)\n- Semantic priority targets: \(.semantic_priority_targets // 0)\n- Decision focus targets: \(.decision_focus_targets // 0)\n- Decision rescan targets: \(.decision_rescan_targets // 0)\n- Retest targets: \(.retest_targets // 0)\n- Operator targets: \(.operator_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)"' {{campaignHandoffOutput}} 2>/dev/null || true
         echo ""
         echo "## Focus Areas"
         jq -r '.campaign_profile.focus_areas[]? | "- \(.)"' {{campaignHandoffOutput}} 2>/dev/null || echo "- none"

@@ -675,27 +675,32 @@ steps:
     exports:
       secrets_analysis: "{{llm_secrets_analysis_content}}"
 
+  - name: persist-llm-secrets-analysis-raw
+    type: function
+    pre_condition: "{{enableLlmSecretsAnalysis}}"
+    functions:
+      - 'save_content(typeof secrets_analysis !== "undefined" ? secrets_analysis : "", "{{outputDir}}/.llm-secrets-analysis-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-secrets-report
     type: bash
     pre_condition: "{{enableLlmSecretsAnalysis}}"
     log: "Saving LLM secrets analysis report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{secrets_analysis}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      RAW_FILE="{{outputDir}}/.llm-secrets-analysis-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmSecretsReport}} 2>/dev/null || true
         echo "No LLM secrets analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Secrets Risk Analysis - {{Target}}" > {{llmSecretsReport}}
       echo "" >> {{llmSecretsReport}}
       echo "**Generated:** $(date)" >> {{llmSecretsReport}}
       echo "" >> {{llmSecretsReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmSecretsReport}}
+      cat "$RAW_FILE" >> {{llmSecretsReport}}
     on_error:
       - action: continue
 
@@ -730,27 +735,32 @@ steps:
     exports:
       code_review: "{{llm_code_review_content}}"
 
+  - name: persist-llm-code-review-raw
+    type: function
+    pre_condition: "{{enableLlmCodeReview}}"
+    functions:
+      - 'save_content(typeof code_review !== "undefined" ? code_review : "", "{{outputDir}}/.llm-code-review-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-code-review-report
     type: bash
     pre_condition: "{{enableLlmCodeReview}}"
     log: "Saving LLM code review report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{code_review}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      RAW_FILE="{{outputDir}}/.llm-code-review-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmCodeReviewReport}} 2>/dev/null || true
         echo "No LLM code review content available; skipping report write."
         exit 0
       fi
-      mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# JavaScript Code Review - {{Target}}" > {{llmCodeReviewReport}}
       echo "" >> {{llmCodeReviewReport}}
       echo "**Generated:** $(date)" >> {{llmCodeReviewReport}}
       echo "" >> {{llmCodeReviewReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmCodeReviewReport}}
+      cat "$RAW_FILE" >> {{llmCodeReviewReport}}
     on_error:
       - action: continue
 
@@ -803,27 +813,32 @@ steps:
     exports:
       js_api_endpoints: "{{llm_js_api_extraction_content}}"
 
+  - name: persist-llm-js-api-raw
+    type: function
+    pre_condition: "{{enableLlmJsApiExtract}}"
+    functions:
+      - 'save_content(typeof js_api_endpoints !== "undefined" ? js_api_endpoints : "", "{{outputDir}}/.llm-js-api-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-js-api-report
     type: bash
     pre_condition: "{{enableLlmJsApiExtract}}"
     log: "Saving LLM JS API extraction report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{js_api_endpoints}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      RAW_FILE="{{outputDir}}/.llm-js-api-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmJsApiReport}} {{jsApiEndpointsFile}} 2>/dev/null || true
         echo "No LLM JS API endpoint analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# JS API Endpoints Analysis - {{Target}}" > {{llmJsApiReport}}
       echo "" >> {{llmJsApiReport}}
       echo "**Generated:** $(date)" >> {{llmJsApiReport}}
       echo "" >> {{llmJsApiReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmJsApiReport}}
+      cat "$RAW_FILE" >> {{llmJsApiReport}}
       
       # 提取API端点到单独文件供后续扫描使用
       grep -oE '(https?://[^ ]+|/api/[^ ]+|/v[0-9]+/[^ ]+)' {{llmJsApiReport}} 2>/dev/null  | sort -u > {{jsApiEndpointsFile}} || true
@@ -874,27 +889,32 @@ steps:
     exports:
       sensitive_context: "{{llm_sensitive_context_analysis_content}}"
 
+  - name: persist-llm-sensitive-context-raw
+    type: function
+    pre_condition: "{{enableLlmSensitiveContext}}"
+    functions:
+      - 'save_content(typeof sensitive_context !== "undefined" ? sensitive_context : "", "{{outputDir}}/.llm-sensitive-context-raw-{{TargetSpace}}.txt")'
+
   - name: save-llm-sensitive-context-report
     type: bash
     pre_condition: "{{enableLlmSensitiveContext}}"
     log: "Saving LLM sensitive context analysis report"
     command: |
-      REPORT_CONTENT=$(cat <<'EOF'
-      {{sensitive_context}}
-      EOF
-      )
-      TRIMMED_CONTENT=$(printf '%s' "$REPORT_CONTENT" | tr -d '[:space:]')
-      if [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
+      mkdir -p {{outputDir}} 2>/dev/null || true
+      RAW_FILE="{{outputDir}}/.llm-sensitive-context-raw-{{TargetSpace}}.txt"
+      [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
+
+      TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
+      if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
         rm -f {{llmSensitiveContextReport}} 2>/dev/null || true
         echo "No LLM sensitive context analysis available; skipping report write."
         exit 0
       fi
-      mkdir -p {{outputDir}} 2>/dev/null || true
       echo "# Sensitive Context Analysis - {{Target}}" > {{llmSensitiveContextReport}}
       echo "" >> {{llmSensitiveContextReport}}
       echo "**Generated:** $(date)" >> {{llmSensitiveContextReport}}
       echo "" >> {{llmSensitiveContextReport}}
-      printf '%s\n' "$REPORT_CONTENT" >> {{llmSensitiveContextReport}}
+      cat "$RAW_FILE" >> {{llmSensitiveContextReport}}
     on_error:
       - action: continue
 

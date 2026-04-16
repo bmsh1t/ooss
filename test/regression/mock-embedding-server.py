@@ -21,6 +21,28 @@ def build_embedding(text):
     ]
 
 
+def build_rerank_score(query, text):
+    query_l = str(query).lower()
+    text_l = str(text).lower()
+    score = 0.0
+    terms = [
+        ("token", 0.22),
+        ("confusion", 0.18),
+        ("admin", 0.18),
+        ("panel", 0.10),
+        ("preview", 0.10),
+        ("route", 0.08),
+        ("auth", 0.08),
+        ("login", 0.06),
+    ]
+    for term, weight in terms:
+        if term in query_l and term in text_l:
+            score += weight
+    if "workspace=" in text_l:
+        score += 0.03
+    return round(score, 6)
+
+
 class MockEmbeddingHandler(BaseHTTPRequestHandler):
     server_version = "mock-embeddings/1.0"
 
@@ -42,10 +64,15 @@ class MockEmbeddingHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
-        if not self.path.endswith("/embeddings"):
-            self._send_json(404, {"error": {"message": "not found"}})
+        if self.path.endswith("/embeddings"):
+            self.handle_embeddings()
             return
+        if self.path.endswith("/rerank"):
+            self.handle_rerank()
+            return
+        self._send_json(404, {"error": {"message": "not found"}})
 
+    def handle_embeddings(self):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
         try:
@@ -78,6 +105,43 @@ class MockEmbeddingHandler(BaseHTTPRequestHandler):
                 "object": "list",
                 "data": data,
                 "model": model,
+            },
+        )
+
+    def handle_rerank(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8") if raw else "{}")
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": {"message": "invalid json"}})
+            return
+
+        query = payload.get("query", "")
+        documents = payload.get("documents", [])
+        if not isinstance(documents, list):
+            self._send_json(400, {"error": {"message": "documents must be an array"}})
+            return
+
+        results = []
+        for idx, text in enumerate(documents):
+            results.append(
+                {
+                    "index": idx,
+                    "relevance_score": build_rerank_score(query, text),
+                }
+            )
+
+        results.sort(key=lambda item: (-item["relevance_score"], item["index"]))
+        top_n = payload.get("top_n")
+        if isinstance(top_n, int) and top_n > 0:
+            results = results[:top_n]
+
+        self._send_json(
+            200,
+            {
+                "id": "mock-rerank",
+                "results": results,
             },
         )
 

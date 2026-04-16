@@ -448,6 +448,24 @@ embeddings_config:
   dimension: 1024
   min_relevance_score: 0.7
   max_search_results: 10
+
+# =============================================================================
+# Rerank Configuration (Optional)
+# =============================================================================
+# Dedicated reranking provider settings for semantic retrieval reranking.
+# Current implementation supports openai-compatible rerank endpoints.
+rerank_config:
+  enabled: false
+  provider: openai
+  top_n: 10
+  max_candidates: 40
+  timeout: 15s
+  min_score: 0.0
+
+  openai:
+    api_url: "https://router.tumuer.me/v1/rerank"
+    model: "Pro/BAAI/bge-reranker-v2-m3"
+    api_key: "${TUMUER_API_KEY}"
 `)
 
 // generateRandomString generates a random alphanumeric string of the given length
@@ -499,6 +517,7 @@ type Config struct {
 	Database        DatabaseConfig        `yaml:"database"`
 	KnowledgeVector KnowledgeVectorConfig `yaml:"knowledge_vector"`
 	Embeddings      EmbeddingsConfig      `yaml:"embeddings_config"`
+	Rerank          RerankConfig          `yaml:"rerank_config"`
 	Server          ServerConfig          `yaml:"server"`
 	ScanTactic      ScanTacticConfig      `yaml:"scan_tactic"`
 	Redis           RedisConfig           `yaml:"redis"`
@@ -509,6 +528,7 @@ type Config struct {
 	Cloud           CloudConfig           `yaml:"cloud"`
 
 	// Runtime paths (resolved from templates)
+	SettingsFilePath            string `yaml:"-"` // Absolute path to the effective settings file
 	BinariesPath                string `yaml:"-"`
 	DataPath                    string `yaml:"-"`
 	ConfigsPath                 string `yaml:"-"`
@@ -584,6 +604,24 @@ type EmbeddingsConfig struct {
 	Dimension         int                      `yaml:"dimension"`
 	MinRelevanceScore float64                  `yaml:"min_relevance_score"`
 	MaxSearchResults  int                      `yaml:"max_search_results"`
+}
+
+// RerankProviderConfig holds endpoint details for a dedicated rerank provider.
+type RerankProviderConfig struct {
+	APIURL string `yaml:"api_url"`
+	Model  string `yaml:"model"`
+	APIKey string `yaml:"api_key"`
+}
+
+// RerankConfig holds optional dedicated rerank configuration.
+type RerankConfig struct {
+	Enabled       *bool                `yaml:"enabled,omitempty"`
+	Provider      string               `yaml:"provider"`
+	TopN          int                  `yaml:"top_n"`
+	MaxCandidates int                  `yaml:"max_candidates"`
+	Timeout       string               `yaml:"timeout"`
+	MinScore      float64              `yaml:"min_score"`
+	OpenAI        RerankProviderConfig `yaml:"openai"`
 }
 
 // ServerConfig holds API server settings
@@ -953,6 +991,11 @@ func LoadFromFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if absPath, absErr := filepath.Abs(path); absErr == nil {
+		cfg.SettingsFilePath = absPath
+	} else {
+		cfg.SettingsFilePath = path
+	}
 	cfg.ResolvePaths()
 	return cfg, nil
 }
@@ -1056,6 +1099,20 @@ func (c *Config) GetKnowledgeVectorDBPath() string {
 	return c.resolvePath(c.KnowledgeVector.DBPath, c.BaseFolder)
 }
 
+// GetSettingsFilePath returns the effective settings file path used for this config.
+func (c *Config) GetSettingsFilePath() string {
+	if c == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(c.SettingsFilePath); path != "" {
+		return path
+	}
+	if strings.TrimSpace(c.BaseFolder) == "" {
+		return ""
+	}
+	return filepath.Join(c.BaseFolder, "osm-settings.yaml")
+}
+
 // IsKnowledgeVectorEnabled returns true if the independent vector knowledge DB is enabled.
 func (c *Config) IsKnowledgeVectorEnabled() bool {
 	if c.KnowledgeVector.Enabled == nil {
@@ -1085,6 +1142,17 @@ func (c *Config) IsEmbeddingsConfigEnabled() bool {
 	return false
 }
 
+func (c *Config) hasConfiguredEmbeddingsProvider(name string) bool {
+	if c == nil {
+		return false
+	}
+	provider := c.getEmbeddingsProviderConfig(name)
+	if provider == nil {
+		return false
+	}
+	return strings.TrimSpace(provider.APIURL) != "" || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIKey) != ""
+}
+
 // GetKnowledgeVectorProvider returns the configured vector provider, falling back to embeddings_config.provider.
 func (c *Config) GetKnowledgeVectorProvider() string {
 	if c == nil {
@@ -1093,7 +1161,7 @@ func (c *Config) GetKnowledgeVectorProvider() string {
 	if provider := strings.TrimSpace(c.KnowledgeVector.DefaultProvider); provider != "" {
 		return provider
 	}
-	if c.IsEmbeddingsConfigEnabled() {
+	if provider := strings.TrimSpace(c.Embeddings.Provider); provider != "" {
 		return strings.TrimSpace(c.Embeddings.Provider)
 	}
 	return ""
@@ -1178,18 +1246,15 @@ func (c *Config) ResolveEmbeddingProvider(providerName string) (*LLMProvider, st
 		return nil, "", fmt.Errorf("provider is required")
 	}
 
-	if c.IsEmbeddingsConfigEnabled() {
-		if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
-			spec := &LLMProvider{
-				Provider:  name,
-				BaseURL:   strings.TrimSpace(provider.APIURL),
-				AuthToken: strings.TrimSpace(provider.APIKey),
-				Model:     strings.TrimSpace(provider.Model),
-			}
-			if spec.BaseURL != "" || spec.Model != "" || spec.AuthToken != "" {
-				return spec, "embeddings_config", nil
-			}
+	if c.hasConfiguredEmbeddingsProvider(name) {
+		provider := c.getEmbeddingsProviderConfig(name)
+		spec := &LLMProvider{
+			Provider:  name,
+			BaseURL:   strings.TrimSpace(provider.APIURL),
+			AuthToken: strings.TrimSpace(provider.APIKey),
+			Model:     strings.TrimSpace(provider.Model),
 		}
+		return spec, "embeddings_config", nil
 	}
 
 	var match *LLMProvider
@@ -1217,19 +1282,15 @@ func (c *Config) ListEmbeddingProviders() []string {
 
 	seen := make(map[string]struct{})
 	results := make([]string, 0, len(c.LLM.LLMProviders)+4)
-	if c.IsEmbeddingsConfigEnabled() {
-		for _, name := range []string{"jina", "openai", "azure", "ollama"} {
-			if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
-				if strings.TrimSpace(provider.APIURL) == "" && strings.TrimSpace(provider.Model) == "" && strings.TrimSpace(provider.APIKey) == "" {
-					continue
-				}
-				if _, ok := seen[name]; ok {
-					continue
-				}
-				seen[name] = struct{}{}
-				results = append(results, name)
-			}
+	for _, name := range []string{"jina", "openai", "azure", "ollama"} {
+		if !c.hasConfiguredEmbeddingsProvider(name) {
+			continue
 		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		results = append(results, name)
 	}
 	for _, provider := range c.LLM.LLMProviders {
 		name := strings.TrimSpace(provider.Provider)
@@ -1274,15 +1335,11 @@ func (c *Config) ListEmbeddingProviderModels() []string {
 		results = append(results, key)
 	}
 
-	if c.IsEmbeddingsConfigEnabled() {
-		for _, name := range []string{"jina", "openai", "azure", "ollama"} {
-			if provider := c.getEmbeddingsProviderConfig(name); provider != nil {
-				if strings.TrimSpace(provider.APIURL) == "" && strings.TrimSpace(provider.Model) == "" && strings.TrimSpace(provider.APIKey) == "" {
-					continue
-				}
-				add(name, provider.Model)
-			}
+	for _, name := range []string{"jina", "openai", "azure", "ollama"} {
+		if !c.hasConfiguredEmbeddingsProvider(name) {
+			continue
 		}
+		add(name, c.getEmbeddingsProviderConfig(name).Model)
 	}
 	for _, provider := range c.LLM.LLMProviders {
 		add(provider.Provider, provider.Model)
@@ -1307,6 +1364,75 @@ func (c *Config) getEmbeddingsProviderConfig(name string) *EmbeddingsProviderCon
 		return &c.Embeddings.Ollama
 	default:
 		return nil
+	}
+}
+
+// IsRerankEnabled returns true if reranking is enabled.
+func (c *Config) IsRerankEnabled() bool {
+	if c == nil || c.Rerank.Enabled == nil {
+		return false
+	}
+	return *c.Rerank.Enabled
+}
+
+// GetRerankTopN returns the configured rerank top_n with a safe default.
+func (c *Config) GetRerankTopN() int {
+	if c == nil || c.Rerank.TopN <= 0 {
+		return 10
+	}
+	return c.Rerank.TopN
+}
+
+// GetRerankMaxCandidates returns the configured rerank max_candidates with a safe default.
+func (c *Config) GetRerankMaxCandidates() int {
+	if c == nil || c.Rerank.MaxCandidates <= 0 {
+		return 40
+	}
+	return c.Rerank.MaxCandidates
+}
+
+// GetRerankTimeout returns the configured rerank timeout with a safe default.
+func (c *Config) GetRerankTimeout() time.Duration {
+	if c == nil {
+		return 15 * time.Second
+	}
+
+	timeout := strings.TrimSpace(c.Rerank.Timeout)
+	if timeout == "" {
+		return 15 * time.Second
+	}
+
+	d, err := time.ParseDuration(timeout)
+	if err != nil || d <= 0 {
+		return 15 * time.Second
+	}
+	return d
+}
+
+// ResolveRerankProvider resolves the configured rerank provider configuration.
+// Current implementation supports only the openai-compatible provider.
+func (c *Config) ResolveRerankProvider(providerName string) (*LLMProvider, error) {
+	name := strings.TrimSpace(providerName)
+	if name == "" && c != nil {
+		name = strings.TrimSpace(c.Rerank.Provider)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("rerank provider is required")
+	}
+
+	switch strings.ToLower(name) {
+	case "openai":
+		if c == nil || strings.TrimSpace(c.Rerank.OpenAI.APIURL) == "" {
+			return nil, fmt.Errorf("rerank provider %q is not configured: rerank_config.openai.api_url is required", "openai")
+		}
+		return &LLMProvider{
+			Provider:  "openai",
+			BaseURL:   strings.TrimSpace(c.Rerank.OpenAI.APIURL),
+			AuthToken: strings.TrimSpace(c.Rerank.OpenAI.APIKey),
+			Model:     strings.TrimSpace(c.Rerank.OpenAI.Model),
+		}, nil
+	default:
+		return nil, fmt.Errorf("rerank provider %q is not supported (supported: openai)", name)
 	}
 }
 
@@ -1551,7 +1677,8 @@ func DefaultConfig() *Config {
 	baseFolder := filepath.Join(homeDir, "osmedeus-base")
 
 	return &Config{
-		BaseFolder: baseFolder,
+		BaseFolder:       baseFolder,
+		SettingsFilePath: filepath.Join(baseFolder, "osm-settings.yaml"),
 		Environments: EnvironmentConfig{
 			ExternalBinariesPath: "{{base_folder}}/external-binaries",
 			ExternalData:         "{{base_folder}}/external-data",
@@ -1583,6 +1710,18 @@ func DefaultConfig() *Config {
 			KeywordWeight:     0.3,
 			BatchSize:         32,
 			MaxIndexingChunks: 5000,
+		},
+		Rerank: RerankConfig{
+			Provider:      "openai",
+			TopN:          10,
+			MaxCandidates: 40,
+			Timeout:       "15s",
+			MinScore:      0.0,
+			OpenAI: RerankProviderConfig{
+				APIURL: "https://router.tumuer.me/v1/rerank",
+				Model:  "Pro/BAAI/bge-reranker-v2-m3",
+				APIKey: "${TUMUER_API_KEY}",
+			},
 		},
 		Server: ServerConfig{
 			Host:               "0.0.0.0",
