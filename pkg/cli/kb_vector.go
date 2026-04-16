@@ -16,6 +16,7 @@ import (
 var (
 	kbVectorProvider      string
 	kbVectorModel         string
+	kbProbeProvider       bool
 	kbEnableRerank        bool
 	kbRerankProvider      string
 	kbRerankModel         string
@@ -96,6 +97,7 @@ func init() {
 	kbVectorDoctorCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty checks all workspaces)")
 	kbVectorDoctorCmd.Flags().StringVar(&kbVectorProvider, "provider", "", "embedding provider override")
 	kbVectorDoctorCmd.Flags().StringVar(&kbVectorModel, "model", "", "embedding model override")
+	kbVectorDoctorCmd.Flags().BoolVar(&kbProbeProvider, "probe-provider", false, "issue a live embedding probe against the configured provider")
 
 	kbVectorRebuildCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name (empty rebuilds all workspaces)")
 	kbVectorRebuildCmd.Flags().StringVar(&kbVectorProvider, "provider", "", "embedding provider override")
@@ -268,9 +270,10 @@ func runKBVectorDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	report, err := vectorkb.Doctor(context.Background(), cfg, vectorkb.DoctorOptions{
-		Workspace: strings.TrimSpace(kbWorkspace),
-		Provider:  strings.TrimSpace(kbVectorProvider),
-		Model:     strings.TrimSpace(kbVectorModel),
+		Workspace:     strings.TrimSpace(kbWorkspace),
+		Provider:      strings.TrimSpace(kbVectorProvider),
+		Model:         strings.TrimSpace(kbVectorModel),
+		ProbeProvider: kbProbeProvider,
 	})
 	if err != nil {
 		return err

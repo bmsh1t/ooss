@@ -61,6 +61,52 @@ func TestRunKBVectorDoctor_JSONReportIncludesSemanticStatus(t *testing.T) {
 	assert.NotNil(t, report["available_providers"])
 }
 
+func TestRunKBVectorDoctor_WithProbeProvider_JSONReportIncludesProbeStatus(t *testing.T) {
+	cfg := setupCampaignTestEnv(t)
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"forbidden","type":"insufficient_permissions"}}`, http.StatusForbidden)
+	}))
+	defer embeddingServer.Close()
+
+	oldWorkspace := kbWorkspace
+	oldProvider := kbVectorProvider
+	oldModel := kbVectorModel
+	oldJSON := globalJSON
+	oldProbeProvider := kbProbeProvider
+	t.Cleanup(func() {
+		kbWorkspace = oldWorkspace
+		kbVectorProvider = oldProvider
+		kbVectorModel = oldModel
+		globalJSON = oldJSON
+		kbProbeProvider = oldProbeProvider
+	})
+
+	cfg.KnowledgeVector = config.KnowledgeVectorConfig{
+		DBPath:          filepath.Join(cfg.BaseFolder, "vector", "vector-kb.sqlite"),
+		DefaultProvider: "openai",
+		DefaultModel:    "test-embedding-3-small",
+	}
+	cfg.LLM.LLMProviders = []config.LLMProvider{{
+		Provider:  "openai",
+		BaseURL:   embeddingServer.URL + "/embeddings",
+		Model:     "test-embedding-3-small",
+		AuthToken: "bad-token",
+	}}
+
+	kbWorkspace = "acme"
+	globalJSON = true
+	kbProbeProvider = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runKBVectorDoctor(kbVectorDoctorCmd, nil))
+	})
+
+	var report map[string]any
+	require.NoError(t, json.Unmarshal([]byte(output), &report))
+	assert.Equal(t, "provider_auth_failed", report["semantic_status"])
+	assert.Equal(t, false, report["semantic_search_ready"])
+}
+
 func TestRunKBVectorSearch_JSONIncludesRankingSource(t *testing.T) {
 	cfg := setupCampaignTestEnv(t)
 	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -124,9 +124,10 @@ type Stats struct {
 
 // DoctorOptions controls vector DB consistency checks.
 type DoctorOptions struct {
-	Workspace string
-	Provider  string
-	Model     string
+	Workspace     string
+	Provider      string
+	Model         string
+	ProbeProvider bool
 }
 
 // DoctorIssue describes a concrete consistency problem.

@@ -215,7 +215,7 @@ steps:
       fi
 
       {
-        printf '%s\n' "$FOCUS_JSON" | jq -r '.[]' 2>/dev/null
+        printf '%s\n' "$FOCUS_JSON" | jq -r '.[] | select(type == "string" and test("^https?://"))' 2>/dev/null
         printf '%s\n' "$DECISION_RESCAN_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$RETEST_TARGETS_JSON" | jq -r '.[]' 2>/dev/null
         printf '%s\n' "$OPERATOR_TARGETS_JSON" | jq -r '.[]' 2>/dev/null

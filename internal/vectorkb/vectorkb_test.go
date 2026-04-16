@@ -363,6 +363,101 @@ func TestDoctorReportsIndexMissingWhenMainDocsAreNotIndexed(t *testing.T) {
 	require.Equal(t, 0, report.SelectedEmbeddings)
 }
 
+func TestDoctorProbeReportsProviderAuthFailed(t *testing.T) {
+	tmpDir := t.TempDir()
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"invalid api key","type":"invalid_request_error"}}`, http.StatusUnauthorized)
+	}))
+	defer embeddingServer.Close()
+
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:          filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			DefaultProvider: "openai",
+			DefaultModel:    "test-embedding-3-small",
+		},
+		LLM: config.LLMConfig{
+			LLMProviders: []config.LLMProvider{
+				{
+					Provider:  "openai",
+					BaseURL:   embeddingServer.URL + "/embeddings",
+					Model:     "test-embedding-3-small",
+					AuthToken: "bad-token",
+				},
+			},
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	report, err := Doctor(context.Background(), cfg, DoctorOptions{Workspace: "acme", ProbeProvider: true})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "provider_auth_failed", report.SemanticStatus)
+	require.Contains(t, strings.ToLower(report.SemanticStatusMessage), "api key")
+}
+
+func TestDoctorProbeReportsProviderProbeFailed(t *testing.T) {
+	tmpDir := t.TempDir()
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream exploded", http.StatusBadGateway)
+	}))
+	defer embeddingServer.Close()
+
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:          filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			DefaultProvider: "openai",
+			DefaultModel:    "test-embedding-3-small",
+		},
+		LLM: config.LLMConfig{
+			LLMProviders: []config.LLMProvider{
+				{
+					Provider: "openai",
+					BaseURL:  embeddingServer.URL + "/embeddings",
+					Model:    "test-embedding-3-small",
+				},
+			},
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	report, err := Doctor(context.Background(), cfg, DoctorOptions{Workspace: "acme", ProbeProvider: true})
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	require.False(t, report.SemanticSearchReady)
+	require.Equal(t, "provider_probe_failed", report.SemanticStatus)
+	require.Contains(t, strings.ToLower(report.SemanticStatusMessage), "502")
+}
+
 func TestRebuildWorkspaceRemovesOldDataAndReindexes(t *testing.T) {
 	cfg, cleanup := setupVectorKBTestEnv(t)
 	defer cleanup()

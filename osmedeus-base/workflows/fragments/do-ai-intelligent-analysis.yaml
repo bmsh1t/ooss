@@ -266,6 +266,15 @@ steps:
         fi
       }
 
+      count_lines() {
+        file="$1"
+        if [ -f "$file" ]; then
+          wc -l < "$file" 2>/dev/null || echo 0
+        else
+          echo 0
+        fi
+      }
+
       # 检查并报告各模块状态
       check_file() {
         file="$1"

@@ -111,6 +111,7 @@ osmedeus kb docs -w example.com
 osmedeus kb learn -w example.com
 osmedeus kb export -w example.com --output ./knowledge-index.txt
 osmedeus kb bridge-yakrag --path /path/to/mitre_attack_techniques.rag.gz --output ./mitre-attack-techniques.jsonl
+osmedeus kb import --type security-sqlite --path /path/to/security_kb.sqlite -w security-kb
 osmedeus kb vector index -w example.com
 osmedeus kb vector search --query "jwt bypass" -w example.com
 osmedeus kb vector stats
@@ -229,6 +230,27 @@ The practical storage layout is now split into two layers:
 - `pdf`
 - `pptx`, `xlsx`
 
+### `security_kb.sqlite` import
+
+If you already have the structured `security_kb.sqlite` database, prefer importing it directly instead of raw-ingesting the surrounding YAML/JSON folder. This keeps records bounded per document/chunk and avoids the oversized-source problem that can break embedding requests later.
+
+```bash
+osmedeus kb import \
+  --type security-sqlite \
+  --path /home/user/osmedeus-base/knowledge/knowledge/security_kb.sqlite \
+  --workspace security-kb
+
+# Then index/search it with the normal vectorkb flow
+osmedeus kb vector index -w security-kb
+osmedeus kb vector search --query "authentication bypass" -w security-kb
+```
+
+Notes:
+
+- This importer writes standard `knowledge_documents` / `knowledge_chunks` rows into the main Osmedeus database.
+- The first adapter is `security-sqlite`; other prebuilt KBs can follow the same importer framework with additional adapters later.
+- Import does not auto-run vectorkb indexing by itself; keep indexing as an explicit next step.
+
 ### Yakit `.rag/.rag.gz` bridge
 
 If you already imported a Yakit knowledge package into a local Yakit profile DB, Osmedeus can bridge that KB into an open `jsonl` or markdown export without reusing Yakit's private vector format directly.
@@ -336,6 +358,12 @@ osmedeus kb ingest --path /data/kb/books --workspace example.com --recursive
 osmedeus kb ingest --path /data/kb/playbook.pdf --workspace example.com
 ```
 
+If the source is an existing structured `security_kb.sqlite`, use the importer instead of raw folder ingest:
+
+```bash
+osmedeus kb import --type security-sqlite --path /data/kb/security_kb.sqlite --workspace security-kb
+```
+
 If the source is a public article page, fetch it into a reviewable markdown file first:
 
 ```bash
@@ -348,7 +376,7 @@ The preview file now includes a generated `Suggested Metadata` section plus a st
 
 If vectorkb auto-index is enabled but the embedding provider is not configured yet, the primary KB write still succeeds and the CLI/API return a warning instead of failing the whole ingest. Keyword search remains available; semantic search becomes available after a later successful reindex.
 
-`osmedeus kb vector doctor --json` now exposes `semantic_status`, `semantic_search_ready`, and `semantic_status_message` so you can distinguish configuration problems (`provider_not_configured`, `model_not_bound`, `provider_not_available`) from data problems such as `index_missing` or stale vector records.
+`osmedeus kb vector doctor --json` now exposes `semantic_status`, `semantic_search_ready`, and `semantic_status_message` so you can distinguish configuration problems (`provider_not_configured`, `model_not_bound`, `provider_not_available`) from data problems such as `index_missing` or stale vector records. When you need a live auth/runtime check, run `osmedeus kb vector doctor --probe-provider` (or `GET /osm/api/knowledge/vector/doctor?probe=true`) to issue a tiny embedding probe and surface `provider_auth_failed` / `provider_probe_failed` without changing the default offline-friendly doctor behavior.
 
 2. Verify the content is searchable:
 
@@ -358,6 +386,7 @@ osmedeus kb search --query "authentication bypass" -w example.com
 osmedeus kb vector search --query "authentication bypass" -w example.com
 osmedeus kb vector search --query "authentication bypass" -w example.com --rerank
 osmedeus kb vector doctor -w example.com
+osmedeus kb vector doctor -w example.com --probe-provider
 ```
 
 3. Optionally synthesize scan findings back into the same workspace knowledge:

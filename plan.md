@@ -26,11 +26,11 @@
 
 #### 2. vectorkb doctor practical hardening
 
-- Still recommended:
-  - add an early auth/provider probe in `kb vector doctor`
-  - make doctor surface auth/token/provider failures before full vector search/index requests fail later
-- Why:
-  - current doctor can report config/provider availability while a real embedding/rerank request still fails on invalid credentials
+- Closed on current source:
+  - `kb vector doctor` now supports an explicit live provider probe via `--probe-provider` / `?probe=true`
+  - doctor can now surface `provider_auth_failed` and `provider_probe_failed` without changing the default static/offline-friendly behavior
+- Follow-up still optional:
+  - extend the same style of runtime probe to rerank-specific health if operator feedback shows it is needed separately from embedding health
 
 #### 3. Plan/doc backfill cleanup
 
@@ -48,8 +48,8 @@
 ### Recommended Next 3 Tasks
 
 1. Run one real provider-backed superdomain AI workflow verification with valid env credentials.
-2. Harden `kb vector doctor` so it can detect auth/provider failures earlier.
-3. Backfill the most important historical plan docs so documentation state matches shipped code.
+2. Backfill the most important historical plan docs so documentation state matches shipped code.
+3. Revisit whether rerank-specific health probing is worth adding beyond the current embedding-provider probe.
 
 ## Current Status
 
@@ -58,7 +58,9 @@
 - Local knowledge base backend is in place.
   - File ingest for common local document types
   - Public article preview fetch via `kb fetch-url`, including batch preview from `--url-file`, suggested labels/confidence in the preview file, and explicit reviewed ingest via `kb ingest-preview`
+  - External KB import framework now exists via `kb import`, with the first `security-sqlite` adapter for `security_kb.sqlite`
   - vectorkb doctor now reports semantic readiness state (`provider_not_configured`, `model_not_bound`, `provider_not_available`, `index_missing`, `ready`) instead of only low-level consistency counters
+  - vectorkb doctor now supports an explicit live provider probe that can surface `provider_auth_failed` / `provider_probe_failed` without changing default doctor behavior
   - API ingest/learn now mirror CLI partial-success semantics: primary KB writes stay successful, while vectorkb auto-index failures are returned as warnings plus `vector_indexed` / `vector_error`
   - REST API now exposes vectorkb readiness via `/osm/api/knowledge/vector/doctor`
   - Search and document listing APIs/CLI

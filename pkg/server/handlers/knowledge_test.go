@@ -57,6 +57,61 @@ func TestVectorKnowledgeDoctor(t *testing.T) {
 	assert.False(t, payload.Data.SemanticSearchReady)
 }
 
+func TestVectorKnowledgeDoctor_WithProbeQuery(t *testing.T) {
+	tmpDir := t.TempDir()
+	embeddingServer := testutil.NewLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"forbidden","type":"insufficient_permissions"}}`, http.StatusForbidden)
+	}))
+	defer embeddingServer.Close()
+
+	cfg := &config.Config{
+		BaseFolder: tmpDir,
+		Database: config.DatabaseConfig{
+			DBEngine: "sqlite",
+			DBPath:   filepath.Join(tmpDir, "knowledge-handler.sqlite"),
+		},
+		KnowledgeVector: config.KnowledgeVectorConfig{
+			DBPath:          filepath.Join(tmpDir, "vector", "vector-kb.sqlite"),
+			DefaultProvider: "openai",
+			DefaultModel:    "test-embedding-3-small",
+		},
+		LLM: config.LLMConfig{
+			LLMProviders: []config.LLMProvider{{
+				Provider:  "openai",
+				BaseURL:   embeddingServer.URL + "/embeddings",
+				Model:     "test-embedding-3-small",
+				AuthToken: "bad-token",
+			}},
+			MaxRetries: 1,
+			Timeout:    "5s",
+		},
+	}
+
+	_, err := database.Connect(cfg)
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(context.Background()))
+	defer func() {
+		_ = database.Close()
+		database.SetDB(nil)
+	}()
+
+	app := fiber.New()
+	app.Get("/knowledge/vector/doctor", VectorKnowledgeDoctor(cfg))
+
+	req := httptest.NewRequest("GET", "/knowledge/vector/doctor?workspace=acme&probe=true", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	assert.Equal(t, fiber.StatusOK, resp.StatusCode)
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data vectorkb.DoctorReport `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	assert.Equal(t, "provider_auth_failed", payload.Data.SemanticStatus)
+	assert.False(t, payload.Data.SemanticSearchReady)
+}
+
 func TestIndexVectorKnowledgeValidation(t *testing.T) {
 	cfg, cleanup := setupKnowledgeHandlerDB(t)
 	defer cleanup()

@@ -374,9 +374,10 @@ func VectorKnowledgeDoctor(cfg *config.Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		ctx := context.Background()
 		report, err := vectorkb.Doctor(ctx, cfg, vectorkb.DoctorOptions{
-			Workspace: strings.TrimSpace(c.Query("workspace")),
-			Provider:  strings.TrimSpace(c.Query("provider")),
-			Model:     strings.TrimSpace(c.Query("model")),
+			Workspace:     strings.TrimSpace(c.Query("workspace")),
+			Provider:      strings.TrimSpace(c.Query("provider")),
+			Model:         strings.TrimSpace(c.Query("model")),
+			ProbeProvider: c.QueryBool("probe", false),
 		})
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{

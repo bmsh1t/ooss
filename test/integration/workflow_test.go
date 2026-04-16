@@ -661,7 +661,7 @@ func TestSuperdomainAIWorkflowOperationalWiring(t *testing.T) {
 
 			report := findModuleRef(t, workflow, "report")
 			assert.Equal(t, "common/10-report.yaml", report.Path)
-			assert.ElementsMatch(t, []string{"vuln-suite", "ai-intelligent-analysis", "ai-code-review", "ai-post-followup-coordination"}, report.DependsOn)
+			assert.ElementsMatch(t, []string{"vuln-suite", "passive-web-risk", "ai-intelligent-analysis", "ai-code-review", "ai-post-followup-coordination"}, report.DependsOn)
 
 			knowledgeAutolearn := findModuleRef(t, workflow, "ai-knowledge-autolearn")
 			assert.Equal(t, "fragments/do-ai-knowledge-autolearn.yaml", knowledgeAutolearn.Path)
@@ -3388,7 +3388,7 @@ func TestExecuteAITargetedRescanCollectsPreviousFollowupTargets(t *testing.T) {
 
 	for i := range workflow.Steps {
 		switch workflow.Steps[i].Name {
-		case "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
+		case "preflight-targeted-rescan-runtime", "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
 			workflow.Steps[i].PreCondition = "false"
 		}
 	}
@@ -3461,7 +3461,7 @@ func TestExecuteAITargetedRescanUsesDecisionFollowupSemanticPriorityTargets(t *t
 
 	for i := range workflow.Steps {
 		switch workflow.Steps[i].Name {
-		case "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
+		case "preflight-targeted-rescan-runtime", "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
 			workflow.Steps[i].PreCondition = "false"
 		}
 	}
@@ -3504,7 +3504,7 @@ func TestExecuteAITargetedRescanUsesQueuedPreviousFollowupParams(t *testing.T) {
 
 	for i := range workflow.Steps {
 		switch workflow.Steps[i].Name {
-		case "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
+		case "preflight-targeted-rescan-runtime", "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
 			workflow.Steps[i].PreCondition = "false"
 		}
 	}

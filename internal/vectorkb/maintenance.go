@@ -10,6 +10,7 @@ import (
 
 	"github.com/j3ssie/osmedeus/v5/internal/config"
 	"github.com/j3ssie/osmedeus/v5/internal/database"
+	"github.com/j3ssie/osmedeus/v5/internal/llm"
 	"github.com/uptrace/bun"
 )
 
@@ -206,6 +207,25 @@ func Doctor(ctx context.Context, cfg *config.Config, opts DoctorOptions) (*Docto
 		})
 	}
 
+	if opts.ProbeProvider &&
+		(report.SemanticStatus == "" || report.SemanticStatus == "ready") &&
+		report.ProviderConfigured &&
+		report.ModelConfigured &&
+		report.ProviderAvailable {
+		if err := probeDoctorProvider(ctx, cfg, report.Provider, report.Model); err != nil {
+			if isDoctorProviderAuthError(err) {
+				report.SemanticStatus = "provider_auth_failed"
+			} else {
+				report.SemanticStatus = "provider_probe_failed"
+			}
+			report.SemanticStatusMessage = err.Error()
+			report.Issues = append(report.Issues, DoctorIssue{
+				Type:    report.SemanticStatus,
+				Message: report.SemanticStatusMessage,
+			})
+		}
+	}
+
 	finalizeDoctorReport(report)
 	return report, nil
 }
@@ -316,6 +336,26 @@ func inspectDoctorDBPath(path string) doctorPathState {
 	state.Writable = true
 	state.Message = fmt.Sprintf("vector DB path %s is writable", path)
 	return state
+}
+
+func probeDoctorProvider(ctx context.Context, cfg *config.Config, provider, model string) error {
+	_, _, err := llm.GenerateEmbeddingsWithProvider(ctx, cfg, strings.TrimSpace(provider), []string{"doctor probe"}, strings.TrimSpace(model))
+	return err
+}
+
+func isDoctorProviderAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "401") ||
+		strings.Contains(text, "403") ||
+		strings.Contains(text, "unauthorized") ||
+		strings.Contains(text, "forbidden") ||
+		strings.Contains(text, "invalid api key") ||
+		strings.Contains(text, "invalid_api_key") ||
+		strings.Contains(text, "insufficient_permissions") ||
+		strings.Contains(text, "authentication")
 }
 
 func listDoctorProviders(cfg *config.Config) []string {

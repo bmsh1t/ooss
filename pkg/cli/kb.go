@@ -48,6 +48,7 @@ var (
 	kbYakitDB             string
 	kbYakitKBName         string
 	kbYakitFormat         string
+	kbImportType          string
 )
 
 var kbCmd = &cobra.Command{
@@ -103,6 +104,12 @@ var kbBridgeYakitRAGCmd = &cobra.Command{
 	RunE:  runKBBridgeYakitRAG,
 }
 
+var kbImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Import an external knowledge source into the local knowledge base",
+	RunE:  runKBImport,
+}
+
 func init() {
 	kbIngestCmd.Flags().StringVar(&kbPath, "path", "", "file or directory path to ingest")
 	kbIngestCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "global", "knowledge workspace name")
@@ -147,6 +154,13 @@ func init() {
 	_ = kbExportCmd.MarkFlagRequired("output")
 
 	kbBridgeYakitRAGCmd.Flags().StringVar(&kbPath, "path", "", "Yakit .rag or .rag.gz package path (optional when --kb-name is provided)")
+
+	kbImportCmd.Flags().StringVar(&kbImportType, "type", "", "external knowledge source type (for example: security-sqlite)")
+	kbImportCmd.Flags().StringVar(&kbPath, "path", "", "path to the external knowledge source")
+	kbImportCmd.Flags().StringVarP(&kbWorkspace, "workspace", "w", "", "knowledge workspace name")
+	_ = kbImportCmd.MarkFlagRequired("type")
+	_ = kbImportCmd.MarkFlagRequired("path")
+	_ = kbImportCmd.MarkFlagRequired("workspace")
 	kbBridgeYakitRAGCmd.Flags().StringVar(&kbYakitDB, "db", "", "path to the Yakit SQLite database (auto-detects common Yakit paths)")
 	kbBridgeYakitRAGCmd.Flags().StringVar(&kbYakitKBName, "kb-name", "", "knowledge base name inside the Yakit DB (optional when inferable from package)")
 	kbBridgeYakitRAGCmd.Flags().StringVar(&kbYakitFormat, "format", "auto", "output format: auto, jsonl, md")
@@ -161,6 +175,7 @@ func init() {
 	kbCmd.AddCommand(kbLearnCmd)
 	kbCmd.AddCommand(kbExportCmd)
 	kbCmd.AddCommand(kbBridgeYakitRAGCmd)
+	kbCmd.AddCommand(kbImportCmd)
 	rootCmd.AddCommand(kbCmd)
 }
 
@@ -741,6 +756,57 @@ func runKBExport(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Output:    %s\n", summary.Output)
 	fmt.Printf("Documents: %d\n", summary.Documents)
 	fmt.Printf("Chunks:    %d\n", summary.Chunks)
+	return nil
+}
+
+func runKBImport(cmd *cobra.Command, args []string) error {
+	if err := connectDB(); err != nil {
+		return err
+	}
+	defer func() { _ = database.Close() }()
+
+	cfg := config.Get()
+	if cfg == nil {
+		return fmt.Errorf("configuration not loaded")
+	}
+
+	ctx := context.Background()
+	summary, err := knowledge.Import(ctx, cfg, knowledge.ImportOptions{
+		Type:      kbImportType,
+		Path:      kbPath,
+		Workspace: kbWorkspace,
+	})
+	if err != nil {
+		if summary != nil && globalJSON {
+			data, _ := json.Marshal(summary)
+			fmt.Println(string(data))
+		}
+		return err
+	}
+
+	if globalJSON {
+		data, err := json.Marshal(summary)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	terminal.NewPrinter().Success("Knowledge import completed")
+	fmt.Printf("Type:      %s\n", summary.Type)
+	fmt.Printf("Path:      %s\n", summary.Path)
+	fmt.Printf("Workspace: %s\n", summary.Workspace)
+	fmt.Printf("Documents: %d\n", summary.Documents)
+	fmt.Printf("Chunks:    %d\n", summary.Chunks)
+	fmt.Printf("Failed:    %d\n", summary.Failed)
+	if len(summary.Errors) > 0 {
+		fmt.Println("")
+		fmt.Println("Errors:")
+		for _, entry := range summary.Errors {
+			fmt.Printf("  - %s\n", entry)
+		}
+	}
 	return nil
 }
 
