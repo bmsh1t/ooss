@@ -1,5 +1,34 @@
 # Plan
 
+## Planned Direction (2026-04-17)
+
+- Design doc: `docs/superpowers/specs/2026-04-17-superdomain-ai-balanced-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-04-17-superdomain-ai-balanced-implementation.md`
+
+### This round's planning decision
+
+- Chosen direction: **C. 两者平衡**
+- Meaning:
+  - keep `superdomain-extensive-ai-optimized` as the default mainline
+  - strengthen automatic follow-up without making operators fight the workflow
+  - make KB / semantic / rerank a real decision input, not just an optional side path
+  - keep all AI-heavy enhancements reusable by future top-level workflows
+  - require fail-open behavior when ACP / vectorkb / rerank / KB are unavailable
+
+### Acceptance dimensions
+
+1. 主链稳定：`optimized` 默认主跑不脆
+2. 结果有用：AI 输出能直接指导 `rescan / retest / operator / campaign`
+3. 接管顺手：中断后知道从哪继续，人工知道先看什么
+4. 知识可复用：`security-kb` 这类基座库长期复用，不污染目标库
+
+### Rollout order
+
+1. 先压实 `optimized`
+2. 再把成熟 contract 回灌到 `stable`
+3. `hybrid` 保持分析深度，但继续复用同一套 shared contract
+4. 最后验证新的派生顶层 workflow 不会因为缺少细粒度参数而掉 AI 主链
+
 ## Current Handoff (2026-04-16)
 
 ### Current Repo State
