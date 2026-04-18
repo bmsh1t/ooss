@@ -6801,6 +6801,47 @@ func TestExecuteAIPostFollowupCoordinationHandlesMissingArtifacts(t *testing.T) 
 	assert.Contains(t, markdown, "knowledge-first")
 }
 
+func TestExecuteAIPostFollowupCoordinationResumeContextTracksFallbackSource(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "build-post-followup-decision" || workflow.Steps[i].Name == "render-post-followup-markdown" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-resume-fallback-source"
+	aiDir := filepath.Join(cfg.WorkspacesPath, targetSpace, "ai-analysis")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	resumeContextData, err := os.ReadFile(filepath.Join(aiDir, "resume-context-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var resumeContext map[string]interface{}
+	require.NoError(t, json.Unmarshal(resumeContextData, &resumeContext))
+	assert.Equal(t, "inline-fallback", resumeContext["followup_decision_source"])
+	assert.Equal(t, "", resumeContext["followup_decision_file"])
+}
+
 func TestExecuteAISemanticSearchUsesSeedFollowupContext(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)

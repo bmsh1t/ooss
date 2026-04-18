@@ -543,8 +543,12 @@ steps:
 
       if [ -f "{{followupDecisionOutput}}" ] && jq empty "{{followupDecisionOutput}}" >/dev/null 2>&1; then
         SOURCE_FILE="{{followupDecisionOutput}}"
+        SOURCE_KIND="followup-decision"
+        SOURCE_FILE_FOR_RESUME="{{followupDecisionOutput}}"
       else
         SOURCE_FILE="{{Output}}/ai-analysis/.followup-decision-fallback-{{TargetSpace}}.json"
+        SOURCE_KIND="inline-fallback"
+        SOURCE_FILE_FOR_RESUME=""
         jq -n \
           --arg generated_at "$(date -Iseconds)" \
           '{
@@ -616,13 +620,15 @@ steps:
         --arg generated_at "$(date -Iseconds)" \
         --arg target "{{Target}}" \
         --arg target_space "{{TargetSpace}}" \
-        --arg source_file "{{followupDecisionOutput}}" \
+        --arg source_kind "$SOURCE_KIND" \
+        --arg source_file "$SOURCE_FILE_FOR_RESUME" \
         --slurpfile source "$SOURCE_FILE" \
         '($source[0] // {}) as $doc
         | {
             generated_at: $generated_at,
             target: $target,
             target_space: $target_space,
+            followup_decision_source: $source_kind,
             followup_decision_file: $source_file,
             next_phase: ($doc.seed_focus.next_phase // "knowledge-consolidation"),
             priority_mode: ($doc.seed_focus.priority_mode // "knowledge-first"),
