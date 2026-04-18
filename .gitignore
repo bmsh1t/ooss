@@ -56,3 +56,4 @@ PLANNING-*.md
 INTERNAL.md
 INTERNAL-*.md
 .ace-tool/
+.worktrees/
