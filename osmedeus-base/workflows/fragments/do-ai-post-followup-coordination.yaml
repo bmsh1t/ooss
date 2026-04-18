@@ -11,6 +11,12 @@ params:
     default: "{{Output}}/ai-analysis/followup-priority-targets-{{TargetSpace}}.txt"
   - name: followupFocusAreasFile
     default: "{{Output}}/ai-analysis/followup-focus-areas-{{TargetSpace}}.txt"
+  - name: resumeContextOutput
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
+  - name: nextActionsOutput
+    default: "{{Output}}/ai-analysis/next-actions-{{TargetSpace}}.json"
+  - name: operatorSummaryOutput
+    default: "{{Output}}/ai-analysis/operator-summary-{{TargetSpace}}.md"
 
   - name: aiDecisionFile
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
@@ -528,6 +534,156 @@ steps:
         echo "## Next Actions"
         jq -r '.next_actions[]? | "- \(.)"' "{{followupDecisionOutput}}" 2>/dev/null || true
       } > "{{followupDecisionMd}}"
+
+  - name: write-resume-autopilot-artifacts
+    type: bash
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ -f "{{followupDecisionOutput}}" ] && jq empty "{{followupDecisionOutput}}" >/dev/null 2>&1; then
+        SOURCE_FILE="{{followupDecisionOutput}}"
+      else
+        SOURCE_FILE="{{Output}}/ai-analysis/.followup-decision-fallback-{{TargetSpace}}.json"
+        jq -n \
+          --arg generated_at "$(date -Iseconds)" \
+          '{
+            generated_at: $generated_at,
+            followup_summary: {
+              retest_targets: 0,
+              operator_tasks: 0,
+              campaign_targets: 0,
+              passive_targets: 0,
+              retest_queued_targets: 0,
+              rescan_findings: 0,
+              rescan_critical: 0,
+              rescan_high: 0,
+              campaign_ready: false,
+              campaign_create_status: "not_requested",
+              campaign_create_id: "",
+              campaign_create_queued_runs: 0,
+              retest_queue_status: "not_requested"
+            },
+            refined_targets: {
+              focus_areas: [],
+              priority_targets: []
+            },
+            seed_targets: {
+              focus_areas: [],
+              priority_targets: [],
+              rescan_targets: [],
+              retest_targets: [],
+              operator_targets: [],
+              campaign_targets: [],
+              confirmed_targets: [],
+              semantic_targets: [],
+              rescan_critical_targets: [],
+              rescan_high_targets: [],
+              manual_first_targets: [],
+              high_confidence_targets: []
+            },
+            seed_focus: {
+              scan_profile: "focused",
+              severity: "critical,high",
+              reasoning: "no_followup_decision",
+              next_phase: "knowledge-consolidation",
+              priority_mode: "knowledge-first",
+              confidence_level: "low",
+              reuse_sources: [],
+              signal_scores: {
+                confirmed_urls: 0,
+                retest_targets: 0,
+                operator_tasks: 0,
+                campaign_targets: 0,
+                passive_targets: 0,
+                retest_queued_targets: 0,
+                rescan_critical: 0,
+                rescan_high: 0,
+                escalation_score: 0
+              },
+              keep_aggressive_scan: false,
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
+            next_actions: [
+              "Persist the final follow-up decision package for future reruns and manual handoff"
+            ]
+          }' > "$SOURCE_FILE"
+      fi
+
+      jq -n \
+        --arg generated_at "$(date -Iseconds)" \
+        --arg target "{{Target}}" \
+        --arg target_space "{{TargetSpace}}" \
+        --arg source_file "{{followupDecisionOutput}}" \
+        --slurpfile source "$SOURCE_FILE" \
+        '($source[0] // {}) as $doc
+        | {
+            generated_at: $generated_at,
+            target: $target,
+            target_space: $target_space,
+            followup_decision_file: $source_file,
+            next_phase: ($doc.seed_focus.next_phase // "knowledge-consolidation"),
+            priority_mode: ($doc.seed_focus.priority_mode // "knowledge-first"),
+            confidence_level: ($doc.seed_focus.confidence_level // "low"),
+            scan_profile: ($doc.seed_focus.scan_profile // "focused"),
+            severity: ($doc.seed_focus.severity // "critical,high"),
+            reasoning: ($doc.seed_focus.reasoning // "no_followup_decision"),
+            reuse_sources: ($doc.seed_focus.reuse_sources // []),
+            signal_scores: ($doc.seed_focus.signal_scores // {}),
+            refined_targets: {
+              focus_areas: ($doc.refined_targets.focus_areas // []),
+              priority_targets: ($doc.refined_targets.priority_targets // [])
+            },
+            seed_targets: {
+              rescan_targets: ($doc.seed_targets.rescan_targets // []),
+              retest_targets: ($doc.seed_targets.retest_targets // []),
+              operator_targets: ($doc.seed_targets.operator_targets // []),
+              campaign_targets: ($doc.seed_targets.campaign_targets // []),
+              confirmed_targets: ($doc.seed_targets.confirmed_targets // []),
+              semantic_targets: ($doc.seed_targets.semantic_targets // []),
+              manual_first_targets: ($doc.seed_targets.manual_first_targets // []),
+              high_confidence_targets: ($doc.seed_targets.high_confidence_targets // [])
+            },
+            followup_summary: ($doc.followup_summary // {}),
+            campaign_create: {
+              status: ($doc.followup_summary.campaign_create_status // "not_requested"),
+              campaign_id: ($doc.followup_summary.campaign_create_id // ""),
+              queued_runs: ($doc.followup_summary.campaign_create_queued_runs // 0)
+            },
+            retest_queue: {
+              status: ($doc.followup_summary.retest_queue_status // "not_requested"),
+              queued_targets: ($doc.followup_summary.retest_queued_targets // 0)
+            },
+            next_actions: ($doc.next_actions // [])
+          }' > "{{resumeContextOutput}}"
+
+      jq -c '.next_actions // []' "$SOURCE_FILE" > "{{nextActionsOutput}}" 2>/dev/null || echo '[]' > "{{nextActionsOutput}}"
+
+      {
+        echo "# AI Operator Summary"
+        echo "## Target: {{Target}}"
+        echo ""
+        jq -r '
+          "- Next phase: \(.seed_focus.next_phase // "knowledge-consolidation")\n" +
+          "- Priority mode: \(.seed_focus.priority_mode // "knowledge-first")\n" +
+          "- Confidence: \(.seed_focus.confidence_level // "low")\n" +
+          "- Scan profile: \(.seed_focus.scan_profile // "focused")\n" +
+          "- Severity: \(.seed_focus.severity // "critical,high")\n" +
+          "- Campaign status: \(.followup_summary.campaign_create_status // "not_requested")\n" +
+          "- Campaign id: \(.followup_summary.campaign_create_id // "")\n" +
+          "- Queued retests: \(.followup_summary.retest_queued_targets // 0)\n" +
+          "- Operator tasks: \(.followup_summary.operator_tasks // 0)"
+        ' "$SOURCE_FILE" 2>/dev/null || true
+        echo ""
+        echo "## Next Actions"
+        jq -r '.next_actions[]? | "- \(.)"' "$SOURCE_FILE" 2>/dev/null || true
+      } > "{{operatorSummaryOutput}}"
+
+      if [ "$SOURCE_FILE" = "{{Output}}/ai-analysis/.followup-decision-fallback-{{TargetSpace}}.json" ]; then
+        rm -f "$SOURCE_FILE" 2>/dev/null || true
+      fi
 
   - name: log-post-followup-complete
     type: function
