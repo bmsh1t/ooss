@@ -5376,9 +5376,12 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
     "queued_runs": 2
   },
   "followup_summary": {
-    "manual_followup_needed": true,
-    "campaign_followup_recommended": false,
-    "queue_followup_effective": true
+    "operator_tasks": 2,
+    "rescan_critical": 1,
+    "rescan_high": 0,
+    "campaign_ready": true,
+    "campaign_targets": 3,
+    "retest_queued_targets": 2
   }
 }`)
 	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
@@ -5440,6 +5443,9 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	assert.Equal(t, "resume-context", summary["source_kind"])
 	assert.Equal(t, "resume context should win", summary["reasoning"])
 	assert.Equal(t, "manual-exploitation", summary["next_phase"])
+	assert.Equal(t, true, summary["manual_followup_needed"])
+	assert.Equal(t, true, summary["campaign_followup_recommended"])
+	assert.Equal(t, true, summary["queue_followup_effective"])
 
 	decisionInputsData, err := os.ReadFile(filepath.Join(aiDir, "pre-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -5450,6 +5456,9 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	assert.Equal(t, "resume-context", decisionInputs["previous_followup_source_kind"])
 	assert.Equal(t, "resume context should win", decisionInputs["previous_followup_reasoning"])
 	assert.Equal(t, "manual-exploitation", decisionInputs["previous_followup_next_phase"])
+	assert.Equal(t, true, decisionInputs["previous_followup_manual_followup_needed"])
+	assert.Equal(t, true, decisionInputs["previous_followup_campaign_followup_recommended"])
+	assert.Equal(t, true, decisionInputs["previous_followup_queue_followup_effective"])
 }
 
 func TestExecuteAIPreScanDecisionInvalidJSONFallsBackToSubdomainList(t *testing.T) {
