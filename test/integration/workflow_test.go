@@ -5351,37 +5351,35 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
 	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
 	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
-  "available": true,
-  "source_kind": "resume-context",
-  "base_profile": "aggressive",
-  "base_severity": "critical,high,medium",
+  "followup_decision_source": "resume-context",
+  "scan_profile": "aggressive",
+  "severity": "critical,high,medium",
+  "reasoning": "resume context should win",
   "next_phase": "manual-exploitation",
   "priority_mode": "manual-first",
   "confidence_level": "high",
-  "reasoning": "resume context should win",
   "reuse_sources": ["resume-context", "operator-queue"],
-  "manual_followup_needed": true,
-  "campaign_followup_recommended": false,
-  "queue_followup_effective": true,
   "signal_scores": {
     "escalation_score": 11
+  },
+  "refined_targets": {
+    "focus_areas": ["resume-auth"],
+    "priority_targets": ["resume-admin.example.com"]
+  },
+  "seed_targets": {
+    "manual_first_targets": ["resume-admin.example.com"],
+    "high_confidence_targets": ["resume-high.example.com"]
   },
   "campaign_create": {
     "status": "created",
     "campaign_id": "camp-resume-42",
     "queued_runs": 2
   },
-  "counts": {
-    "targets": 4,
-    "priority_targets": 1,
-    "focus_areas": 1,
-    "manual_first_targets": 1,
-    "high_confidence_targets": 1
-  },
-  "focus_areas": ["resume-auth"],
-  "priority_targets": ["resume-admin.example.com"],
-  "manual_first_targets": ["resume-admin.example.com"],
-  "high_confidence_targets": ["resume-high.example.com"]
+  "followup_summary": {
+    "manual_followup_needed": true,
+    "campaign_followup_recommended": false,
+    "queue_followup_effective": true
+  }
 }`)
 	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
   "base_decision": {
@@ -5428,12 +5426,12 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
 	require.NoError(t, err)
 	priorityTargets := strings.Split(strings.TrimSpace(string(priorityTargetsData)), "\n")
-	assert.ElementsMatch(t, []string{"resume-admin.example.com"}, priorityTargets)
+	assert.ElementsMatch(t, []string{"resume-admin.example.com", "resume-high.example.com"}, priorityTargets)
 
 	focusAreasData, err := os.ReadFile(filepath.Join(aiDir, "focus-areas-pre.txt"))
 	require.NoError(t, err)
 	focusAreas := strings.Split(strings.TrimSpace(string(focusAreasData)), "\n")
-	assert.ElementsMatch(t, []string{"resume-auth"}, focusAreas)
+	assert.ElementsMatch(t, []string{"resume-auth", "resume-admin.example.com", "resume-high.example.com"}, focusAreas)
 
 	summaryData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-summary.json"))
 	require.NoError(t, err)
