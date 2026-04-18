@@ -5351,7 +5351,7 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
 	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
 	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
-  "followup_decision_source": "resume-context",
+  "followup_decision_source": "followup-decision",
   "scan_profile": "aggressive",
   "severity": "critical,high,medium",
   "reasoning": "resume context should win",

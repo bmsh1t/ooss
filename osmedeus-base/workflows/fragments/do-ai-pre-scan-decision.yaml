@@ -176,7 +176,7 @@ steps:
         jq -r '((.refined_targets.focus_areas // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []))[]? // empty' "{{resumeContextFile}}" 2>/dev/null \
           | awk 'NF && !seen[$0]++' > "$PREV_FOCUS" || true
         PREV_AVAILABLE=true
-        PREV_SOURCE_KIND=$(jq -r '.followup_decision_source // "resume-context"' "{{resumeContextFile}}" 2>/dev/null || echo "resume-context")
+        PREV_SOURCE_KIND="resume-context"
         PREV_SOURCE_FILE="{{resumeContextFile}}"
         PREV_BASE_PROFILE=$(jq -r '.scan_profile // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
         PREV_BASE_SEVERITY=$(jq -r '.severity // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
