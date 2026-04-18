@@ -5327,6 +5327,133 @@ func TestExecuteAIPreScanDecisionFallbackToPreviousFollowup(t *testing.T) {
 	assert.Contains(t, preReuseSources, "operator-queue")
 }
 
+func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan-analysis" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-resume-context-precedence"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "available": true,
+  "source_kind": "resume-context",
+  "base_profile": "aggressive",
+  "base_severity": "critical,high,medium",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "reasoning": "resume context should win",
+  "reuse_sources": ["resume-context", "operator-queue"],
+  "manual_followup_needed": true,
+  "campaign_followup_recommended": false,
+  "queue_followup_effective": true,
+  "signal_scores": {
+    "escalation_score": 11
+  },
+  "campaign_create": {
+    "status": "created",
+    "campaign_id": "camp-resume-42",
+    "queued_runs": 2
+  },
+  "counts": {
+    "targets": 4,
+    "priority_targets": 1,
+    "focus_areas": 1,
+    "manual_first_targets": 1,
+    "high_confidence_targets": 1
+  },
+  "focus_areas": ["resume-auth"],
+  "priority_targets": ["resume-admin.example.com"],
+  "manual_first_targets": ["resume-admin.example.com"],
+  "high_confidence_targets": ["resume-high.example.com"]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
+  "base_decision": {
+    "profile": "balanced",
+    "severity": "low",
+    "reasoning": "old followup should lose"
+  },
+  "seed_focus": {
+    "priority_mode": "knowledge-first",
+    "confidence_level": "low",
+    "reuse_sources": ["followup-decision"],
+    "manual_followup_needed": false,
+    "campaign_followup_recommended": false,
+    "queue_followup_effective": false
+  },
+  "refined_targets": {
+    "focus_areas": ["followup-auth"],
+    "priority_targets": ["followup-admin.example.com"]
+  },
+  "execution_feedback": {
+    "next_phase": "knowledge-consolidation"
+  },
+  "followup_summary": {
+    "campaign_create_status": "not_requested",
+    "campaign_create_id": "",
+    "campaign_create_queued_runs": 0
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":        "example.com",
+		"space_name":    targetSpace,
+		"pre_scan_json": "invalid-json",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, "priority-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	priorityTargets := strings.Split(strings.TrimSpace(string(priorityTargetsData)), "\n")
+	assert.ElementsMatch(t, []string{"resume-admin.example.com"}, priorityTargets)
+
+	focusAreasData, err := os.ReadFile(filepath.Join(aiDir, "focus-areas-pre.txt"))
+	require.NoError(t, err)
+	focusAreas := strings.Split(strings.TrimSpace(string(focusAreasData)), "\n")
+	assert.ElementsMatch(t, []string{"resume-auth"}, focusAreas)
+
+	summaryData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-summary.json"))
+	require.NoError(t, err)
+	var summary map[string]interface{}
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "resume-context", summary["source_kind"])
+	assert.Equal(t, "resume context should win", summary["reasoning"])
+	assert.Equal(t, "manual-exploitation", summary["next_phase"])
+
+	decisionInputsData, err := os.ReadFile(filepath.Join(aiDir, "pre-ai-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var preDecision map[string]interface{}
+	require.NoError(t, json.Unmarshal(decisionInputsData, &preDecision))
+	decisionInputs, ok := preDecision["decision_inputs"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "resume-context", decisionInputs["previous_followup_source_kind"])
+	assert.Equal(t, "resume context should win", decisionInputs["previous_followup_reasoning"])
+	assert.Equal(t, "manual-exploitation", decisionInputs["previous_followup_next_phase"])
+}
+
 func TestExecuteAIPreScanDecisionInvalidJSONFallsBackToSubdomainList(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -5491,6 +5618,127 @@ func TestExecuteAIPreScanDecisionACPBuildsPreviousFollowupContext(t *testing.T) 
 	assert.Equal(t, true, summary["manual_followup_needed"])
 	assert.Equal(t, true, summary["campaign_followup_recommended"])
 	assert.Equal(t, true, summary["queue_followup_effective"])
+}
+
+func TestExecuteAIPreScanDecisionACPPrefersResumeContextOverFollowupDecision(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-pre-scan-decision-acp.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-pre-scan" || workflow.Steps[i].Name == "save-pre-scan-results" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-pre-scan-acp-resume-context-precedence"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(outputDir, "subdomain", "subdomain-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "probing", "resolved-"+targetSpace+".txt"), "www.example.com\nresume-admin.example.com\n")
+	writeTestFile(t, filepath.Join(outputDir, "osint", "emails-"+targetSpace+".txt"), "ops@example.com\n")
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "available": true,
+  "source_kind": "resume-context",
+  "base_profile": "aggressive",
+  "base_severity": "critical,high,medium",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "reasoning": "resume context should win for acp",
+  "reuse_sources": ["resume-context", "campaign-create"],
+  "manual_followup_needed": true,
+  "campaign_followup_recommended": true,
+  "queue_followup_effective": true,
+  "signal_scores": {
+    "escalation_score": 15
+  },
+  "campaign_create": {
+    "status": "created",
+    "campaign_id": "camp-resume-acp-77",
+    "queued_runs": 4
+  },
+  "counts": {
+    "targets": 5,
+    "priority_targets": 1,
+    "focus_areas": 1,
+    "manual_first_targets": 1,
+    "high_confidence_targets": 1
+  },
+  "focus_areas": ["resume-acp-auth"],
+  "priority_targets": ["resume-acp-admin.example.com"],
+  "manual_first_targets": ["resume-acp-admin.example.com"],
+  "high_confidence_targets": ["resume-acp-high.example.com"]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
+  "base_decision": {
+    "profile": "balanced",
+    "severity": "low",
+    "reasoning": "old followup should lose for acp"
+  },
+  "seed_focus": {
+    "reuse_sources": ["followup-decision"],
+    "manual_followup_needed": false,
+    "campaign_followup_recommended": false,
+    "queue_followup_effective": false
+  },
+  "refined_targets": {
+    "focus_areas": ["followup-acp-auth"],
+    "priority_targets": ["followup-acp-admin.example.com"]
+  },
+  "execution_feedback": {
+    "next_phase": "knowledge-consolidation"
+  },
+  "followup_summary": {
+    "campaign_create_status": "not_requested",
+    "campaign_create_id": "",
+    "campaign_create_queued_runs": 0
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "example.com",
+		"space_name":            targetSpace,
+		"enablePreScanDecision": "true",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	priorityTargetsData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-priority-targets.txt"))
+	require.NoError(t, err)
+	priorityTargets := strings.Split(strings.TrimSpace(string(priorityTargetsData)), "\n")
+	assert.ElementsMatch(t, []string{"resume-acp-admin.example.com"}, priorityTargets)
+
+	focusAreasData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-focus-areas.txt"))
+	require.NoError(t, err)
+	focusAreas := strings.Split(strings.TrimSpace(string(focusAreasData)), "\n")
+	assert.ElementsMatch(t, []string{"resume-acp-auth"}, focusAreas)
+
+	summaryData, err := os.ReadFile(filepath.Join(aiDir, ".input", "previous-followup-summary.json"))
+	require.NoError(t, err)
+	var summary map[string]interface{}
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "resume-context", summary["source_kind"])
+	assert.Equal(t, "resume context should win for acp", summary["reasoning"])
+	assert.Equal(t, "manual-exploitation", summary["next_phase"])
+
+	campaignCreate, ok := summary["campaign_create"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "camp-resume-acp-77", campaignCreate["campaign_id"])
+	assert.Equal(t, float64(4), campaignCreate["queued_runs"])
 }
 
 func TestExecuteAIPreScanDecisionFallbackToQueuedPreviousFollowupParams(t *testing.T) {
@@ -6154,6 +6402,111 @@ func TestExecuteAIPostFollowupCoordinationBuildsEnrichedSeedSignals(t *testing.T
 	require.True(t, ok)
 	assert.Contains(t, rescanTargets, "https://critical.example.com/admin")
 	assert.Contains(t, rescanTargets, "https://high.example.com/upload")
+}
+
+func TestExecuteAIPostFollowupCoordinationWritesResumeAutopilotArtifacts(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-resume-artifacts"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"), `{
+  "scan": {
+    "profile": "focused",
+    "severity": "critical,high"
+  },
+  "targets": {
+    "focus_areas": ["authentication"],
+    "rescan_targets": ["https://seed.example.com/graphql"]
+  },
+  "reasoning": "initial ai decision"
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 1},
+  "targets": [{"target": "https://retest.example.com/admin"}],
+  "automation_queue": [{"target": "https://queue.example.com/graphql"}]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 2},
+  "focus_targets": ["https://operator.example.com/admin"],
+  "tasks": [
+    {"target": "https://operator.example.com/admin"},
+    {"target": "https://operator.example.com/upload"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 1}
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "campaign-create-"+targetSpace+".json"), `{
+  "status": "created",
+  "campaign_id": "camp-post-123",
+  "queued_runs": 2
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "queued_targets": 1,
+  "status": "queued"
+}`)
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-rescan-"+targetSpace+".jsonl"), strings.Join([]string{
+		`{"info":{"severity":"critical"},"matched-at":"https://critical.example.com/admin"}`,
+		`{"info":{"severity":"high"},"matched-at":"https://high.example.com/upload"}`,
+	}, "\n")+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "semantic-priority-targets-decision-followup-"+targetSpace+".txt"), "https://semantic.example.com/login\n")
+	writeTestFile(t, filepath.Join(aiDir, "confirmed-urls-"+targetSpace+".txt"), "https://confirmed.example.com/login\n")
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-targets-"+targetSpace+".txt"), "https://operator.example.com/manual\n")
+	writeTestFile(t, filepath.Join(aiDir, "retest-targets-"+targetSpace+".txt"), "https://retest.example.com/admin\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-targets-"+targetSpace+".txt"), "https://campaign.example.com/api\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	resumeContextData, err := os.ReadFile(filepath.Join(aiDir, "resume-context-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var resumeContext map[string]interface{}
+	require.NoError(t, json.Unmarshal(resumeContextData, &resumeContext))
+	assert.NotEmpty(t, resumeContext)
+	assert.Equal(t, "manual-exploitation", resumeContext["next_phase"])
+	assert.Equal(t, "manual-first", resumeContext["priority_mode"])
+	assert.Equal(t, "high", resumeContext["confidence_level"])
+	campaignCreate, ok := resumeContext["campaign_create"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "created", campaignCreate["status"])
+	assert.Equal(t, "camp-post-123", campaignCreate["campaign_id"])
+	assert.Equal(t, float64(2), campaignCreate["queued_runs"])
+
+	nextActionsData, err := os.ReadFile(filepath.Join(aiDir, "next-actions-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var nextActions []string
+	require.NoError(t, json.Unmarshal(nextActionsData, &nextActions))
+	assert.Contains(t, nextActions, "Track campaign camp-post-123 and monitor 2 queued runs for follow-up evidence")
+	assert.Contains(t, nextActions, "Persist the final follow-up decision package for future reruns and manual handoff")
+
+	operatorSummaryData, err := os.ReadFile(filepath.Join(aiDir, "operator-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	operatorSummaryLines := strings.Split(strings.TrimSpace(string(operatorSummaryData)), "\n")
+	assert.Contains(t, operatorSummaryLines, "# AI Operator Summary")
+	assert.Contains(t, operatorSummaryLines, "## Target: https://app.example.com")
+	assert.Contains(t, operatorSummaryLines, "- Next phase: manual-exploitation")
+	assert.Contains(t, operatorSummaryLines, "- Campaign id: camp-post-123")
 }
 
 func TestExecuteAIPostFollowupCoordinationCountsRetestTargetsWithoutSummary(t *testing.T) {
