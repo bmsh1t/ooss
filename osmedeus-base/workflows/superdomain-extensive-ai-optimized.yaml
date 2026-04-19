@@ -243,6 +243,12 @@ params:
     default: ""
   - name: previous_followup_reuse_sources
     default: ""
+  - name: previous_followup_resume_suppressed_actions
+    default: ""
+  - name: previous_followup_reused_actions
+    default: ""
+  - name: previous_followup_skipped_duplicate_actions
+    default: ""
   - name: previous_followup_manual_followup_needed
     default: ""
   - name: previous_followup_campaign_followup_recommended

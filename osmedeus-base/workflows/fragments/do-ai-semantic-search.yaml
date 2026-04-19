@@ -74,6 +74,12 @@ params:
     default: ""
   - name: previous_followup_reuse_sources
     default: ""
+  - name: previous_followup_resume_suppressed_actions
+    default: ""
+  - name: previous_followup_reused_actions
+    default: ""
+  - name: previous_followup_skipped_duplicate_actions
+    default: ""
   - name: previous_followup_manual_followup_needed
     default: ""
   - name: previous_followup_campaign_followup_recommended
@@ -364,6 +370,9 @@ steps:
       PREV_CONFIDENCE_LEVEL=""
       PREV_NEXT_PHASE=""
       PREV_REUSE_SOURCES_JSON='[]'
+      PREV_RESUME_SUPPRESSED_JSON='[]'
+      PREV_REUSED_ACTIONS_JSON='[]'
+      PREV_SKIPPED_DUPLICATES_JSON='[]'
       PREV_MANUAL_FOLLOWUP_NEEDED=false
       PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=false
       PREV_QUEUE_FOLLOWUP_EFFECTIVE=false
@@ -387,6 +396,9 @@ steps:
         PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_NEXT_PHASE=$(jq -r '.seed_focus.next_phase // .execution_feedback.next_phase // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_REUSE_SOURCES_JSON=$(jq -c '.seed_focus.reuse_sources // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_RESUME_SUPPRESSED_JSON=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_REUSED_ACTIONS_JSON=$(jq -c '.followup_summary.reused_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_SKIPPED_DUPLICATES_JSON=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
         PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
@@ -407,6 +419,9 @@ steps:
         PREV_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
         PREV_PARAM_NEXT_PHASE="{{previous_followup_next_phase}}"
         PREV_PARAM_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
+        PREV_PARAM_RESUME_SUPPRESSED_JSON=$(csv_or_json_to_array "{{previous_followup_resume_suppressed_actions}}")
+        PREV_PARAM_REUSED_ACTIONS_JSON=$(csv_or_json_to_array "{{previous_followup_reused_actions}}")
+        PREV_PARAM_SKIPPED_DUPLICATES_JSON=$(csv_or_json_to_array "{{previous_followup_skipped_duplicate_actions}}")
         PREV_PARAM_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "{{previous_followup_manual_followup_needed}}")
         PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "{{previous_followup_campaign_followup_recommended}}")
         PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "{{previous_followup_queue_followup_effective}}")
@@ -447,6 +462,9 @@ steps:
           PREV_CONFIDENCE_LEVEL="$PREV_PARAM_CONFIDENCE_LEVEL"
           PREV_NEXT_PHASE="$PREV_PARAM_NEXT_PHASE"
           PREV_REUSE_SOURCES_JSON="$PREV_PARAM_REUSE_SOURCES_JSON"
+          PREV_RESUME_SUPPRESSED_JSON="$PREV_PARAM_RESUME_SUPPRESSED_JSON"
+          PREV_REUSED_ACTIONS_JSON="$PREV_PARAM_REUSED_ACTIONS_JSON"
+          PREV_SKIPPED_DUPLICATES_JSON="$PREV_PARAM_SKIPPED_DUPLICATES_JSON"
           PREV_MANUAL_FOLLOWUP_NEEDED="$PREV_PARAM_MANUAL_FOLLOWUP_NEEDED"
           PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED="$PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED"
           PREV_QUEUE_FOLLOWUP_EFFECTIVE="$PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE"
@@ -620,6 +638,9 @@ steps:
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
         --arg previous_followup_next_phase "$PREV_NEXT_PHASE" \
         --argjson previous_followup_reuse_sources "$PREV_REUSE_SOURCES_JSON" \
+        --argjson previous_followup_resume_suppressed_actions "$PREV_RESUME_SUPPRESSED_JSON" \
+        --argjson previous_followup_reused_actions "$PREV_REUSED_ACTIONS_JSON" \
+        --argjson previous_followup_skipped_duplicate_actions "$PREV_SKIPPED_DUPLICATES_JSON" \
         --argjson previous_followup_manual_followup_needed "$PREV_MANUAL_FOLLOWUP_NEEDED" \
         --argjson previous_followup_campaign_followup_recommended "$PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
         --argjson previous_followup_queue_followup_effective "$PREV_QUEUE_FOLLOWUP_EFFECTIVE" \
@@ -651,6 +672,9 @@ steps:
           previous_followup_confidence_level: $previous_followup_confidence_level,
           previous_followup_next_phase: $previous_followup_next_phase,
           previous_followup_reuse_sources: $previous_followup_reuse_sources,
+          previous_followup_resume_suppressed_actions: $previous_followup_resume_suppressed_actions,
+          previous_followup_reused_actions: $previous_followup_reused_actions,
+          previous_followup_skipped_duplicate_actions: $previous_followup_skipped_duplicate_actions,
           previous_followup_manual_followup_needed: $previous_followup_manual_followup_needed,
           previous_followup_campaign_followup_recommended: $previous_followup_campaign_followup_recommended,
           previous_followup_queue_followup_effective: $previous_followup_queue_followup_effective,

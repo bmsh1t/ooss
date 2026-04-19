@@ -449,6 +449,28 @@ steps:
             reduce ($items[]? | .[]?) as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end);
           def target_in($arr; $value):
             (($arr | index($value)) != null);
+          def manual_resume_task($target):
+            {
+              id: "",
+              priority: "P1",
+              target: $target,
+              title: "Resume manual exploit path",
+              reason: "resume-context manual-first target prioritized for manual exploitation path",
+              procedure: "Manually validate authorization boundary, state-changing actions, business logic abuse, and chain pivots; capture a reproducible exploit path",
+              expected_outcome: "Confirm a reproducible manual exploit path or close the target with concrete negative evidence",
+              evidence: ["resume_context", "manual_first", "manual_exploitation"]
+            };
+          def high_confidence_resume_task($target):
+            {
+              id: "",
+              priority: "P1",
+              target: $target,
+              title: "Resume high-confidence exploit verification",
+              reason: "resume-context high-confidence target prioritized for manual exploitation path",
+              procedure: "Validate likely exploitability manually, reproduce authorization or business impact, and test escalation or pivot paths",
+              expected_outcome: "Confirm whether the high-confidence target is exploitable or downgrade it with concrete evidence",
+              evidence: ["resume_context", "high_confidence", "manual_exploitation"]
+            };
           .summary = ((.summary // {}) + {
             total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
             p1_tasks: (.summary.p1_tasks // 0),
@@ -471,16 +493,8 @@ steps:
               (
                 if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
                   [
-                    ($previous_followup_manual_targets + $previous_followup_high_confidence_targets)[]? | {
-                      id: "",
-                      priority: "P1",
-                      target: .,
-                      title: "Resume manual-first follow-up",
-                      reason: "resume-context manual-first target",
-                      procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
-                      expected_outcome: "Confirm whether the target can be exploited or chained further",
-                      evidence: ["resume_context", "manual_first"]
-                    }
+                    ($previous_followup_manual_targets[]? | manual_resume_task(.)),
+                    ($previous_followup_high_confidence_targets[]? | high_confidence_resume_task(.))
                   ] + (.tasks // [])
                 else
                   (.tasks // [])
@@ -575,6 +589,28 @@ steps:
           reduce ($items[]? | .[]?) as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end);
         def target_in($arr; $value):
           (($arr | index($value)) != null);
+        def manual_resume_task($target):
+          {
+            id: "",
+            priority: "P1",
+            target: $target,
+            title: "Resume manual exploit path",
+            reason: "resume-context manual-first target prioritized for manual exploitation path",
+            procedure: "Manually validate authorization boundary, state-changing actions, business logic abuse, and chain pivots; capture a reproducible exploit path",
+            expected_outcome: "Confirm a reproducible manual exploit path or close the target with concrete negative evidence",
+            evidence: ["resume_context", "manual_first", "manual_exploitation"]
+          };
+        def high_confidence_resume_task($target):
+          {
+            id: "",
+            priority: "P1",
+            target: $target,
+            title: "Resume high-confidence exploit verification",
+            reason: "resume-context high-confidence target prioritized for manual exploitation path",
+            procedure: "Validate likely exploitability manually, reproduce authorization or business impact, and test escalation or pivot paths",
+            expected_outcome: "Confirm whether the high-confidence target is exploitable or downgrade it with concrete evidence",
+            evidence: ["resume_context", "high_confidence", "manual_exploitation"]
+          };
         .summary = ((.summary // {}) + {
           total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
           p1_tasks: (.summary.p1_tasks // 0),
@@ -597,16 +633,8 @@ steps:
             (
               if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
                 [
-                  ($previous_followup_manual_targets + $previous_followup_high_confidence_targets)[]? | {
-                    id: "",
-                    priority: "P1",
-                    target: .,
-                    title: "Resume manual-first follow-up",
-                    reason: "resume-context manual-first target",
-                    procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
-                    expected_outcome: "Confirm whether the target can be exploited or chained further",
-                    evidence: ["resume_context", "manual_first"]
-                  }
+                  ($previous_followup_manual_targets[]? | manual_resume_task(.)),
+                  ($previous_followup_high_confidence_targets[]? | high_confidence_resume_task(.))
                 ] + (.tasks // [])
               else
                 (.tasks // [])

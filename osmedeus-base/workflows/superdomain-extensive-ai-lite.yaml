@@ -180,6 +180,62 @@ params:
   - name: followupDecisionOutput
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
 
+  # ===========================================================
+  # 上一轮 follow-up 回灌参数
+  # 这些参数由共享的 AI follow-up fragments 消费，即使 lite 没有 pre-scan，
+  # 也必须与 optimized / stable / hybrid 保持同一份契约，避免 queue/resume 链路断掉。
+  # ===========================================================
+  - name: previous_followup_targets
+    default: ""
+  - name: previous_followup_priority_targets
+    default: ""
+  - name: previous_followup_focus_areas
+    default: ""
+  - name: previous_followup_manual_first_targets
+    default: ""
+  - name: previous_followup_high_confidence_targets
+    default: ""
+  - name: previous_followup_reasoning
+    default: ""
+  - name: previous_followup_scan_profile
+    default: ""
+  - name: previous_followup_severity
+    default: ""
+  - name: previous_followup_priority_mode
+    default: ""
+  - name: previous_followup_confidence_level
+    default: ""
+  - name: previous_followup_next_phase
+    default: ""
+  - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_resume_suppressed_actions
+    default: ""
+  - name: previous_followup_reused_actions
+    default: ""
+  - name: previous_followup_skipped_duplicate_actions
+    default: ""
+  - name: previous_followup_manual_followup_needed
+    default: ""
+  - name: previous_followup_campaign_followup_recommended
+    default: ""
+  - name: previous_followup_queue_followup_effective
+    default: ""
+  - name: previous_followup_escalation_score
+    default: ""
+  - name: previous_followup_campaign_create_status
+    default: ""
+  - name: previous_followup_campaign_create_id
+    default: ""
+  - name: previous_followup_campaign_create_queued_runs
+    default: ""
+  - name: previous_followup_manual_first_targets_list
+    default: ""
+  - name: previous_followup_high_confidence_targets_list
+    default: ""
+  - name: previous_followup_combined_targets_list
+    default: ""
+
 # -----------------------------------------------------------------------------
 # MODULES SECTION
 # -----------------------------------------------------------------------------

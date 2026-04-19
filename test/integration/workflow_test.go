@@ -721,6 +721,60 @@ func TestSuperdomainAIWorkflowFollowupTogglesExposed(t *testing.T) {
 	}
 }
 
+func TestSuperdomainAIWorkflowPreviousFollowupParamsExposed(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+		"superdomain-extensive-ai-lite",
+	}
+
+	// 共享 fragments 会直接读取这些顶层参数。
+	// 这里显式守住 4 条 superdomain AI 流的一致契约，避免某条派生流漏透传。
+	requiredParams := []string{
+		"previous_followup_targets",
+		"previous_followup_priority_targets",
+		"previous_followup_focus_areas",
+		"previous_followup_manual_first_targets",
+		"previous_followup_high_confidence_targets",
+		"previous_followup_reasoning",
+		"previous_followup_scan_profile",
+		"previous_followup_severity",
+		"previous_followup_priority_mode",
+		"previous_followup_confidence_level",
+		"previous_followup_next_phase",
+		"previous_followup_reuse_sources",
+		"previous_followup_resume_suppressed_actions",
+		"previous_followup_reused_actions",
+		"previous_followup_skipped_duplicate_actions",
+		"previous_followup_manual_followup_needed",
+		"previous_followup_campaign_followup_recommended",
+		"previous_followup_queue_followup_effective",
+		"previous_followup_escalation_score",
+		"previous_followup_campaign_create_status",
+		"previous_followup_campaign_create_id",
+		"previous_followup_campaign_create_queued_runs",
+		"previous_followup_manual_first_targets_list",
+		"previous_followup_high_confidence_targets_list",
+		"previous_followup_combined_targets_list",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			for _, param := range requiredParams {
+				assertWorkflowHasParam(t, workflow, param, "")
+			}
+		})
+	}
+}
+
 func TestDomainExtensiveWorkflowExtendsOptimized(t *testing.T) {
 	root := getRealWorkflowsPath()
 	loader := parser.NewLoader(root)
@@ -2659,6 +2713,11 @@ func TestExecuteAICampaignHandoffModule(t *testing.T) {
     "manual_first_targets": ["https://seed.example.com/admin"],
     "high_confidence_targets": ["https://seed.example.com/upload", "https://seed.example.com/graphql"]
   },
+  "followup_summary": {
+    "resume_suppressed_actions": ["retest-queue"],
+    "reused_actions": ["campaign-create:camp-knowledge-9"],
+    "skipped_duplicate_actions": ["retest-queue", "campaign-create"]
+  },
   "seed_focus": {
     "priority_mode": "manual-first",
     "confidence_level": "high",
@@ -3309,6 +3368,164 @@ func TestExecuteAIOperatorQueuePrefersResumeManualFirstTargets(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "https://seed.example.com/admin", firstTask["target"])
 	assert.Equal(t, "P1", firstTask["priority"])
+
+	findTask := func(target string) map[string]interface{} {
+		t.Helper()
+		for _, item := range tasks {
+			entry, ok := item.(map[string]interface{})
+			require.True(t, ok)
+			if entry["target"] == target {
+				return entry
+			}
+		}
+		t.Fatalf("task target %s not found", target)
+		return nil
+	}
+
+	adminTask := findTask("https://seed.example.com/admin")
+	assert.Equal(t, "Resume manual exploit path", adminTask["title"])
+	assert.Equal(t, "resume-context manual-first target prioritized for manual exploitation path", adminTask["reason"])
+	assert.Equal(t, "Manually validate authorization boundary, state-changing actions, business logic abuse, and chain pivots; capture a reproducible exploit path", adminTask["procedure"])
+	assert.Equal(t, "Confirm a reproducible manual exploit path or close the target with concrete negative evidence", adminTask["expected_outcome"])
+	adminEvidence, ok := adminTask["evidence"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"resume_context", "manual_first", "manual_exploitation"}, adminEvidence)
+
+	uploadTask := findTask("https://seed.example.com/upload")
+	assert.Equal(t, "Resume high-confidence exploit verification", uploadTask["title"])
+	assert.Equal(t, "resume-context high-confidence target prioritized for manual exploitation path", uploadTask["reason"])
+	assert.Equal(t, "Validate likely exploitability manually, reproduce authorization or business impact, and test escalation or pivot paths", uploadTask["procedure"])
+	assert.Equal(t, "Confirm whether the high-confidence target is exploitable or downgrade it with concrete evidence", uploadTask["expected_outcome"])
+	uploadEvidence, ok := uploadTask["evidence"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"resume_context", "high_confidence", "manual_exploitation"}, uploadEvidence)
+}
+
+func TestExecuteAIOperatorQueueBiasesResumeManualFirstTaskTemplatesWhenQueueExists(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-operator-queue.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-generate-operator-queue" || workflow.Steps[i].Name == "persist-operator-queue-raw" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "operator-queue-resume-manual-template-existing"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "followup_decision_source": "followup-decision",
+  "scan_profile": "aggressive",
+  "severity": "critical,high",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "refined_targets": {
+    "priority_targets": ["https://seed.example.com/review"]
+  },
+  "seed_targets": {
+    "manual_first_targets": ["https://seed.example.com/admin"],
+    "high_confidence_targets": ["https://seed.example.com/upload"]
+  },
+  "followup_summary": {
+    "operator_tasks": 3,
+    "retest_queued_targets": 2
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, ".operator-queue-raw-"+targetSpace+".txt"), "```json\n"+`{
+  "summary": {"total_tasks": 3, "p1_tasks": 1, "p2_tasks": 2},
+  "focus_targets": ["https://seed.example.com/review"],
+  "tasks": [
+    {
+      "id": "op-1",
+      "priority": "P2",
+      "target": "https://seed.example.com/admin",
+      "title": "Generic validation",
+      "reason": "generic fallback",
+      "procedure": "Check manually",
+      "expected_outcome": "Unknown",
+      "evidence": ["ai_decision"]
+    },
+    {
+      "id": "op-2",
+      "priority": "P2",
+      "target": "https://seed.example.com/upload",
+      "title": "Generic validation",
+      "reason": "generic fallback",
+      "procedure": "Check manually",
+      "expected_outcome": "Unknown",
+      "evidence": ["ai_decision"]
+    },
+    {
+      "id": "op-3",
+      "priority": "P2",
+      "target": "https://seed.example.com/review",
+      "title": "Review endpoint manually",
+      "reason": "decision target",
+      "procedure": "Inspect manually",
+      "expected_outcome": "Find evidence",
+      "evidence": ["decision"]
+    }
+  ]
+}`+"\n```")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	queueData, err := os.ReadFile(filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var queue map[string]interface{}
+	require.NoError(t, json.Unmarshal(queueData, &queue))
+
+	tasks, ok := queue["tasks"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, tasks, 3)
+
+	findTask := func(target string) map[string]interface{} {
+		t.Helper()
+		for _, item := range tasks {
+			entry, ok := item.(map[string]interface{})
+			require.True(t, ok)
+			if entry["target"] == target {
+				return entry
+			}
+		}
+		t.Fatalf("task target %s not found", target)
+		return nil
+	}
+
+	adminTask := findTask("https://seed.example.com/admin")
+	assert.Equal(t, "Resume manual exploit path", adminTask["title"])
+	assert.Equal(t, "P1", adminTask["priority"])
+	assert.Equal(t, "resume-context manual-first target prioritized for manual exploitation path", adminTask["reason"])
+
+	uploadTask := findTask("https://seed.example.com/upload")
+	assert.Equal(t, "Resume high-confidence exploit verification", uploadTask["title"])
+	assert.Equal(t, "P1", uploadTask["priority"])
+	assert.Equal(t, "resume-context high-confidence target prioritized for manual exploitation path", uploadTask["reason"])
+
+	reviewTask := findTask("https://seed.example.com/review")
+	assert.Equal(t, "Review endpoint manually", reviewTask["title"])
+	assert.Equal(t, "decision target", reviewTask["reason"])
 }
 
 func TestExecuteAIOperatorQueuePrefersDecisionFollowupSemanticContext(t *testing.T) {
@@ -3815,6 +4032,85 @@ func TestExecuteAIRetestQueueModule(t *testing.T) {
 	assert.Contains(t, callLine, "-p retest_priority=critical")
 }
 
+func TestExecuteAIRetestQueueSkipsDuplicateQueueWhenResumeQueueEffective(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-retest-queue.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	callsPath := installStubOsmedeus(t)
+	targetSpace := "retest-queue-resume-gated"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 2},
+  "targets": [
+    {"target": "https://resume.example.com/admin"}
+  ],
+  "automation_queue": [
+    {"target": "https://resume.example.com/api"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "scan_profile": "aggressive",
+  "severity": "critical,high",
+  "followup_decision_source": "resume",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "next_phase": "manual-exploitation",
+  "reuse_sources": ["resume_context", "operator-queue"],
+  "queue_followup_effective": true,
+  "seed_targets": {
+    "manual_first_targets": ["https://resume.example.com/admin"],
+    "high_confidence_targets": ["https://resume.example.com/api"],
+    "retest_targets": ["https://resume.example.com/admin"],
+    "rescan_targets": ["https://resume.example.com/api"]
+  },
+  "refined_targets": {
+    "priority_targets": ["https://resume.example.com/admin"]
+  },
+  "followup_summary": {
+    "retest_queued_targets": 2
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":             "https://app.example.com",
+		"space_name":         targetSpace,
+		"enableRetestQueue":  "true",
+		"retestFlow":         "web-analysis",
+		"knowledgeWorkspace": "shared-kb",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	summaryData, err := os.ReadFile(filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var summary map[string]interface{}
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "skipped", summary["status"])
+	assert.Equal(t, "resume_queue_already_effective", summary["reason"])
+	assert.Equal(t, "retest-plan-json", summary["target_source"])
+	assert.Equal(t, "resume-context", summary["previous_followup_source_kind"])
+	assert.Equal(t, true, summary["previous_queue_followup_effective"])
+	assert.Equal(t, float64(0), summary["queued_targets"])
+	assert.Equal(t, float64(2), summary["previous_followup_targets"])
+
+	_, err = os.Stat(callsPath)
+	assert.True(t, os.IsNotExist(err), "worker queue should not be called when resume queue is already effective")
+}
+
 func TestExecuteAIRetestQueueFallsBackToRetestPlanJSONBeforeFollowupSeed(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -4082,6 +4378,9 @@ func TestExecuteAIRetestQueueFallsBackToQueuedPreviousFollowupParams(t *testing.
 		"previous_followup_campaign_create_status":        "created",
 		"previous_followup_campaign_create_id":            "camp-retest-queued-9",
 		"previous_followup_campaign_create_queued_runs":   "2",
+		"previous_followup_resume_suppressed_actions":     "retest-queue",
+		"previous_followup_reused_actions":                "campaign-create:camp-retest-queued-9",
+		"previous_followup_skipped_duplicate_actions":     "retest-queue,campaign-create",
 	}, cfg)
 
 	require.NoError(t, err)
@@ -4165,6 +4464,9 @@ func TestExecuteAIRetestQueueFallsBackToQueuedPreviousFollowupParams(t *testing.
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_status=created")
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_id=camp-retest-queued-9")
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_queued_runs=2")
+	assert.Contains(t, callLine, "-p previous_followup_resume_suppressed_actions=retest-queue")
+	assert.Contains(t, callLine, "-p previous_followup_reused_actions=campaign-create:camp-retest-queued-9")
+	assert.Contains(t, callLine, "-p previous_followup_skipped_duplicate_actions=retest-queue,campaign-create")
 }
 
 func TestExecuteAIRetestPlanningUsesFallbackSemanticContext(t *testing.T) {
@@ -4956,6 +5258,9 @@ func TestExecuteAIIntelligentAnalysisModule(t *testing.T) {
   },
   "execution_feedback": {"next_phase":"campaign-followup"},
   "followup_summary": {
+    "resume_suppressed_actions": ["retest-queue"],
+    "reused_actions": ["campaign-create:camp-intel-42"],
+    "skipped_duplicate_actions": ["retest-queue", "campaign-create"],
     "campaign_create_status": "created",
     "campaign_create_id": "camp-intel-42",
     "campaign_create_queued_runs": 3
@@ -5011,6 +5316,15 @@ func TestExecuteAIIntelligentAnalysisModule(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, reuseSources, "campaign-create")
 	assert.Contains(t, reuseSources, "retest-queue")
+	resumeSuppressed, ok := decisionInputs["previous_followup_resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, resumeSuppressed)
+	reusedActions, ok := decisionInputs["previous_followup_reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-intel-42"}, reusedActions)
+	skippedDuplicates, ok := decisionInputs["previous_followup_skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, skippedDuplicates)
 
 	statusData, err := os.ReadFile(filepath.Join(aiDir, "ai-execution-status.json"))
 	require.NoError(t, err)
@@ -5563,6 +5877,9 @@ func TestExecuteAIPreScanDecisionFallbackToPreviousFollowup(t *testing.T) {
     "next_phase": "manual-exploitation"
   },
   "followup_summary": {
+    "resume_suppressed_actions": ["retest-queue"],
+    "reused_actions": ["campaign-create:camp-pre-55"],
+    "skipped_duplicate_actions": ["retest-queue", "campaign-create"],
     "campaign_create_status": "created",
     "campaign_create_id": "camp-pre-55",
     "campaign_create_queued_runs": 4
@@ -5618,6 +5935,15 @@ func TestExecuteAIPreScanDecisionFallbackToPreviousFollowup(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, preReuseSources, "campaign-create")
 	assert.Contains(t, preReuseSources, "operator-queue")
+	preResumeSuppressed, ok := decisionInputs["previous_followup_resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, preResumeSuppressed)
+	preReusedActions, ok := decisionInputs["previous_followup_reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-pre-55"}, preReusedActions)
+	preSkippedDuplicates, ok := decisionInputs["previous_followup_skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, preSkippedDuplicates)
 }
 
 func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *testing.T) {
@@ -5674,7 +6000,10 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
     "rescan_high": 0,
     "campaign_ready": true,
     "campaign_targets": 3,
-    "retest_queued_targets": 2
+    "retest_queued_targets": 2,
+    "resume_suppressed_actions": ["retest-queue"],
+    "reused_actions": ["campaign-create:camp-resume-acp-77"],
+    "skipped_duplicate_actions": ["retest-queue", "campaign-create"]
   }
 }`)
 	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
@@ -5739,6 +6068,15 @@ func TestExecuteAIPreScanDecisionPrefersResumeContextOverFollowupDecision(t *tes
 	assert.Equal(t, true, summary["manual_followup_needed"])
 	assert.Equal(t, true, summary["campaign_followup_recommended"])
 	assert.Equal(t, true, summary["queue_followup_effective"])
+	summaryResumeSuppressed, ok := summary["resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, summaryResumeSuppressed)
+	summaryReusedActions, ok := summary["reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-resume-acp-77"}, summaryReusedActions)
+	summarySkippedDuplicates, ok := summary["skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, summarySkippedDuplicates)
 
 	decisionInputsData, err := os.ReadFile(filepath.Join(aiDir, "pre-ai-decision-"+targetSpace+".json"))
 	require.NoError(t, err)
@@ -6086,6 +6424,15 @@ func TestExecuteAIPreScanDecisionACPPrefersResumeContextOverFollowupDecision(t *
 	require.True(t, ok)
 	assert.Contains(t, reuseSources, "resume-context")
 	assert.Contains(t, reuseSources, "campaign-create")
+	acpResumeSuppressed, ok := decisionInputs["previous_followup_resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, acpResumeSuppressed)
+	acpReusedActions, ok := decisionInputs["previous_followup_reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-resume-acp-77"}, acpReusedActions)
+	acpSkippedDuplicates, ok := decisionInputs["previous_followup_skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, acpSkippedDuplicates)
 }
 
 func TestExecuteAIPreScanDecisionFallbackToQueuedPreviousFollowupParams(t *testing.T) {
@@ -6381,6 +6728,9 @@ func TestExecuteAIApplyDecisionFallbackToPreviousFollowupParams(t *testing.T) {
 		"previous_followup_campaign_create_status":        "created",
 		"previous_followup_campaign_create_id":            "camp-apply-queued-9",
 		"previous_followup_campaign_create_queued_runs":   "2",
+		"previous_followup_resume_suppressed_actions":     "retest-queue",
+		"previous_followup_reused_actions":                "campaign-create:camp-apply-queued-9",
+		"previous_followup_skipped_duplicate_actions":     "retest-queue,campaign-create",
 		"previous_followup_manual_first_targets_list":     "https://queued.example.com/admin,https://queued.example.com/graphql",
 		"previous_followup_high_confidence_targets_list":  "https://queued.example.com/upload",
 		"previous_followup_combined_targets_list":         "https://queued.example.com/admin,https://queued.example.com/graphql,https://queued.example.com/upload,https://queued.example.com/review",
@@ -6419,6 +6769,15 @@ func TestExecuteAIApplyDecisionFallbackToPreviousFollowupParams(t *testing.T) {
 	assert.Equal(t, "aggressive", decisionInputs["followup_scan_profile"])
 	assert.Equal(t, "critical,high,medium", decisionInputs["followup_severity"])
 	assert.Equal(t, "manual-exploitation", decisionInputs["followup_next_phase"])
+	applyResumeSuppressed, ok := decisionInputs["followup_resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, applyResumeSuppressed)
+	applyReusedActions, ok := decisionInputs["followup_reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-apply-queued-9"}, applyReusedActions)
+	applySkippedDuplicates, ok := decisionInputs["followup_skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, applySkippedDuplicates)
 
 	targets, ok := applied["targets"].(map[string]interface{})
 	require.True(t, ok)
@@ -6854,6 +7213,122 @@ func TestExecuteAIPostFollowupCoordinationWritesResumeAutopilotArtifacts(t *test
 	assert.Contains(t, operatorSummaryLines, "## Target: https://app.example.com")
 	assert.Contains(t, operatorSummaryLines, "- Next phase: manual-exploitation")
 	assert.Contains(t, operatorSummaryLines, "- Campaign id: camp-post-123")
+}
+
+func TestExecuteAIPostFollowupCoordinationSummarizesResumeGatedReuseAndDuplicateActions(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-post-followup-coordination.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-post-followup-resume-gated-feedback"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "ai-decision-"+targetSpace+".json"), `{
+  "scan": {
+    "profile": "aggressive",
+    "severity": "critical,high"
+  },
+  "targets": {
+    "focus_areas": ["authentication"],
+    "rescan_targets": ["https://seed.example.com/graphql"]
+  },
+  "reasoning": "resume gated followup"
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 2},
+  "targets": [{"target": "https://retest.example.com/admin"}],
+  "automation_queue": [{"target": "https://queue.example.com/graphql"}]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "summary": {"total_tasks": 1},
+  "focus_targets": ["https://operator.example.com/admin"],
+  "tasks": [
+    {"target": "https://operator.example.com/admin", "priority": "P1", "title": "Resume manual exploit path"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"), `{
+  "handoff_ready": true,
+  "counts": {"campaign_targets": 2}
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "campaign-create-"+targetSpace+".json"), `{
+  "status": "created",
+  "reason": "resume_context_already_created",
+  "campaign_id": "camp-resume-42",
+  "queued_runs": 5,
+  "previous_followup_source_kind": "resume-context"
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"), `{
+  "status": "skipped",
+  "reason": "resume_queue_already_effective",
+  "queued_targets": 0,
+  "previous_followup_source_kind": "resume-context"
+}`)
+	writeTestFile(t, filepath.Join(outputDir, "vulnscan", "nuclei-rescan-"+targetSpace+".jsonl"), `{"info":{"severity":"critical"},"matched-at":"https://critical.example.com/admin"}`+"\n")
+	writeTestFile(t, filepath.Join(aiDir, "semantic-priority-targets-decision-followup-"+targetSpace+".txt"), "https://semantic.example.com/login\n")
+	writeTestFile(t, filepath.Join(aiDir, "confirmed-urls-"+targetSpace+".txt"), "https://confirmed.example.com/login\n")
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-targets-"+targetSpace+".txt"), "https://operator.example.com/admin\n")
+	writeTestFile(t, filepath.Join(aiDir, "retest-targets-"+targetSpace+".txt"), "https://retest.example.com/admin\n")
+	writeTestFile(t, filepath.Join(aiDir, "campaign-targets-"+targetSpace+".txt"), "https://campaign.example.com/api\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	followupData, err := os.ReadFile(filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var followup map[string]interface{}
+	require.NoError(t, json.Unmarshal(followupData, &followup))
+
+	followupSummary, ok := followup["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	resumeSuppressed, ok := followupSummary["resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, resumeSuppressed)
+	reusedActions, ok := followupSummary["reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-resume-42"}, reusedActions)
+	skippedDuplicates, ok := followupSummary["skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.ElementsMatch(t, []interface{}{"retest-queue", "campaign-create"}, skippedDuplicates)
+
+	nextActions, ok := followup["next_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Contains(t, nextActions, "Resume-suppressed actions: retest-queue")
+	assert.Contains(t, nextActions, "Reused actions: campaign-create:camp-resume-42")
+	assert.Contains(t, nextActions, "Skipped duplicate actions: retest-queue, campaign-create")
+
+	resumeContextData, err := os.ReadFile(filepath.Join(aiDir, "resume-context-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var resumeContext map[string]interface{}
+	require.NoError(t, json.Unmarshal(resumeContextData, &resumeContext))
+	resumeFollowupSummary, ok := resumeContext["followup_summary"].(map[string]interface{})
+	require.True(t, ok)
+	resumeReused, ok := resumeFollowupSummary["reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-resume-42"}, resumeReused)
+
+	operatorSummaryData, err := os.ReadFile(filepath.Join(aiDir, "operator-summary-"+targetSpace+".md"))
+	require.NoError(t, err)
+	operatorSummary := string(operatorSummaryData)
+	assert.Contains(t, operatorSummary, "- Resume-suppressed actions: retest-queue")
+	assert.Contains(t, operatorSummary, "- Reused actions: campaign-create:camp-resume-42")
+	assert.Contains(t, operatorSummary, "- Skipped duplicate actions: retest-queue, campaign-create")
 }
 
 func TestExecuteAIPostFollowupCoordinationCountsRetestTargetsWithoutSummary(t *testing.T) {
@@ -7355,6 +7830,9 @@ func TestExecuteAISemanticSearchConsumesQueuedPreviousFollowupParams(t *testing.
 		"previous_followup_campaign_create_status":        "created",
 		"previous_followup_campaign_create_id":            "camp-semantic-queued-12",
 		"previous_followup_campaign_create_queued_runs":   "3",
+		"previous_followup_resume_suppressed_actions":     "retest-queue",
+		"previous_followup_reused_actions":                "campaign-create:camp-semantic-queued-12",
+		"previous_followup_skipped_duplicate_actions":     "retest-queue,campaign-create",
 	}, cfg)
 
 	require.NoError(t, err)
@@ -7375,6 +7853,15 @@ func TestExecuteAISemanticSearchConsumesQueuedPreviousFollowupParams(t *testing.
 	assert.Equal(t, "queued-manual-followup", payload["previous_followup_reasoning"])
 	assert.Equal(t, "manual-exploitation", payload["previous_followup_next_phase"])
 	assert.Equal(t, "created", payload["previous_followup_campaign_create_status"])
+	semanticResumeSuppressed, ok := payload["previous_followup_resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, semanticResumeSuppressed)
+	semanticReusedActions, ok := payload["previous_followup_reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-semantic-queued-12"}, semanticReusedActions)
+	semanticSkippedDuplicates, ok := payload["previous_followup_skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, semanticSkippedDuplicates)
 
 	candidateTargets, ok := payload["candidate_targets"].([]interface{})
 	require.True(t, ok)
@@ -9561,6 +10048,11 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
   "execution_feedback": {
     "next_phase": "manual-exploitation"
   },
+  "followup_summary": {
+    "resume_suppressed_actions": ["retest-queue"],
+    "reused_actions": ["campaign-create:camp-knowledge-9"],
+    "skipped_duplicate_actions": ["retest-queue", "campaign-create"]
+  },
   "next_actions": [
     "Revalidate admin boundary",
     "Fold retest output back into knowledge"
@@ -9605,6 +10097,15 @@ func TestExecuteAIKnowledgeAutolearnBuildsFollowupContextArtifact(t *testing.T) 
 	assert.Equal(t, float64(19), followupSeed["escalation_score"])
 	assert.Equal(t, float64(1), followupSeed["manual_first_targets"])
 	assert.Equal(t, float64(2), followupSeed["high_confidence_targets"])
+	resumeSuppressed, ok := followupSeed["resume_suppressed_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue"}, resumeSuppressed)
+	reusedActions, ok := followupSeed["reused_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"campaign-create:camp-knowledge-9"}, reusedActions)
+	skippedDuplicates, ok := followupSeed["skipped_duplicate_actions"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{"retest-queue", "campaign-create"}, skippedDuplicates)
 
 	operationalCounts, ok := learnContext["operational_counts"].(map[string]interface{})
 	require.True(t, ok)

@@ -20,6 +20,8 @@ params:
     default: "{{Output}}/ai-analysis/retest-plan-{{TargetSpace}}.json"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previous_followup_targets
     default: ""
   - name: previous_followup_priority_targets
@@ -49,6 +51,12 @@ params:
   - name: previous_followup_next_phase
     default: ""
   - name: previous_followup_reuse_sources
+    default: ""
+  - name: previous_followup_resume_suppressed_actions
+    default: ""
+  - name: previous_followup_reused_actions
+    default: ""
+  - name: previous_followup_skipped_duplicate_actions
     default: ""
   - name: previous_followup_manual_followup_needed
     default: ""
@@ -132,6 +140,7 @@ steps:
       ACTIVE_TARGET_FILE="{{retestTargetsFile}}"
       TARGET_SOURCE="retest-plan"
       PREVIOUS_FOLLOWUP_TARGETS=0
+      PREVIOUS_FOLLOWUP_SOURCE_KIND="none"
       PREVIOUS_PRIORITY_TARGETS=0
       PREVIOUS_FOCUS_AREAS=0
       PREVIOUS_MANUAL_FIRST_TARGETS=0
@@ -157,8 +166,44 @@ steps:
       PREVIOUS_CAMPAIGN_CREATE_STATUS=""
       PREVIOUS_CAMPAIGN_CREATE_ID=""
       PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=0
+      PREVIOUS_RESUME_SUPPRESSED_JSON='[]'
+      PREVIOUS_REUSED_ACTIONS_JSON='[]'
+      PREVIOUS_SKIPPED_DUPLICATES_JSON='[]'
 
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREVIOUS_FOLLOWUP_SOURCE_KIND="resume-context"
+        PREVIOUS_PRIORITY_TARGETS=$(jq -r '[((.refined_targets.priority_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_FOCUS_AREAS=$(jq -r '[((.refined_targets.focus_areas // []) + (.seed_targets.focus_areas // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_MANUAL_FIRST_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS=$(jq -r '[((.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_REASONING=$(jq -r '.reasoning // .followup_summary.reasoning // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_SCAN_PROFILE=$(jq -r '.scan_profile // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_SEVERITY=$(jq -r '.severity // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_MANUAL_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_MANUAL_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_HIGH_CONFIDENCE_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_COMBINED_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_REUSE_SOURCES=$(printf '%s\n' "$PREVIOUS_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_MANUAL_FOLLOWUP_NEEDED=$(jq -r 'if .manual_followup_needed != null then .manual_followup_needed elif .followup_summary.manual_followup_needed != null then .followup_summary.manual_followup_needed else ((.followup_summary.operator_tasks // 0) > 0 or (.followup_summary.rescan_critical // 0) > 0 or (.followup_summary.rescan_high // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r 'if .campaign_followup_recommended != null then .campaign_followup_recommended elif .followup_summary.campaign_followup_recommended != null then .followup_summary.campaign_followup_recommended else ((.followup_summary.campaign_ready // false) == true and (.followup_summary.campaign_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREVIOUS_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // .followup_summary.campaign_create_status // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_RESUME_SUPPRESSED_JSON=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_REUSED_ACTIONS_JSON=$(jq -c '.followup_summary.reused_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_SKIPPED_DUPLICATES_JSON=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREVIOUS_FOLLOWUP_SOURCE_KIND="decision-file"
         PREVIOUS_PRIORITY_TARGETS=$(jq -r '[((.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREVIOUS_FOCUS_AREAS=$(jq -r '[((.seed_targets.focus_areas // .refined_targets.focus_areas // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREVIOUS_MANUAL_FIRST_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
@@ -185,6 +230,9 @@ steps:
         PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.followup_summary.campaign_create_status // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.followup_summary.campaign_create_id // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.followup_summary.campaign_create_queued_runs // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_RESUME_SUPPRESSED_JSON=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_REUSED_ACTIONS_JSON=$(jq -c '.followup_summary.reused_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_SKIPPED_DUPLICATES_JSON=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
       else
         PREV_PARAM_MANUAL_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_manual_first_targets_list}}")
         PREV_PARAM_HIGH_CONFIDENCE_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_high_confidence_targets_list}}")
@@ -213,6 +261,9 @@ steps:
         PREV_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
         PREV_PARAM_NEXT_PHASE="{{previous_followup_next_phase}}"
         PREV_PARAM_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
+        PREV_PARAM_RESUME_SUPPRESSED_JSON=$(csv_or_json_to_array "{{previous_followup_resume_suppressed_actions}}")
+        PREV_PARAM_REUSED_ACTIONS_JSON=$(csv_or_json_to_array "{{previous_followup_reused_actions}}")
+        PREV_PARAM_SKIPPED_DUPLICATES_JSON=$(csv_or_json_to_array "{{previous_followup_skipped_duplicate_actions}}")
         PREV_PARAM_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "{{previous_followup_manual_followup_needed}}")
         PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "{{previous_followup_campaign_followup_recommended}}")
         PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "{{previous_followup_queue_followup_effective}}")
@@ -242,6 +293,7 @@ steps:
           || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_STATUS" ] \
           || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_ID" ] \
           || [ "$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
+          PREVIOUS_FOLLOWUP_SOURCE_KIND="queued-params"
           PREVIOUS_PRIORITY_TARGETS="$PREV_PARAM_PRIORITY_COUNT"
           PREVIOUS_FOCUS_AREAS="$PREV_PARAM_FOCUS_COUNT"
           PREVIOUS_MANUAL_FIRST_TARGETS="$PREV_PARAM_MANUAL_COUNT"
@@ -270,6 +322,9 @@ steps:
           PREVIOUS_COMBINED_TARGETS_LIST=$(printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
           PREVIOUS_REUSE_SOURCES_JSON="$PREV_PARAM_REUSE_SOURCES_JSON"
           PREVIOUS_REUSE_SOURCES=$(printf '%s\n' "$PREVIOUS_REUSE_SOURCES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+          PREVIOUS_RESUME_SUPPRESSED_JSON="$PREV_PARAM_RESUME_SUPPRESSED_JSON"
+          PREVIOUS_REUSED_ACTIONS_JSON="$PREV_PARAM_REUSED_ACTIONS_JSON"
+          PREVIOUS_SKIPPED_DUPLICATES_JSON="$PREV_PARAM_SKIPPED_DUPLICATES_JSON"
           PREVIOUS_MANUAL_FOLLOWUP_NEEDED="$PREV_PARAM_MANUAL_FOLLOWUP_NEEDED"
           PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED="$PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED"
           PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE="$PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE"
@@ -316,12 +371,78 @@ steps:
       fi
 
       if [ ! -f "$ACTIVE_TARGET_FILE" ] || [ ! -s "$ACTIVE_TARGET_FILE" ]; then
+        if [ "$PREVIOUS_FOLLOWUP_SOURCE_KIND" = "resume-context" ] && [ "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" = "true" ]; then
+          jq -n \
+            --arg workflow "{{retestFlow}}" \
+            --arg kind "{{retestWorkflowKind}}" \
+            --arg priority "{{retestPriority}}" \
+            --arg target_file "$ACTIVE_TARGET_FILE" \
+            --arg target_source "$TARGET_SOURCE" \
+            --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
+            --arg previous_reasoning "$PREVIOUS_REASONING" \
+            --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+            --arg previous_severity "$PREVIOUS_SEVERITY" \
+            --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+            --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+            --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+            --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+            --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+            --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+            --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+            --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+            --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+            --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+            --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+            --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+            --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+            --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+            --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+            --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+            --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+            --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
+            --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
+            '{
+              status: "skipped",
+              reason: "resume_queue_already_effective",
+              workflow: $workflow,
+              workflow_kind: $kind,
+              priority: $priority,
+              queued_targets: 0,
+              target_file: $target_file,
+              target_source: $target_source,
+              previous_followup_source_kind: $previous_followup_source_kind,
+              previous_followup_targets: $previous_followup_targets,
+              previous_priority_targets: $previous_priority_targets,
+              previous_focus_areas: $previous_focus_areas,
+              previous_manual_first_targets: $previous_manual_first_targets,
+              previous_high_confidence_targets: $previous_high_confidence_targets,
+              previous_manual_first_targets_list: $previous_manual_first_targets_list,
+              previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+              previous_combined_targets_list: $previous_combined_targets_list,
+              previous_reasoning: $previous_reasoning,
+              previous_scan_profile: $previous_scan_profile,
+              previous_severity: $previous_severity,
+              previous_priority_mode: $previous_priority_mode,
+              previous_confidence_level: $previous_confidence_level,
+              previous_next_phase: $previous_next_phase,
+              previous_reuse_sources: $previous_reuse_sources,
+              previous_manual_followup_needed: $previous_manual_followup_needed,
+              previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+              previous_queue_followup_effective: $previous_queue_followup_effective,
+              previous_escalation_score: $previous_escalation_score,
+              previous_campaign_create_status: $previous_campaign_create_status,
+              previous_campaign_create_id: $previous_campaign_create_id,
+              previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
+            }' > "{{retestQueueSummary}}"
+          exit 0
+        fi
         jq -n \
           --arg workflow "{{retestFlow}}" \
           --arg kind "{{retestWorkflowKind}}" \
           --arg priority "{{retestPriority}}" \
           --arg target_file "$ACTIVE_TARGET_FILE" \
           --arg target_source "$TARGET_SOURCE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --arg previous_reasoning "$PREVIOUS_REASONING" \
           --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
           --arg previous_severity "$PREVIOUS_SEVERITY" \
@@ -353,6 +474,7 @@ steps:
             queued_targets: 0,
             target_file: $target_file,
             target_source: $target_source,
+            previous_followup_source_kind: $previous_followup_source_kind,
             previous_followup_targets: $previous_followup_targets,
             previous_priority_targets: $previous_priority_targets,
             previous_focus_areas: $previous_focus_areas,
@@ -390,6 +512,7 @@ steps:
           --arg kind "{{retestWorkflowKind}}" \
           --arg target_file "$ACTIVE_TARGET_FILE" \
           --arg target_source "$TARGET_SOURCE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --arg previous_reasoning "$PREVIOUS_REASONING" \
           --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
           --arg previous_severity "$PREVIOUS_SEVERITY" \
@@ -420,6 +543,7 @@ steps:
             queued_targets: 0,
             target_file: $target_file,
             target_source: $target_source,
+            previous_followup_source_kind: $previous_followup_source_kind,
             previous_followup_targets: $previous_followup_targets,
             previous_priority_targets: $previous_priority_targets,
             previous_focus_areas: $previous_focus_areas,
@@ -453,6 +577,71 @@ steps:
       fi
 
       TARGET_COUNT=$(count_lines "$ACTIVE_TARGET_FILE")
+      if [ "$PREVIOUS_FOLLOWUP_SOURCE_KIND" = "resume-context" ] && [ "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" = "true" ]; then
+        jq -n \
+          --arg workflow "{{retestFlow}}" \
+          --arg kind "{{retestWorkflowKind}}" \
+          --arg priority "{{retestPriority}}" \
+          --arg target_file "$ACTIVE_TARGET_FILE" \
+          --arg target_source "$TARGET_SOURCE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
+          --arg previous_reasoning "$PREVIOUS_REASONING" \
+          --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
+          --arg previous_severity "$PREVIOUS_SEVERITY" \
+          --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
+          --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
+          --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
+          --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+          --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --argjson previous_priority_targets "$PREVIOUS_PRIORITY_TARGETS" \
+          --argjson previous_focus_areas "$PREVIOUS_FOCUS_AREAS" \
+          --argjson previous_manual_first_targets "$PREVIOUS_MANUAL_FIRST_TARGETS" \
+          --argjson previous_high_confidence_targets "$PREVIOUS_HIGH_CONFIDENCE_TARGETS" \
+          --argjson previous_manual_first_targets_list "$PREVIOUS_MANUAL_TARGETS_JSON" \
+          --argjson previous_high_confidence_targets_list "$PREVIOUS_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_combined_targets_list "$PREVIOUS_COMBINED_TARGETS_JSON" \
+          --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
+          --argjson previous_manual_followup_needed "$PREVIOUS_MANUAL_FOLLOWUP_NEEDED" \
+          --argjson previous_campaign_followup_recommended "$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
+          --argjson previous_queue_followup_effective "$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE" \
+          --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+          --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
+          '{
+            status: "skipped",
+            reason: "resume_queue_already_effective",
+            workflow: $workflow,
+            workflow_kind: $kind,
+            priority: $priority,
+            queued_targets: 0,
+            target_file: $target_file,
+            target_source: $target_source,
+            previous_followup_source_kind: $previous_followup_source_kind,
+            previous_followup_targets: $previous_followup_targets,
+            previous_priority_targets: $previous_priority_targets,
+            previous_focus_areas: $previous_focus_areas,
+            previous_manual_first_targets: $previous_manual_first_targets,
+            previous_high_confidence_targets: $previous_high_confidence_targets,
+            previous_manual_first_targets_list: $previous_manual_first_targets_list,
+            previous_high_confidence_targets_list: $previous_high_confidence_targets_list,
+            previous_combined_targets_list: $previous_combined_targets_list,
+            previous_reasoning: $previous_reasoning,
+            previous_scan_profile: $previous_scan_profile,
+            previous_severity: $previous_severity,
+            previous_priority_mode: $previous_priority_mode,
+            previous_confidence_level: $previous_confidence_level,
+            previous_next_phase: $previous_next_phase,
+            previous_reuse_sources: $previous_reuse_sources,
+            previous_manual_followup_needed: $previous_manual_followup_needed,
+            previous_campaign_followup_recommended: $previous_campaign_followup_recommended,
+            previous_queue_followup_effective: $previous_queue_followup_effective,
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
+          }' > "{{retestQueueSummary}}"
+        exit 0
+      fi
       {
         echo "[Retest Queue] Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "[Retest Queue] Binary: $OSM_BIN"
@@ -537,6 +726,18 @@ steps:
         if [ -n "$PREVIOUS_REUSE_SOURCES" ]; then
           set -- "$@" -p "previous_followup_reuse_sources=$PREVIOUS_REUSE_SOURCES"
         fi
+        PREVIOUS_RESUME_SUPPRESSED=$(printf '%s\n' "$PREVIOUS_RESUME_SUPPRESSED_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_REUSED_ACTIONS=$(printf '%s\n' "$PREVIOUS_REUSED_ACTIONS_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        PREVIOUS_SKIPPED_DUPLICATES=$(printf '%s\n' "$PREVIOUS_SKIPPED_DUPLICATES_JSON" | jq -r 'join(",")' 2>/dev/null || echo "")
+        if [ -n "$PREVIOUS_RESUME_SUPPRESSED" ]; then
+          set -- "$@" -p "previous_followup_resume_suppressed_actions=$PREVIOUS_RESUME_SUPPRESSED"
+        fi
+        if [ -n "$PREVIOUS_REUSED_ACTIONS" ]; then
+          set -- "$@" -p "previous_followup_reused_actions=$PREVIOUS_REUSED_ACTIONS"
+        fi
+        if [ -n "$PREVIOUS_SKIPPED_DUPLICATES" ]; then
+          set -- "$@" -p "previous_followup_skipped_duplicate_actions=$PREVIOUS_SKIPPED_DUPLICATES"
+        fi
         set -- "$@" -p "previous_followup_manual_followup_needed=$PREVIOUS_MANUAL_FOLLOWUP_NEEDED"
         set -- "$@" -p "previous_followup_campaign_followup_recommended=$PREVIOUS_CAMPAIGN_FOLLOWUP_RECOMMENDED"
         set -- "$@" -p "previous_followup_queue_followup_effective=$PREVIOUS_QUEUE_FOLLOWUP_EFFECTIVE"
@@ -563,6 +764,7 @@ steps:
           --arg priority "{{retestPriority}}" \
           --arg target_file "$ACTIVE_TARGET_FILE" \
           --arg target_source "$TARGET_SOURCE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --arg previous_reasoning "$PREVIOUS_REASONING" \
           --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
           --arg previous_severity "$PREVIOUS_SEVERITY" \
@@ -596,6 +798,7 @@ steps:
             target_source: $target_source,
             log_file: $log_file,
             queued_targets: $queued_targets,
+            previous_followup_source_kind: $previous_followup_source_kind,
             previous_followup_targets: $previous_followup_targets,
             previous_priority_targets: $previous_priority_targets,
             previous_focus_areas: $previous_focus_areas,
@@ -625,6 +828,7 @@ steps:
           --arg kind "{{retestWorkflowKind}}" \
           --arg target_file "$ACTIVE_TARGET_FILE" \
           --arg target_source "$TARGET_SOURCE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --arg previous_reasoning "$PREVIOUS_REASONING" \
           --arg previous_scan_profile "$PREVIOUS_SCAN_PROFILE" \
           --arg previous_severity "$PREVIOUS_SEVERITY" \
@@ -657,6 +861,7 @@ steps:
             target_source: $target_source,
             log_file: $log_file,
             queued_targets: $queued_targets,
+            previous_followup_source_kind: $previous_followup_source_kind,
             previous_followup_targets: $previous_followup_targets,
             previous_priority_targets: $previous_priority_targets,
             previous_focus_areas: $previous_focus_areas,

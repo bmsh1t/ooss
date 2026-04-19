@@ -121,6 +121,9 @@ steps:
       FOLLOWUP_HIGH_CONFIDENCE=0
       FOLLOWUP_REUSE_SOURCES='[]'
       FOLLOWUP_NEXT_ACTIONS='[]'
+      FOLLOWUP_RESUME_SUPPRESSED='[]'
+      FOLLOWUP_REUSED_ACTIONS='[]'
+      FOLLOWUP_SKIPPED_DUPLICATES='[]'
       FOLLOWUP_MANUAL_NEEDED=false
       FOLLOWUP_CAMPAIGN_RECOMMENDED=false
       FOLLOWUP_QUEUE_EFFECTIVE=false
@@ -157,6 +160,9 @@ steps:
         FOLLOWUP_HIGH_CONFIDENCE=$(jq -r '[.seed_targets.high_confidence_targets[]?] | length' "{{followupDecisionFile}}" 2>/dev/null || echo 0)
         FOLLOWUP_REUSE_SOURCES=$(jq -c '.seed_focus.reuse_sources // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
         FOLLOWUP_NEXT_ACTIONS=$(jq -c '.next_actions // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_RESUME_SUPPRESSED=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_REUSED_ACTIONS=$(jq -c '.followup_summary.reused_actions // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
+        FOLLOWUP_SKIPPED_DUPLICATES=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{followupDecisionFile}}" 2>/dev/null || echo '[]')
         FOLLOWUP_MANUAL_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
         FOLLOWUP_CAMPAIGN_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
         FOLLOWUP_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{followupDecisionFile}}" 2>/dev/null || echo false)
@@ -221,6 +227,9 @@ steps:
         --argjson retest_queued_targets "$RETEST_QUEUED" \
         --argjson reuse_sources "$FOLLOWUP_REUSE_SOURCES" \
         --argjson next_actions "$FOLLOWUP_NEXT_ACTIONS" \
+        --argjson resume_suppressed_actions "$FOLLOWUP_RESUME_SUPPRESSED" \
+        --argjson reused_actions "$FOLLOWUP_REUSED_ACTIONS" \
+        --argjson skipped_duplicate_actions "$FOLLOWUP_SKIPPED_DUPLICATES" \
         --argjson manual_followup_needed "$FOLLOWUP_MANUAL_NEEDED" \
         --argjson campaign_followup_recommended "$FOLLOWUP_CAMPAIGN_RECOMMENDED" \
         --argjson queue_followup_effective "$FOLLOWUP_QUEUE_EFFECTIVE" \
@@ -254,6 +263,9 @@ steps:
             high_confidence_targets: $high_confidence_targets,
             reuse_sources: $reuse_sources,
             next_actions: $next_actions,
+            resume_suppressed_actions: $resume_suppressed_actions,
+            reused_actions: $reused_actions,
+            skipped_duplicate_actions: $skipped_duplicate_actions,
             manual_followup_needed: $manual_followup_needed,
             campaign_followup_recommended: $campaign_followup_recommended,
             queue_followup_effective: $queue_followup_effective

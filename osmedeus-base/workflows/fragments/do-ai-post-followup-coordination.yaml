@@ -213,6 +213,7 @@ steps:
       CAMPAIGN_READY=false
       CAMPAIGN_TARGETS=0
       CAMPAIGN_CREATE_STATUS="not_requested"
+      CAMPAIGN_CREATE_REASON=""
       CAMPAIGN_CREATE_ID=""
       CAMPAIGN_CREATE_QUEUED_RUNS=0
       if [ -f "{{campaignHandoffOutput}}" ] && jq empty "{{campaignHandoffOutput}}" 2>/dev/null; then
@@ -221,15 +222,23 @@ steps:
       fi
       if [ -f "{{campaignCreateOutput}}" ] && jq empty "{{campaignCreateOutput}}" 2>/dev/null; then
         CAMPAIGN_CREATE_STATUS=$(jq -r '.status // "not_requested"' "{{campaignCreateOutput}}" 2>/dev/null || echo not_requested)
+        CAMPAIGN_CREATE_REASON=$(jq -r '.reason // ""' "{{campaignCreateOutput}}" 2>/dev/null || echo "")
         CAMPAIGN_CREATE_ID=$(jq -r '.campaign_id // ""' "{{campaignCreateOutput}}" 2>/dev/null || echo "")
         CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.queued_runs // 0' "{{campaignCreateOutput}}" 2>/dev/null || echo 0)
       fi
 
       RETEST_QUEUED=0
       RETEST_QUEUE_STATUS="not_requested"
+      RETEST_QUEUE_REASON=""
       if [ -f "{{retestQueueSummary}}" ] && jq empty "{{retestQueueSummary}}" 2>/dev/null; then
         RETEST_QUEUED=$(count_retest_queued_targets "{{retestQueueSummary}}")
         RETEST_QUEUE_STATUS=$(jq -r '.status // "not_requested"' "{{retestQueueSummary}}" 2>/dev/null || echo not_requested)
+        RETEST_QUEUE_REASON=$(jq -r '.reason // ""' "{{retestQueueSummary}}" 2>/dev/null || echo "")
+      fi
+      RETEST_QUEUE_EFFECTIVE=false
+      if [ "$RETEST_QUEUED" -gt 0 ] 2>/dev/null \
+        || { [ "$RETEST_QUEUE_STATUS" = "skipped" ] && [ "$RETEST_QUEUE_REASON" = "resume_queue_already_effective" ]; }; then
+        RETEST_QUEUE_EFFECTIVE=true
       fi
 
       RESCAN_TOTAL=$(count_lines "{{rescanOutputJsonl}}")
@@ -361,7 +370,7 @@ steps:
         SEED_PRIORITY_MODE="manual-first"
       elif [ "$CAMPAIGN_READY" = "true" ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
         SEED_PRIORITY_MODE="campaign-first"
-      elif [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUED" -gt 0 ]; then
+      elif [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUE_EFFECTIVE" = "true" ]; then
         SEED_PRIORITY_MODE="retest-first"
       fi
 
@@ -369,7 +378,7 @@ steps:
       SEED_CONFIDENCE_LEVEL="low"
       if [ "$RESCAN_CRITICAL" -gt 0 ] || [ "$OPERATOR_TASKS" -gt 0 ] || [ "$ESCALATION_SCORE" -ge 12 ] 2>/dev/null; then
         SEED_CONFIDENCE_LEVEL="high"
-      elif [ "$RESCAN_HIGH" -gt 0 ] || [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUED" -gt 0 ] || [ "$CAMPAIGN_TARGETS" -gt 0 ] || [ "$CONFIRMED_COUNT" -gt 0 ]; then
+      elif [ "$RESCAN_HIGH" -gt 0 ] || [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUE_EFFECTIVE" = "true" ] || [ "$CAMPAIGN_TARGETS" -gt 0 ] || [ "$CONFIRMED_COUNT" -gt 0 ]; then
         SEED_CONFIDENCE_LEVEL="medium"
       fi
 
@@ -378,11 +387,35 @@ steps:
         SEED_SCAN_PROFILE="aggressive"
       elif [ "$RESCAN_CRITICAL" -gt 0 ] || [ "$OPERATOR_TASKS" -ge 2 ] || [ "$ESCALATION_SCORE" -ge 14 ] 2>/dev/null; then
         SEED_SCAN_PROFILE="aggressive"
-      elif [ "$OPERATOR_TASKS" -gt 0 ] || [ "$RESCAN_HIGH" -gt 0 ] || [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUED" -gt 0 ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
+      elif [ "$OPERATOR_TASKS" -gt 0 ] || [ "$RESCAN_HIGH" -gt 0 ] || [ "$RETEST_COUNT" -gt 0 ] || [ "$RETEST_QUEUE_EFFECTIVE" = "true" ] || [ "$CAMPAIGN_TARGETS" -gt 0 ]; then
         if [ "$BASE_PROFILE" = "focused" ]; then
           SEED_SCAN_PROFILE="balanced"
         fi
       fi
+
+      RESUME_SUPPRESSED_TMP="{{Output}}/ai-analysis/.resume-suppressed-actions-{{TargetSpace}}.txt"
+      REUSED_ACTIONS_TMP="{{Output}}/ai-analysis/.reused-actions-{{TargetSpace}}.txt"
+      SKIPPED_DUPLICATES_TMP="{{Output}}/ai-analysis/.skipped-duplicate-actions-{{TargetSpace}}.txt"
+      : > "$RESUME_SUPPRESSED_TMP"
+      : > "$REUSED_ACTIONS_TMP"
+      : > "$SKIPPED_DUPLICATES_TMP"
+
+      if [ "$RETEST_QUEUE_STATUS" = "skipped" ] && [ "$RETEST_QUEUE_REASON" = "resume_queue_already_effective" ]; then
+        echo "retest-queue" >> "$RESUME_SUPPRESSED_TMP"
+        echo "retest-queue" >> "$SKIPPED_DUPLICATES_TMP"
+      fi
+      if [ "$CAMPAIGN_CREATE_STATUS" = "created" ] && [ "$CAMPAIGN_CREATE_REASON" = "resume_context_already_created" ]; then
+        if [ -n "$CAMPAIGN_CREATE_ID" ]; then
+          echo "campaign-create:$CAMPAIGN_CREATE_ID" >> "$REUSED_ACTIONS_TMP"
+        else
+          echo "campaign-create" >> "$REUSED_ACTIONS_TMP"
+        fi
+        echo "campaign-create" >> "$SKIPPED_DUPLICATES_TMP"
+      fi
+
+      RESUME_SUPPRESSED_JSON=$(file_to_json_array "$RESUME_SUPPRESSED_TMP")
+      REUSED_ACTIONS_JSON=$(file_to_json_array "$REUSED_ACTIONS_TMP")
+      SKIPPED_DUPLICATES_JSON=$(file_to_json_array "$SKIPPED_DUPLICATES_TMP")
 
       SEED_SEVERITY="$BASE_SEVERITY"
       SEED_REASONING="$BASE_REASONING | followup mode=$SEED_PRIORITY_MODE confidence=$SEED_CONFIDENCE_LEVEL operator_tasks=$OPERATOR_TASKS retest_targets=$RETEST_COUNT campaign_targets=$CAMPAIGN_TARGETS passive_targets=$PASSIVE_TARGET_COUNT queued_retests=$RETEST_QUEUED rescan_critical=$RESCAN_CRITICAL rescan_high=$RESCAN_HIGH campaign_create_status=$CAMPAIGN_CREATE_STATUS queued_campaign_runs=$CAMPAIGN_CREATE_QUEUED_RUNS"
@@ -424,6 +457,9 @@ steps:
         --argjson manual_first_targets "$MANUAL_FIRST_JSON" \
         --argjson high_confidence_targets "$HIGH_CONFIDENCE_JSON" \
         --argjson reuse_sources "$REUSE_SOURCES_JSON" \
+        --argjson resume_suppressed_actions "$RESUME_SUPPRESSED_JSON" \
+        --argjson reused_actions "$REUSED_ACTIONS_JSON" \
+        --argjson skipped_duplicate_actions "$SKIPPED_DUPLICATES_JSON" \
         --argjson escalation_score "$ESCALATION_SCORE" \
         '{
           generated_at: $generated_at,
@@ -446,7 +482,10 @@ steps:
             campaign_create_status: $campaign_create_status,
             campaign_create_id: $campaign_create_id,
             campaign_create_queued_runs: $campaign_create_queued_runs,
-            retest_queue_status: $retest_queue_status
+            retest_queue_status: $retest_queue_status,
+            resume_suppressed_actions: $resume_suppressed_actions,
+            reused_actions: $reused_actions,
+            skipped_duplicate_actions: $skipped_duplicate_actions
           },
           refined_targets: {
             focus_areas: $refined_focus_areas,
@@ -488,14 +527,14 @@ steps:
             keep_aggressive_scan: (($seed_scan_profile == "aggressive") or ($rescan_critical > 0)),
             manual_followup_needed: (($operator_tasks > 0) or ($rescan_critical > 0) or ($rescan_high > 0)),
             campaign_followup_recommended: (($campaign_ready == true) and ($campaign_targets > 0)),
-            queue_followup_effective: ($retest_queued > 0)
+            queue_followup_effective: (($retest_queued > 0) or (($resume_suppressed_actions | index("retest-queue")) != null))
           },
           execution_feedback: {
             next_phase: $next_phase,
             keep_aggressive_scan: (($seed_scan_profile == "aggressive") or ($rescan_critical > 0)),
             manual_followup_needed: (($operator_tasks > 0) or ($rescan_critical > 0) or ($rescan_high > 0)),
             campaign_followup_recommended: (($campaign_ready == true) and ($campaign_targets > 0)),
-            queue_followup_effective: ($retest_queued > 0)
+            queue_followup_effective: (($retest_queued > 0) or (($resume_suppressed_actions | index("retest-queue")) != null))
           },
           next_actions: (
             [
@@ -505,12 +544,15 @@ steps:
               (if ($campaign_ready == true) and ($campaign_targets > 0) then "Use campaign handoff as the next-stage batch execution package" else empty end),
               (if ($campaign_create_status == "created") and ($campaign_create_queued_runs > 0) then ("Track campaign " + $campaign_create_id + " and monitor " + ($campaign_create_queued_runs | tostring) + " queued runs for follow-up evidence") else empty end),
               (if $retest_queued > 0 then "Track queued retest jobs and fold their results back into the knowledge base" else empty end),
+              (if ($resume_suppressed_actions | length) > 0 then ("Resume-suppressed actions: " + ($resume_suppressed_actions | join(", "))) else empty end),
+              (if ($reused_actions | length) > 0 then ("Reused actions: " + ($reused_actions | join(", "))) else empty end),
+              (if ($skipped_duplicate_actions | length) > 0 then ("Skipped duplicate actions: " + ($skipped_duplicate_actions | join(", "))) else empty end),
               "Persist the final follow-up decision package for future reruns and manual handoff"
             ] | map(select(. != null and . != ""))
           )
         }' > "{{followupDecisionOutput}}"
 
-      rm -f "$RESCAN_CRITICAL_TMP" "$RESCAN_HIGH_TMP" "$REUSE_SOURCES_TMP" "$PASSIVE_TARGETS_TMP" 2>/dev/null || true
+      rm -f "$RESCAN_CRITICAL_TMP" "$RESCAN_HIGH_TMP" "$REUSE_SOURCES_TMP" "$PASSIVE_TARGETS_TMP" "$RESUME_SUPPRESSED_TMP" "$REUSED_ACTIONS_TMP" "$SKIPPED_DUPLICATES_TMP" 2>/dev/null || true
 
   - name: render-post-followup-markdown
     type: bash
@@ -523,7 +565,7 @@ steps:
         jq -r '.base_decision | "- Base profile: \(.profile // "focused")\n- Base severity: \(.severity // "critical,high")\n- Reasoning: \(.reasoning // "n/a")"' "{{followupDecisionOutput}}" 2>/dev/null || true
         echo ""
         echo "## Follow-up Summary"
-        jq -r '.followup_summary | "- Retest targets: \(.retest_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)\n- Campaign targets: \(.campaign_targets // 0)\n- Passive targets: \(.passive_targets // 0)\n- Retest queued: \(.retest_queued_targets // 0)\n- Rescan findings: \(.rescan_findings // 0) (critical=\(.rescan_critical // 0), high=\(.rescan_high // 0))\n- Campaign ready: \(.campaign_ready // false)\n- Campaign create: \(.campaign_create_status // "not_requested")\n- Campaign id: \(.campaign_create_id // "")\n- Campaign queued runs: \(.campaign_create_queued_runs // 0)\n- Retest queue: \(.retest_queue_status // "not_requested")"' "{{followupDecisionOutput}}" 2>/dev/null || true
+        jq -r '.followup_summary | "- Retest targets: \(.retest_targets // 0)\n- Operator tasks: \(.operator_tasks // 0)\n- Campaign targets: \(.campaign_targets // 0)\n- Passive targets: \(.passive_targets // 0)\n- Retest queued: \(.retest_queued_targets // 0)\n- Rescan findings: \(.rescan_findings // 0) (critical=\(.rescan_critical // 0), high=\(.rescan_high // 0))\n- Campaign ready: \(.campaign_ready // false)\n- Campaign create: \(.campaign_create_status // "not_requested")\n- Campaign id: \(.campaign_create_id // "")\n- Campaign queued runs: \(.campaign_create_queued_runs // 0)\n- Retest queue: \(.retest_queue_status // "not_requested")\n- Resume-suppressed actions: \((.resume_suppressed_actions // []) | join(", "))\n- Reused actions: \((.reused_actions // []) | join(", "))\n- Skipped duplicate actions: \((.skipped_duplicate_actions // []) | join(", "))"' "{{followupDecisionOutput}}" 2>/dev/null || true
         echo ""
         echo "## Seed Focus"
         jq -r '.seed_focus | "- Scan profile: \(.scan_profile // "focused")\n- Severity: \(.severity // "critical,high")\n- Next phase: \(.next_phase // "knowledge-consolidation")\n- Priority mode: \(.priority_mode // "knowledge-first")\n- Confidence: \(.confidence_level // "low")\n- Reuse sources: \((.reuse_sources // []) | join(", "))"' "{{followupDecisionOutput}}" 2>/dev/null || true
@@ -566,7 +608,10 @@ steps:
               campaign_create_status: "not_requested",
               campaign_create_id: "",
               campaign_create_queued_runs: 0,
-              retest_queue_status: "not_requested"
+              retest_queue_status: "not_requested",
+              resume_suppressed_actions: [],
+              reused_actions: [],
+              skipped_duplicate_actions: []
             },
             refined_targets: {
               focus_areas: [],
@@ -680,7 +725,10 @@ steps:
           "- Campaign status: \(.followup_summary.campaign_create_status // "not_requested")\n" +
           "- Campaign id: \(.followup_summary.campaign_create_id // "")\n" +
           "- Queued retests: \(.followup_summary.retest_queued_targets // 0)\n" +
-          "- Operator tasks: \(.followup_summary.operator_tasks // 0)"
+          "- Operator tasks: \(.followup_summary.operator_tasks // 0)\n" +
+          "- Resume-suppressed actions: \((.followup_summary.resume_suppressed_actions // []) | join(", "))\n" +
+          "- Reused actions: \((.followup_summary.reused_actions // []) | join(", "))\n" +
+          "- Skipped duplicate actions: \((.followup_summary.skipped_duplicate_actions // []) | join(", "))"
         ' "$SOURCE_FILE" 2>/dev/null || true
         echo ""
         echo "## Next Actions"

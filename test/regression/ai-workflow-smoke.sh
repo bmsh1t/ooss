@@ -172,6 +172,7 @@ operator_decision_targets=$(jq -er '.summary.decision_target_count // 0' "$OPERA
 operator_prev_source=$(jq -er '.summary.previous_followup_source_kind // ""' "$OPERATOR_QUEUE")
 operator_prev_mode=$(jq -er '.summary.previous_priority_mode // ""' "$OPERATOR_QUEUE")
 operator_focus_first=$(jq -er '.focus_targets[0] // ""' "$OPERATOR_QUEUE")
+operator_task_first_title=$(jq -er '.tasks[0].title // ""' "$OPERATOR_QUEUE")
 campaign_ready=$(jq -er '.handoff_ready' "$CAMPAIGN_HANDOFF")
 campaign_decision_focus_targets=$(jq -er '.counts.decision_focus_targets // 0' "$CAMPAIGN_HANDOFF")
 campaign_target_count=$(jq -er '.counts.campaign_targets' "$CAMPAIGN_HANDOFF")
@@ -180,9 +181,14 @@ campaign_create_status=$(jq -er '.status' "$CAMPAIGN_CREATE")
 campaign_create_id=$(jq -er '.campaign_id' "$CAMPAIGN_CREATE")
 campaign_create_runs=$(jq -er '.queued_runs' "$CAMPAIGN_CREATE")
 retest_queue_status=$(jq -er '.status' "$RETEST_QUEUE")
+retest_queue_reason=$(jq -er '.reason // ""' "$RETEST_QUEUE")
 retest_queue_targets=$(jq -er '.queued_targets' "$RETEST_QUEUE")
+retest_queue_prev_source=$(jq -er '.previous_followup_source_kind // ""' "$RETEST_QUEUE")
 followup_next_phase=$(jq -er '.execution_feedback.next_phase' "$FOLLOWUP_DECISION")
 followup_campaign_status=$(jq -er '.followup_summary.campaign_create_status' "$FOLLOWUP_DECISION")
+followup_resume_suppressed=$(jq -er '(.followup_summary.resume_suppressed_actions // []) | join(",")' "$FOLLOWUP_DECISION")
+followup_reused_actions=$(jq -er '(.followup_summary.reused_actions // []) | join(",")' "$FOLLOWUP_DECISION")
+followup_skipped_duplicates=$(jq -er '(.followup_summary.skipped_duplicate_actions // []) | join(",")' "$FOLLOWUP_DECISION")
 followup_passive_targets=$(jq -er '.followup_summary.passive_targets // 0' "$FOLLOWUP_DECISION")
 followup_priority_mode=$(jq -er '.seed_focus.priority_mode' "$FOLLOWUP_DECISION")
 followup_reuse_sources=$(jq -er '(.seed_focus.reuse_sources // []) | join(",")' "$FOLLOWUP_DECISION")
@@ -215,15 +221,20 @@ assert_ge "$operator_decision_targets" 2 "operator queue decision target count"
 assert_eq "$operator_prev_source" "resume-context" "operator queue previous follow-up source"
 assert_eq "$operator_prev_mode" "manual-first" "operator queue previous priority mode"
 assert_contains "$operator_focus_first" "/admin" "operator queue manual-first focus ordering"
+assert_eq "$operator_task_first_title" "Resume manual exploit path" "operator queue manual exploit task title"
 assert_eq "$campaign_ready" "true" "campaign handoff readiness"
 assert_ge "$campaign_decision_focus_targets" 2 "campaign handoff decision focus target count"
 assert_ge "$campaign_target_count" 3 "campaign handoff target count"
 assert_eq "$campaign_prev_source" "resume-context" "campaign handoff previous follow-up source"
 assert_eq "$campaign_create_status" "created" "campaign creation status"
 assert_ge "$campaign_create_runs" 3 "campaign queued run count"
-assert_eq "$retest_queue_status" "queued" "retest queue status"
-assert_ge "$retest_queue_targets" 2 "retest queued target count"
+assert_eq "$retest_queue_status" "skipped" "retest queue status"
+assert_eq "$retest_queue_reason" "resume_queue_already_effective" "retest queue resume gate reason"
+assert_eq "$retest_queue_prev_source" "resume-context" "retest queue previous follow-up source"
+assert_eq "$retest_queue_targets" "0" "retest queued target count after resume gate"
 assert_eq "$followup_campaign_status" "created" "follow-up campaign status"
+assert_eq "$followup_resume_suppressed" "retest-queue" "follow-up resume suppressed actions"
+assert_contains "$followup_skipped_duplicates" "retest-queue" "follow-up skipped duplicate retest queue"
 assert_ge "$followup_passive_targets" 3 "follow-up passive target count"
 assert_eq "$followup_priority_mode" "manual-first" "follow-up priority mode"
 assert_eq "$followup_next_phase" "manual-exploitation" "follow-up next phase"

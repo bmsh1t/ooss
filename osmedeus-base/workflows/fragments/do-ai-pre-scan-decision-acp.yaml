@@ -60,6 +60,12 @@ params:
     default: ""
   - name: previous_followup_reuse_sources
     default: ""
+  - name: previous_followup_resume_suppressed_actions
+    default: ""
+  - name: previous_followup_reused_actions
+    default: ""
+  - name: previous_followup_skipped_duplicate_actions
+    default: ""
   - name: previous_followup_manual_followup_needed
     default: ""
   - name: previous_followup_campaign_followup_recommended
@@ -163,6 +169,9 @@ steps:
       PREV_CAMPAIGN_CREATE_ID=""
       PREV_CAMPAIGN_CREATE_QUEUED_RUNS=0
       PREV_REUSE_SOURCES_JSON='[]'
+      PREV_RESUME_SUPPRESSED_JSON='[]'
+      PREV_REUSED_ACTIONS_JSON='[]'
+      PREV_SKIPPED_DUPLICATES_JSON='[]'
       PREV_MANUAL_FOLLOWUP_NEEDED=false
       PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=false
       PREV_QUEUE_FOLLOWUP_EFFECTIVE=false
@@ -192,6 +201,9 @@ steps:
         PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
         PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
         PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_RESUME_SUPPRESSED_JSON=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_REUSED_ACTIONS_JSON=$(jq -c '.followup_summary.reused_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_SKIPPED_DUPLICATES_JSON=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
         PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r 'if .manual_followup_needed != null then .manual_followup_needed elif .followup_summary.manual_followup_needed != null then .followup_summary.manual_followup_needed else ((.followup_summary.operator_tasks // 0) > 0 or (.followup_summary.rescan_critical // 0) > 0 or (.followup_summary.rescan_high // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
         PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r 'if .campaign_followup_recommended != null then .campaign_followup_recommended elif .followup_summary.campaign_followup_recommended != null then .followup_summary.campaign_followup_recommended else ((.followup_summary.campaign_ready // false) == true and (.followup_summary.campaign_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
         PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
@@ -219,6 +231,9 @@ steps:
         PREV_CAMPAIGN_CREATE_ID=$(jq -r '.followup_summary.campaign_create_id // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.followup_summary.campaign_create_queued_runs // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREV_REUSE_SOURCES_JSON=$(jq -c '.seed_focus.reuse_sources // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_RESUME_SUPPRESSED_JSON=$(jq -c '.followup_summary.resume_suppressed_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_REUSED_ACTIONS_JSON=$(jq -c '.followup_summary.reused_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_SKIPPED_DUPLICATES_JSON=$(jq -c '.followup_summary.skipped_duplicate_actions // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
         PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r '.seed_focus.manual_followup_needed // .execution_feedback.manual_followup_needed // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r '.seed_focus.campaign_followup_recommended // .execution_feedback.campaign_followup_recommended // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
         PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
@@ -239,6 +254,9 @@ steps:
         PREV_PARAM_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
         PREV_PARAM_NEXT_PHASE="{{previous_followup_next_phase}}"
         PREV_PARAM_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
+        PREV_PARAM_RESUME_SUPPRESSED_JSON=$(csv_or_json_to_array "{{previous_followup_resume_suppressed_actions}}")
+        PREV_PARAM_REUSED_ACTIONS_JSON=$(csv_or_json_to_array "{{previous_followup_reused_actions}}")
+        PREV_PARAM_SKIPPED_DUPLICATES_JSON=$(csv_or_json_to_array "{{previous_followup_skipped_duplicate_actions}}")
         PREV_PARAM_MANUAL_FOLLOWUP_NEEDED=$(normalize_bool "{{previous_followup_manual_followup_needed}}")
         PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(normalize_bool "{{previous_followup_campaign_followup_recommended}}")
         PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE=$(normalize_bool "{{previous_followup_queue_followup_effective}}")
@@ -280,6 +298,9 @@ steps:
           PREV_CAMPAIGN_CREATE_ID="$PREV_PARAM_CAMPAIGN_CREATE_ID"
           PREV_CAMPAIGN_CREATE_QUEUED_RUNS="$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS"
           PREV_REUSE_SOURCES_JSON="$PREV_PARAM_REUSE_SOURCES_JSON"
+          PREV_RESUME_SUPPRESSED_JSON="$PREV_PARAM_RESUME_SUPPRESSED_JSON"
+          PREV_REUSED_ACTIONS_JSON="$PREV_PARAM_REUSED_ACTIONS_JSON"
+          PREV_SKIPPED_DUPLICATES_JSON="$PREV_PARAM_SKIPPED_DUPLICATES_JSON"
           PREV_MANUAL_FOLLOWUP_NEEDED="$PREV_PARAM_MANUAL_FOLLOWUP_NEEDED"
           PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED="$PREV_PARAM_CAMPAIGN_FOLLOWUP_RECOMMENDED"
           PREV_QUEUE_FOLLOWUP_EFFECTIVE="$PREV_PARAM_QUEUE_FOLLOWUP_EFFECTIVE"
@@ -306,6 +327,9 @@ steps:
         --arg campaign_create_id "$PREV_CAMPAIGN_CREATE_ID" \
         --argjson campaign_create_queued_runs "$PREV_CAMPAIGN_CREATE_QUEUED_RUNS" \
         --argjson reuse_sources "$PREV_REUSE_SOURCES_JSON" \
+        --argjson resume_suppressed_actions "$PREV_RESUME_SUPPRESSED_JSON" \
+        --argjson reused_actions "$PREV_REUSED_ACTIONS_JSON" \
+        --argjson skipped_duplicate_actions "$PREV_SKIPPED_DUPLICATES_JSON" \
         --argjson manual_followup_needed "$PREV_MANUAL_FOLLOWUP_NEEDED" \
         --argjson campaign_followup_recommended "$PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
         --argjson queue_followup_effective "$PREV_QUEUE_FOLLOWUP_EFFECTIVE" \
@@ -329,6 +353,9 @@ steps:
             queued_runs: $campaign_create_queued_runs
           },
           reuse_sources: $reuse_sources,
+          resume_suppressed_actions: $resume_suppressed_actions,
+          reused_actions: $reused_actions,
+          skipped_duplicate_actions: $skipped_duplicate_actions,
           counts: {
             targets: $targets,
             priority_targets: $priority_targets,
@@ -569,6 +596,9 @@ steps:
       PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // ""' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo "")
       PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(normalize_int "$(jq -r '.campaign_create.queued_runs // 0' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo 0)")
       PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo '[]')
+      PREV_RESUME_SUPPRESSED_JSON=$(jq -c '.resume_suppressed_actions // []' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo '[]')
+      PREV_REUSED_ACTIONS_JSON=$(jq -c '.reused_actions // []' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo '[]')
+      PREV_SKIPPED_DUPLICATES_JSON=$(jq -c '.skipped_duplicate_actions // []' "{{Output}}/ai-analysis/.input/previous-followup-summary.json" 2>/dev/null || echo '[]')
       if ! printf '%s\n' "$PREV_REUSE_SOURCES_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
         PREV_REUSE_SOURCES_JSON='[]'
       fi
@@ -649,6 +679,9 @@ steps:
         --arg previous_followup_campaign_create_id "$PREV_CAMPAIGN_CREATE_ID" \
         --argjson previous_followup_campaign_create_queued_runs "$PREV_CAMPAIGN_CREATE_QUEUED_RUNS" \
         --argjson previous_followup_reuse_sources "$PREV_REUSE_SOURCES_JSON" \
+        --argjson previous_followup_resume_suppressed_actions "$PREV_RESUME_SUPPRESSED_JSON" \
+        --argjson previous_followup_reused_actions "$PREV_REUSED_ACTIONS_JSON" \
+        --argjson previous_followup_skipped_duplicate_actions "$PREV_SKIPPED_DUPLICATES_JSON" \
         --argjson previous_followup_manual_followup_needed "$PREV_MANUAL_FOLLOWUP_NEEDED" \
         --argjson previous_followup_campaign_followup_recommended "$PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED" \
         --argjson previous_followup_queue_followup_effective "$PREV_QUEUE_FOLLOWUP_EFFECTIVE" \
@@ -679,13 +712,16 @@ steps:
             previous_followup_campaign_create_id: $previous_followup_campaign_create_id,
             previous_followup_campaign_create_queued_runs: $previous_followup_campaign_create_queued_runs,
             previous_followup_reuse_sources: $previous_followup_reuse_sources,
+            previous_followup_resume_suppressed_actions: $previous_followup_resume_suppressed_actions,
+            previous_followup_reused_actions: $previous_followup_reused_actions,
+            previous_followup_skipped_duplicate_actions: $previous_followup_skipped_duplicate_actions,
             previous_followup_manual_followup_needed: $previous_followup_manual_followup_needed,
             previous_followup_campaign_followup_recommended: $previous_followup_campaign_followup_recommended,
             previous_followup_queue_followup_effective: $previous_followup_queue_followup_effective
           },
           reasoning: $reasoning
         }' > {{aiDecisionOutput}}; then
-        printf '%s\n' '{"nuclei_severity":"critical,high","suggested_threads":10,"suggested_rate_limit":30,"recommended_timeout":"6h","waf_bypass_needed":false,"focus_areas":[],"priority_targets":[],"rescan_targets":[],"decision_inputs":{"previous_followup_source_kind":"none","previous_followup_targets":0,"previous_followup_priority_targets":0,"previous_followup_focus_areas":0,"previous_followup_manual_first_targets":0,"previous_followup_high_confidence_targets":0,"previous_followup_reasoning":"","previous_followup_scan_profile":"","previous_followup_severity":"","previous_followup_next_phase":"","previous_followup_priority_mode":"","previous_followup_confidence_level":"","previous_followup_escalation_score":0,"previous_followup_campaign_create_status":"","previous_followup_campaign_create_id":"","previous_followup_campaign_create_queued_runs":0,"previous_followup_reuse_sources":[],"previous_followup_manual_followup_needed":false,"previous_followup_campaign_followup_recommended":false,"previous_followup_queue_followup_effective":false},"reasoning":"Pre-scan ACP bootstrap decision fallback"}' > {{aiDecisionOutput}}
+        printf '%s\n' '{"nuclei_severity":"critical,high","suggested_threads":10,"suggested_rate_limit":30,"recommended_timeout":"6h","waf_bypass_needed":false,"focus_areas":[],"priority_targets":[],"rescan_targets":[],"decision_inputs":{"previous_followup_source_kind":"none","previous_followup_targets":0,"previous_followup_priority_targets":0,"previous_followup_focus_areas":0,"previous_followup_manual_first_targets":0,"previous_followup_high_confidence_targets":0,"previous_followup_reasoning":"","previous_followup_scan_profile":"","previous_followup_severity":"","previous_followup_next_phase":"","previous_followup_priority_mode":"","previous_followup_confidence_level":"","previous_followup_escalation_score":0,"previous_followup_campaign_create_status":"","previous_followup_campaign_create_id":"","previous_followup_campaign_create_queued_runs":0,"previous_followup_reuse_sources":[],"previous_followup_resume_suppressed_actions":[],"previous_followup_reused_actions":[],"previous_followup_skipped_duplicate_actions":[],"previous_followup_manual_followup_needed":false,"previous_followup_campaign_followup_recommended":false,"previous_followup_queue_followup_effective":false},"reasoning":"Pre-scan ACP bootstrap decision fallback"}' > {{aiDecisionOutput}}
       fi
 
   - name: log-pre-scan-complete
