@@ -34,6 +34,8 @@ params:
     default: "{{Output}}/osint/emails-{{TargetSpace}}.txt"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previous_followup_targets
     default: ""
   - name: previous_followup_priority_targets
@@ -169,7 +171,35 @@ steps:
       PREV_MANUAL_FIRST_COUNT=0
       PREV_HIGH_CONFIDENCE_COUNT=0
 
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        jq -r '((.refined_targets.priority_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []))[]? // empty' "{{resumeContextFile}}" 2>/dev/null \
+          | awk 'NF && !seen[$0]++' > "$PREV_PRIORITY" || true
+        jq -r '((.refined_targets.focus_areas // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []))[]? // empty' "{{resumeContextFile}}" 2>/dev/null \
+          | awk 'NF && !seen[$0]++' > "$PREV_FOCUS" || true
+        PREV_AVAILABLE=true
+        PREV_SOURCE_KIND="resume-context"
+        PREV_SOURCE_FILE="{{resumeContextFile}}"
+        PREV_BASE_PROFILE=$(jq -r '.scan_profile // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_BASE_SEVERITY=$(jq -r '.severity // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_REASONING=$(jq -r '.reasoning // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_TARGET_COUNT=$(jq -r '[((.refined_targets.priority_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.operator_targets // []) + (.seed_targets.campaign_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // .followup_summary.campaign_create_status // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_MANUAL_FOLLOWUP_NEEDED=$(jq -r 'if .manual_followup_needed != null then .manual_followup_needed elif .followup_summary.manual_followup_needed != null then .followup_summary.manual_followup_needed else ((.followup_summary.operator_tasks // 0) > 0 or (.followup_summary.rescan_critical // 0) > 0 or (.followup_summary.rescan_high // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_CAMPAIGN_FOLLOWUP_RECOMMENDED=$(jq -r 'if .campaign_followup_recommended != null then .campaign_followup_recommended elif .followup_summary.campaign_followup_recommended != null then .followup_summary.campaign_followup_recommended else ((.followup_summary.campaign_ready // false) == true and (.followup_summary.campaign_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_QUEUE_FOLLOWUP_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_PRIORITY_COUNT=$(jq -r '[((.refined_targets.priority_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_FOCUS_COUNT=$(jq -r '[((.refined_targets.focus_areas // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_MANUAL_FIRST_COUNT=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_HIGH_CONFIDENCE_COUNT=$(jq -r '[((.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
         jq -r '((.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null \
           | awk 'NF && !seen[$0]++' > "$PREV_PRIORITY" || true
         jq -r '((.seed_targets.focus_areas // .refined_targets.focus_areas // []) + (.seed_targets.semantic_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null \
