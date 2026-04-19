@@ -38,6 +38,8 @@ params:
     default: "{{Output}}/ai-analysis/semantic-priority-targets-early-{{TargetSpace}}.txt"
   - name: rescanSummaryFile
     default: "{{Output}}/ai-analysis/rescan-summary-{{TargetSpace}}.md"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: previous_followup_targets
@@ -188,12 +190,30 @@ steps:
 
       PREVIOUS_FOLLOWUP_TARGETS_JSON='[]'
       PREVIOUS_FOLLOWUP_COUNT=0
+      PREVIOUS_SOURCE_KIND="none"
       PREVIOUS_PRIORITY_MODE=""
       PREVIOUS_CONFIDENCE_LEVEL=""
       PREVIOUS_NEXT_PHASE=""
       PREVIOUS_REUSE_SOURCES_JSON='[]'
       PREVIOUS_ESCALATION_SCORE=0
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      PREVIOUS_CAMPAIGN_CREATE_STATUS=""
+      PREVIOUS_CAMPAIGN_CREATE_ID=""
+      PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=0
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREVIOUS_SOURCE_KIND="resume-context"
+        PREVIOUS_FOLLOWUP_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_FOLLOWUP_COUNT=$(printf '%s\n' "$PREVIOUS_FOLLOWUP_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+        PREVIOUS_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREVIOUS_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // .followup_summary.campaign_create_status // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREVIOUS_SOURCE_KIND="decision-file"
         PREVIOUS_FOLLOWUP_TARGETS_JSON=$(jq -c '((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
         PREVIOUS_FOLLOWUP_COUNT=$(printf '%s\n' "$PREVIOUS_FOLLOWUP_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
         PREVIOUS_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
@@ -201,17 +221,24 @@ steps:
         PREVIOUS_NEXT_PHASE=$(jq -r '.seed_focus.next_phase // .execution_feedback.next_phase // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREVIOUS_REUSE_SOURCES_JSON=$(jq -c '.seed_focus.reuse_sources // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
         PREVIOUS_ESCALATION_SCORE=$(jq -r '.seed_focus.signal_scores.escalation_score // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
+        PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.followup_summary.campaign_create_status // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.followup_summary.campaign_create_id // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.followup_summary.campaign_create_queued_runs // 0' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
       else
         PREVIOUS_FOLLOWUP_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
         PREVIOUS_FOLLOWUP_COUNT=$(normalize_int "{{previous_followup_targets}}")
         if [ "$PREVIOUS_FOLLOWUP_COUNT" -eq 0 ] 2>/dev/null; then
           PREVIOUS_FOLLOWUP_COUNT=$(printf '%s\n' "$PREVIOUS_FOLLOWUP_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
         fi
+        PREVIOUS_SOURCE_KIND="queued-params"
         PREVIOUS_PRIORITY_MODE="{{previous_followup_priority_mode}}"
         PREVIOUS_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
         PREVIOUS_NEXT_PHASE="{{previous_followup_next_phase}}"
         PREVIOUS_REUSE_SOURCES_JSON=$(csv_or_json_to_array "{{previous_followup_reuse_sources}}")
         PREVIOUS_ESCALATION_SCORE=$(normalize_int "{{previous_followup_escalation_score}}")
+        PREVIOUS_CAMPAIGN_CREATE_STATUS="{{previous_followup_campaign_create_status}}"
+        PREVIOUS_CAMPAIGN_CREATE_ID="{{previous_followup_campaign_create_id}}"
+        PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(normalize_int "{{previous_followup_campaign_create_queued_runs}}")
       fi
 
       {
@@ -258,11 +285,15 @@ steps:
         --argjson semantic_priority_count "$SEMANTIC_PRIORITY_COUNT" \
         --argjson previous_followup_count "$PREVIOUS_FOLLOWUP_COUNT" \
         --argjson decision_focus_count "$DECISION_FOCUS_COUNT" \
+        --arg previous_source_kind "$PREVIOUS_SOURCE_KIND" \
         --arg previous_priority_mode "$PREVIOUS_PRIORITY_MODE" \
         --arg previous_confidence_level "$PREVIOUS_CONFIDENCE_LEVEL" \
         --arg previous_next_phase "$PREVIOUS_NEXT_PHASE" \
         --argjson previous_reuse_sources "$PREVIOUS_REUSE_SOURCES_JSON" \
         --argjson previous_escalation_score "$PREVIOUS_ESCALATION_SCORE" \
+        --arg previous_campaign_create_status "$PREVIOUS_CAMPAIGN_CREATE_STATUS" \
+        --arg previous_campaign_create_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+        --argjson previous_campaign_create_queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
         --argjson campaign_targets "$CAMPAIGN_TARGETS" \
         '{
           generated_at: $generated_at,
@@ -273,11 +304,15 @@ steps:
             recommended_flow: $recommended_flow,
             retest_priority: $retest_priority,
             focus_areas: $focus_areas,
+            previous_followup_source_kind: $previous_source_kind,
             previous_priority_mode: $previous_priority_mode,
             previous_confidence_level: $previous_confidence_level,
             previous_next_phase: $previous_next_phase,
             previous_reuse_sources: $previous_reuse_sources,
-            previous_escalation_score: $previous_escalation_score
+            previous_escalation_score: $previous_escalation_score,
+            previous_campaign_create_status: $previous_campaign_create_status,
+            previous_campaign_create_id: $previous_campaign_create_id,
+            previous_campaign_create_queued_runs: $previous_campaign_create_queued_runs
           },
           counts: {
             confirmed_urls: $confirmed_count,
@@ -336,14 +371,57 @@ steps:
       CAMPAIGN_PRIORITY_MODE=$(jq -r '.campaign_profile.previous_priority_mode // ""' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
       CAMPAIGN_CONFIDENCE_LEVEL=$(jq -r '.campaign_profile.previous_confidence_level // ""' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
       CAMPAIGN_NEXT_PHASE=$(jq -r '.campaign_profile.previous_next_phase // ""' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
+      PREVIOUS_FOLLOWUP_SOURCE_KIND=$(jq -r '.campaign_profile.previous_followup_source_kind // "none"' "{{campaignHandoffOutput}}" 2>/dev/null || echo "none")
       CAMPAIGN_ESCALATION_SCORE=$(jq -r '.campaign_profile.previous_escalation_score // 0' "{{campaignHandoffOutput}}" 2>/dev/null || echo 0)
       CAMPAIGN_REUSE_SOURCES=$(jq -r '(.campaign_profile.previous_reuse_sources // []) | join(",")' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
+      PREVIOUS_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_profile.previous_campaign_create_status // ""' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
+      PREVIOUS_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_profile.previous_campaign_create_id // ""' "{{campaignHandoffOutput}}" 2>/dev/null || echo "")
+      PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_profile.previous_campaign_create_queued_runs // 0' "{{campaignHandoffOutput}}" 2>/dev/null || echo 0)
       PREVIOUS_FOLLOWUP_TARGETS=$(jq -r '.counts.previous_followup_targets // 0' "{{campaignHandoffOutput}}" 2>/dev/null || echo 0)
       AUTO_DEEP_SCAN=false
       if [ "{{campaignAutoDeepScan}}" = "true" ]; then
         AUTO_DEEP_SCAN=true
       fi
       HIGH_RISK_JSON=$(printf '%s' "{{campaignHighRiskSeverities}}" | tr ',' '\n' | awk 'NF { gsub(/^[ \t]+|[ \t]+$/, "", $0); print }' | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || echo '[]')
+
+      if [ "$PREVIOUS_FOLLOWUP_SOURCE_KIND" = "resume-context" ] && [ "$PREVIOUS_CAMPAIGN_CREATE_STATUS" = "created" ] && [ -n "$PREVIOUS_CAMPAIGN_CREATE_ID" ]; then
+        jq -n \
+          --arg workflow "{{campaignWorkflow}}" \
+          --arg workflow_kind "{{campaignWorkflowKind}}" \
+          --arg priority "{{campaignPriority}}" \
+          --arg target_file "{{campaignTargetsFile}}" \
+          --arg priority_mode "$CAMPAIGN_PRIORITY_MODE" \
+          --arg confidence_level "$CAMPAIGN_CONFIDENCE_LEVEL" \
+          --arg next_phase "$CAMPAIGN_NEXT_PHASE" \
+          --arg campaign_id "$PREVIOUS_CAMPAIGN_CREATE_ID" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
+          --argjson queued_runs "$PREVIOUS_CAMPAIGN_CREATE_QUEUED_RUNS" \
+          --argjson target_count "$CAMPAIGN_TARGET_COUNT" \
+          --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
+          --argjson escalation_score "$CAMPAIGN_ESCALATION_SCORE" \
+          --argjson auto_deep_scan "$AUTO_DEEP_SCAN" \
+          --argjson high_risk_severities "$HIGH_RISK_JSON" \
+          '{
+            status: "created",
+            reason: "resume_context_already_created",
+            campaign_id: $campaign_id,
+            queued_runs: $queued_runs,
+            workflow: $workflow,
+            workflow_kind: $workflow_kind,
+            priority: $priority,
+            target_file: $target_file,
+            target_count: $target_count,
+            campaign_priority_mode: $priority_mode,
+            campaign_confidence_level: $confidence_level,
+            campaign_followup_next_phase: $next_phase,
+            previous_followup_source_kind: $previous_followup_source_kind,
+            previous_followup_targets: $previous_followup_targets,
+            campaign_escalation_score: $escalation_score,
+            auto_deep_scan: $auto_deep_scan,
+            high_risk_severities: $high_risk_severities
+          }' > "{{campaignCreateOutput}}"
+        exit 0
+      fi
 
       if [ ! -f "{{campaignTargetsFile}}" ] || [ ! -s "{{campaignTargetsFile}}" ]; then
         jq -n \
@@ -354,6 +432,7 @@ steps:
           --arg priority_mode "$CAMPAIGN_PRIORITY_MODE" \
           --arg confidence_level "$CAMPAIGN_CONFIDENCE_LEVEL" \
           --arg next_phase "$CAMPAIGN_NEXT_PHASE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --argjson target_count "$CAMPAIGN_TARGET_COUNT" \
           --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           --argjson escalation_score "$CAMPAIGN_ESCALATION_SCORE" \
@@ -367,6 +446,7 @@ steps:
             priority: $priority,
             target_file: $target_file,
             target_count: $target_count,
+            previous_followup_source_kind: $previous_followup_source_kind,
             campaign_priority_mode: $priority_mode,
             campaign_confidence_level: $confidence_level,
             campaign_followup_next_phase: $next_phase,
@@ -392,6 +472,7 @@ steps:
           --arg priority_mode "$CAMPAIGN_PRIORITY_MODE" \
           --arg confidence_level "$CAMPAIGN_CONFIDENCE_LEVEL" \
           --arg next_phase "$CAMPAIGN_NEXT_PHASE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --argjson target_count "$CAMPAIGN_TARGET_COUNT" \
           --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           --argjson escalation_score "$CAMPAIGN_ESCALATION_SCORE" \
@@ -405,6 +486,7 @@ steps:
             priority: $priority,
             target_file: $target_file,
             target_count: $target_count,
+            previous_followup_source_kind: $previous_followup_source_kind,
             campaign_priority_mode: $priority_mode,
             campaign_confidence_level: $confidence_level,
             campaign_followup_next_phase: $next_phase,
@@ -493,6 +575,7 @@ steps:
           --arg priority_mode "$CAMPAIGN_PRIORITY_MODE" \
           --arg confidence_level "$CAMPAIGN_CONFIDENCE_LEVEL" \
           --arg next_phase "$CAMPAIGN_NEXT_PHASE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --arg reuse_sources "$CAMPAIGN_REUSE_SOURCES" \
           --arg deep_scan_workflow "{{campaignDeepScanWorkflow}}" \
           --arg deep_scan_workflow_kind "{{campaignDeepScanWorkflowKind}}" \
@@ -508,6 +591,7 @@ steps:
             priority: $priority,
             target_file: $target_file,
             target_count: $target_count,
+            previous_followup_source_kind: $previous_followup_source_kind,
             campaign_priority_mode: $priority_mode,
             campaign_confidence_level: $confidence_level,
             campaign_followup_next_phase: $next_phase,
@@ -530,6 +614,7 @@ steps:
           --arg priority_mode "$CAMPAIGN_PRIORITY_MODE" \
           --arg confidence_level "$CAMPAIGN_CONFIDENCE_LEVEL" \
           --arg next_phase "$CAMPAIGN_NEXT_PHASE" \
+          --arg previous_followup_source_kind "$PREVIOUS_FOLLOWUP_SOURCE_KIND" \
           --argjson target_count "$CAMPAIGN_TARGET_COUNT" \
           --argjson previous_followup_targets "$PREVIOUS_FOLLOWUP_TARGETS" \
           --argjson escalation_score "$CAMPAIGN_ESCALATION_SCORE" \
@@ -543,6 +628,7 @@ steps:
             priority: $priority,
             target_file: $target_file,
             target_count: $target_count,
+            previous_followup_source_kind: $previous_followup_source_kind,
             campaign_priority_mode: $priority_mode,
             campaign_confidence_level: $confidence_level,
             campaign_followup_next_phase: $next_phase,

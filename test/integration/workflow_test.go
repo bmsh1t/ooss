@@ -3040,6 +3040,109 @@ func TestExecuteAICampaignHandoffIncludesRetestAndRescanSeedTargetsFromPreviousF
 	}, previousFollowup)
 }
 
+func TestExecuteAICampaignHandoffSkipsDuplicateCampaignCreateWhenResumeAlreadyCreated(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-campaign-handoff.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	callsPath := installStubOsmedeus(t)
+	targetSpace := "campaign-handoff-resume-created"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "followup_decision_source": "followup-decision",
+  "scan_profile": "aggressive",
+  "severity": "critical,high",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "reuse_sources": ["campaign-create", "operator-queue"],
+  "signal_scores": {"escalation_score": 21},
+  "refined_targets": {
+    "priority_targets": ["https://seed.example.com/review"]
+  },
+  "seed_targets": {
+    "manual_first_targets": ["https://seed.example.com/admin"],
+    "high_confidence_targets": ["https://seed.example.com/upload"]
+  },
+  "followup_summary": {
+    "operator_tasks": 2,
+    "campaign_targets": 3,
+    "retest_queued_targets": 2,
+    "campaign_ready": true
+  },
+  "campaign_create": {
+    "status": "created",
+    "campaign_id": "camp-resume-42",
+    "queued_runs": 5
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"), `{
+  "summary": {"total_targets": 2},
+  "targets": [{"target": "https://app.example.com/login"}],
+  "automation_queue": [{"target": "https://api.example.com/admin"}]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"), `{
+  "focus_targets": ["https://portal.example.com"],
+  "tasks": [
+    {"target": "https://api.example.com/admin", "priority": "P1", "title": "Verify admin exposure"}
+  ]
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "semantic-priority-targets-decision-followup-"+targetSpace+".txt"), "https://api.example.com/graphql\n")
+	writeTestFile(t, filepath.Join(aiDir, "confirmed-urls-"+targetSpace+".txt"), "https://app.example.com/login\n")
+	writeTestFile(t, filepath.Join(aiDir, "entry-points-"+targetSpace+".txt"), "https://api.example.com/admin\n")
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":                "https://app.example.com",
+		"space_name":            targetSpace,
+		"enableCampaignHandoff": "true",
+		"enableCampaignCreate":  "true",
+		"campaignWorkflow":      "web-classic",
+		"campaignWorkflowKind":  "flow",
+		"campaignPriority":      "critical",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	createData, err := os.ReadFile(filepath.Join(aiDir, "campaign-create-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var create map[string]interface{}
+	require.NoError(t, json.Unmarshal(createData, &create))
+	assert.Equal(t, "created", create["status"])
+	assert.Equal(t, "camp-resume-42", create["campaign_id"])
+	assert.Equal(t, float64(5), create["queued_runs"])
+	assert.Equal(t, "resume-context", create["previous_followup_source_kind"])
+
+	handoffData, err := os.ReadFile(filepath.Join(aiDir, "campaign-handoff-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var handoff map[string]interface{}
+	require.NoError(t, json.Unmarshal(handoffData, &handoff))
+	campaignCreation, ok := handoff["campaign_creation"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "camp-resume-42", campaignCreation["campaign_id"])
+	assert.Equal(t, float64(5), campaignCreation["queued_runs"])
+
+	callsData, err := os.ReadFile(callsPath)
+	if err == nil {
+		assert.Empty(t, strings.TrimSpace(string(callsData)))
+	} else {
+		assert.True(t, os.IsNotExist(err))
+	}
+}
+
 func TestExecuteAIOperatorQueueConsumesQueuedPreviousFollowupTargetLists(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -3112,6 +3215,100 @@ func TestExecuteAIOperatorQueueConsumesQueuedPreviousFollowupTargetLists(t *test
 		"https://queued.example.com/admin",
 		"https://queued.example.com/graphql",
 	}, focusTargets)
+}
+
+func TestExecuteAIOperatorQueuePrefersResumeManualFirstTargets(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-operator-queue.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-generate-operator-queue" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "operator-queue-resume-manual-first"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "followup_decision_source": "followup-decision",
+  "scan_profile": "aggressive",
+  "severity": "critical,high",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "refined_targets": {
+    "priority_targets": ["https://seed.example.com/review"]
+  },
+  "seed_targets": {
+    "manual_first_targets": ["https://seed.example.com/admin"],
+    "high_confidence_targets": ["https://seed.example.com/upload"]
+  },
+  "followup_summary": {
+    "operator_tasks": 2,
+    "retest_queued_targets": 2
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	contextData, err := os.ReadFile(filepath.Join(aiDir, ".input", "operator-queue-context.json"))
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(contextData, &payload))
+
+	previousFollowup, ok := payload["previous_followup"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "manual-first", previousFollowup["priority_mode"])
+	assert.Equal(t, "high", previousFollowup["confidence_level"])
+
+	targetList, ok := previousFollowup["targets_list"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://seed.example.com/admin",
+		"https://seed.example.com/upload",
+		"https://seed.example.com/review",
+	}, targetList)
+
+	queueData, err := os.ReadFile(filepath.Join(aiDir, "operator-queue-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var queue map[string]interface{}
+	require.NoError(t, json.Unmarshal(queueData, &queue))
+
+	focusTargets, ok := queue["focus_targets"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{
+		"https://seed.example.com/admin",
+		"https://seed.example.com/upload",
+		"https://seed.example.com/review",
+	}, focusTargets)
+
+	tasks, ok := queue["tasks"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, tasks)
+	firstTask, ok := tasks[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "https://seed.example.com/admin", firstTask["target"])
+	assert.Equal(t, "P1", firstTask["priority"])
 }
 
 func TestExecuteAIOperatorQueuePrefersDecisionFollowupSemanticContext(t *testing.T) {
@@ -4339,6 +4536,102 @@ func TestExecuteAIRetestPlanningMergesPreviousFollowupAdvisory(t *testing.T) {
 	assert.Contains(t, markdown, "manual-first")
 	assert.Contains(t, markdown, "Queue follow-up effective: true")
 	assert.Contains(t, markdown, "## Automation Queue")
+}
+
+func TestExecuteAIRetestPlanningSkipsDuplicateQueueWhenResumeQueueEffective(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-retest-planning.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "ai-generate-retest-plan" {
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-retest-resume-queue-effective"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "followup_decision_source": "followup-decision",
+  "scan_profile": "aggressive",
+  "severity": "critical,high",
+  "next_phase": "manual-exploitation",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "reuse_sources": ["retest-queue"],
+  "signal_scores": {"escalation_score": 17},
+  "refined_targets": {
+    "priority_targets": ["https://seed.example.com/review"]
+  },
+  "seed_targets": {
+    "manual_first_targets": ["https://seed.example.com/admin"],
+    "high_confidence_targets": ["https://seed.example.com/upload"],
+    "rescan_targets": ["https://seed.example.com/rescan"]
+  },
+  "followup_summary": {
+    "operator_tasks": 2,
+    "campaign_targets": 1,
+    "retest_queued_targets": 3,
+    "campaign_ready": true
+  },
+  "campaign_create": {
+    "status": "created",
+    "campaign_id": "camp-retest-1",
+    "queued_runs": 3
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	contextData, err := os.ReadFile(filepath.Join(aiDir, ".input", "retest-context.json"))
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(contextData, &payload))
+
+	counts, ok := payload["counts"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(4), counts["previous_followup_targets"])
+
+	planData, err := os.ReadFile(filepath.Join(aiDir, "retest-plan-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var plan map[string]interface{}
+	require.NoError(t, json.Unmarshal(planData, &plan))
+
+	summary, ok := plan["summary"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "manual-first", summary["previous_followup_priority_mode"])
+	assert.Equal(t, true, summary["previous_followup_queue_followup_effective"])
+	assert.Equal(t, "resume-context", summary["previous_followup_source_kind"])
+
+	targets, ok := plan["targets"].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, targets)
+	firstTarget, ok := targets[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "https://seed.example.com/admin", firstTarget["target"])
+
+	automationQueue, ok := plan["automation_queue"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, automationQueue)
 }
 
 func TestExecuteAIRetestPlanningConsumesQueuedPreviousFollowupTargetLists(t *testing.T) {

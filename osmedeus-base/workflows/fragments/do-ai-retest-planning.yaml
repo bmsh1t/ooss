@@ -44,6 +44,8 @@ params:
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: appliedDecisionFile
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: previous_followup_targets
@@ -243,6 +245,7 @@ steps:
       ENTRY_COUNT=$(count_lines_safe "{{entryPointsFile}}")
       BEST_COUNT=$(count_lines_safe "{{bestPathTargetsFile}}")
       PREV_FOLLOWUP_TARGETS=0
+      PREV_SOURCE_KIND="none"
       PREV_PRIORITY_MODE=""
       PREV_CONFIDENCE_LEVEL=""
       PREV_NEXT_PHASE=""
@@ -273,7 +276,28 @@ steps:
       if [ -f "$ACTIVE_VECTOR_KNOWLEDGE_FILE" ] && jq empty "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null; then
         VECTOR_KNOWLEDGE_COUNT=$(jq -r 'length' "$ACTIVE_VECTOR_KNOWLEDGE_FILE" 2>/dev/null || echo 0)
       fi
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREV_SOURCE_KIND="resume-context"
+        PREV_FOLLOWUP_TARGETS=$(jq -r '[((.refined_targets.priority_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_MANUAL_NEEDED=$(jq -r 'if .manual_followup_needed != null then .manual_followup_needed elif .followup_summary.manual_followup_needed != null then .followup_summary.manual_followup_needed else ((.followup_summary.operator_tasks // 0) > 0 or (.followup_summary.rescan_critical // 0) > 0 or (.followup_summary.rescan_high // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_CAMPAIGN_RECOMMENDED=$(jq -r 'if .campaign_followup_recommended != null then .campaign_followup_recommended elif .followup_summary.campaign_followup_recommended != null then .followup_summary.campaign_followup_recommended else ((.followup_summary.campaign_ready // false) == true and (.followup_summary.campaign_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_QUEUE_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_MANUAL_FIRST_COUNT=$(jq -r '[((.seed_targets.manual_first_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_HIGH_CONFIDENCE_COUNT=$(jq -r '[((.seed_targets.high_confidence_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // .followup_summary.campaign_create_status // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_SOURCE_KIND="decision-file"
         PREV_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
@@ -331,6 +355,7 @@ steps:
           || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_ID" ] \
           || [ "$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
           PREV_FOLLOWUP_TARGETS="$PREV_PARAM_TARGET_COUNT"
+          PREV_SOURCE_KIND="queued-params"
           if [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ] 2>/dev/null; then
             PREV_FOLLOWUP_TARGETS="$PREV_PARAM_COMBINED_COUNT"
           fi
@@ -385,6 +410,7 @@ steps:
         --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
         --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
         --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGETS" \
+        --arg previous_followup_source_kind "$PREV_SOURCE_KIND" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
         --arg previous_followup_next_phase "$PREV_NEXT_PHASE" \
@@ -446,6 +472,7 @@ steps:
             rescan_targets: $decision_rescan_targets
           },
           previous_followup: {
+            source_kind: $previous_followup_source_kind,
             priority_mode: $previous_followup_priority_mode,
             confidence_level: $previous_followup_confidence_level,
             next_phase: $previous_followup_next_phase,
@@ -608,6 +635,7 @@ steps:
       }
 
       PREV_PRIORITY_MODE=""
+      PREV_SOURCE_KIND="none"
       PREV_CONFIDENCE_LEVEL=""
       PREV_NEXT_PHASE=""
       PREV_REUSE_SOURCES_JSON='[]'
@@ -659,7 +687,25 @@ steps:
         DECISION_TARGET_COUNT=$(printf '%s\n' "$DECISION_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
       fi
 
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREV_SOURCE_KIND="resume-context"
+        PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_NEXT_PHASE=$(jq -r '.next_phase // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_REUSE_SOURCES_JSON=$(jq -c '.reuse_sources // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_MANUAL_NEEDED=$(jq -r 'if .manual_followup_needed != null then .manual_followup_needed elif .followup_summary.manual_followup_needed != null then .followup_summary.manual_followup_needed else ((.followup_summary.operator_tasks // 0) > 0 or (.followup_summary.rescan_critical // 0) > 0 or (.followup_summary.rescan_high // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_CAMPAIGN_RECOMMENDED=$(jq -r 'if .campaign_followup_recommended != null then .campaign_followup_recommended elif .followup_summary.campaign_followup_recommended != null then .followup_summary.campaign_followup_recommended else ((.followup_summary.campaign_ready // false) == true and (.followup_summary.campaign_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_QUEUE_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_ESCALATION_SCORE=$(jq -r '.signal_scores.escalation_score // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_CAMPAIGN_CREATE_STATUS=$(jq -r '.campaign_create.status // .followup_summary.campaign_create_status // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_ID=$(jq -r '.campaign_create.campaign_id // .followup_summary.campaign_create_id // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CAMPAIGN_CREATE_QUEUED_RUNS=$(jq -r '.campaign_create.queued_runs // .followup_summary.campaign_create_queued_runs // 0' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_SOURCE_KIND="decision-file"
         PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_NEXT_PHASE=$(jq -r '.seed_focus.next_phase // .execution_feedback.next_phase // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
@@ -708,6 +754,7 @@ steps:
           || [ -n "$PREV_PARAM_CAMPAIGN_CREATE_ID" ] \
           || [ "$PREV_PARAM_CAMPAIGN_CREATE_QUEUED_RUNS" -gt 0 ] 2>/dev/null; then
           PREV_PRIORITY_MODE="$PREV_PARAM_PRIORITY_MODE"
+          PREV_SOURCE_KIND="queued-params"
           PREV_CONFIDENCE_LEVEL="$PREV_PARAM_CONFIDENCE_LEVEL"
           PREV_NEXT_PHASE="$PREV_PARAM_NEXT_PHASE"
           PREV_REUSE_SOURCES_JSON="$PREV_PARAM_REUSE_SOURCES_JSON"
@@ -768,13 +815,22 @@ steps:
           ' "$JSON_FILE" > {{retestPlanOutput}}
       else
         {
+          if [ "$PREV_SOURCE_KIND" = "resume-context" ] && [ "$PREV_PRIORITY_MODE" = "manual-first" ]; then
+            printf '%s\n' "$PREV_MANUAL_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
+            printf '%s\n' "$PREV_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
+            printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
+          fi
           head -20 "{{confirmedUrlsFile}}" 2>/dev/null || true
           head -10 "{{entryPointsFile}}" 2>/dev/null || true
           head -10 "{{bestPathTargetsFile}}" 2>/dev/null || true
           if [ "$DECISION_SOURCE_KIND" != "none" ]; then
             printf '%s\n' "$DECISION_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
           fi
-          if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+          if [ "$PREV_SOURCE_KIND" = "resume-context" ]; then
+            if [ "$PREV_PRIORITY_MODE" != "manual-first" ]; then
+              printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
+            fi
+          elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
             jq -r '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null || true
           elif [ -n "$PREV_COMBINED_TARGETS_JSON" ]; then
             printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null || true
@@ -828,6 +884,7 @@ steps:
         --arg decision_source_kind "$DECISION_SOURCE_KIND" \
         --argjson decision_target_count "$DECISION_TARGET_COUNT" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
+        --arg previous_followup_source_kind "$PREV_SOURCE_KIND" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
         --arg previous_followup_next_phase "$PREV_NEXT_PHASE" \
         --arg previous_followup_campaign_create_status "$PREV_CAMPAIGN_CREATE_STATUS" \
@@ -868,6 +925,7 @@ steps:
             decision_source_kind: $decision_source_kind,
             decision_target_count: $decision_target_count,
             previous_followup_priority_mode: $previous_followup_priority_mode,
+            previous_followup_source_kind: $previous_followup_source_kind,
             previous_followup_confidence_level: $previous_followup_confidence_level,
             previous_followup_next_phase: $previous_followup_next_phase,
             previous_followup_escalation_score: $previous_followup_escalation_score,
@@ -901,30 +959,34 @@ steps:
               | reduce .[] as $item ([]; (($item.title // "") + "|" + ($item.target // "")) as $key | if ((map(((.title // "") + "|" + (.target // ""))) | index($key)) == null) then . + [$item] else . end)
             )
           | .automation_queue = (
-              ((.automation_queue // [])
-                | map(
-                    .workflow = (.workflow // $recommended_flow)
-                    | .priority = (.priority // $priority)
-                    | .reason = enrich_reason(.target; .reason)
-                  ))
-              + [
-                  $previous_followup_manual_targets[]? | {
-                    workflow: $recommended_flow,
-                    target: .,
-                    priority: $priority,
-                    reason: "previous followup manual-first seed"
-                  }
-                ]
-              + [
-                  $previous_followup_high_confidence_targets[]? | {
-                    workflow: $recommended_flow,
-                    target: .,
-                    priority: $priority,
-                    reason: "previous followup high-confidence seed"
-                  }
-                ]
-              | reduce .[] as $item ([]; (($item.workflow // "") + "|" + ($item.target // "")) as $key | if ((map(((.workflow // "") + "|" + (.target // ""))) | index($key)) == null) then . + [$item] else . end)
-              | map(.reason = enrich_reason(.target; .reason))
+              if $previous_followup_source_kind == "resume-context" and $previous_followup_queue_followup_effective == true then
+                []
+              else
+                ((.automation_queue // [])
+                  | map(
+                      .workflow = (.workflow // $recommended_flow)
+                      | .priority = (.priority // $priority)
+                      | .reason = enrich_reason(.target; .reason)
+                    ))
+                + [
+                    $previous_followup_manual_targets[]? | {
+                      workflow: $recommended_flow,
+                      target: .,
+                      priority: $priority,
+                      reason: "previous followup manual-first seed"
+                    }
+                  ]
+                + [
+                    $previous_followup_high_confidence_targets[]? | {
+                      workflow: $recommended_flow,
+                      target: .,
+                      priority: $priority,
+                      reason: "previous followup high-confidence seed"
+                    }
+                  ]
+                | reduce .[] as $item ([]; (($item.workflow // "") + "|" + ($item.target // "")) as $key | if ((map(((.workflow // "") + "|" + (.target // ""))) | index($key)) == null) then . + [$item] else . end)
+                | map(.reason = enrich_reason(.target; .reason))
+              end
             )
         ' {{retestPlanOutput}} > {{retestPlanOutput}}.tmp 2>/dev/null && mv {{retestPlanOutput}}.tmp {{retestPlanOutput}} || true
 

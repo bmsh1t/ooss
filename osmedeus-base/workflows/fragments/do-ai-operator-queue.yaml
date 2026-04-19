@@ -28,6 +28,8 @@ params:
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: appliedDecisionFile
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: previous_followup_targets
@@ -138,13 +140,31 @@ steps:
       SEMANTIC_COUNT=$(jq -r '.total_results // ([.results[]?] | length) // 0' "$ACTIVE_SEMANTIC_FILE" 2>/dev/null || echo 0)
       SEMANTIC_TARGET_COUNT=$(semantic_target_count "$ACTIVE_SEMANTIC_FILE")
       PREV_FOLLOWUP_TARGETS=0
+      PREV_SOURCE_KIND="none"
       PREV_PRIORITY_MODE=""
       PREV_CONFIDENCE_LEVEL=""
+      PREV_QUEUE_EFFECTIVE=false
+      PREV_MANUAL_TARGETS_JSON='[]'
+      PREV_HIGH_CONFIDENCE_TARGETS_JSON='[]'
       PREV_COMBINED_TARGETS_JSON='[]'
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREV_SOURCE_KIND="resume-context"
+        PREV_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.confirmed_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{resumeContextFile}}" 2>/dev/null || echo 0)
+        PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_QUEUE_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_SOURCE_KIND="decision-file"
         PREV_FOLLOWUP_TARGETS=$(jq -r '[((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]?] | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end) | length' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo 0)
         PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
         PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
       else
         PREV_COMBINED_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
@@ -152,6 +172,7 @@ steps:
         if [ "$PREV_FOLLOWUP_TARGETS" -eq 0 ] 2>/dev/null; then
           PREV_FOLLOWUP_TARGETS=$(printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
         fi
+        PREV_SOURCE_KIND="queued-params"
         PREV_PRIORITY_MODE="{{previous_followup_priority_mode}}"
         PREV_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
       fi
@@ -179,8 +200,12 @@ steps:
         --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
         --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
         --argjson previous_followup_targets "$PREV_FOLLOWUP_TARGETS" \
+        --arg previous_followup_source_kind "$PREV_SOURCE_KIND" \
         --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
         --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
+        --argjson previous_followup_queue_followup_effective "$PREV_QUEUE_EFFECTIVE" \
+        --argjson previous_followup_manual_targets "$PREV_MANUAL_TARGETS_JSON" \
+        --argjson previous_followup_high_confidence_targets "$PREV_HIGH_CONFIDENCE_TARGETS_JSON" \
         --argjson previous_followup_targets_list "$PREV_COMBINED_TARGETS_JSON" \
         '{
           target: $target,
@@ -212,8 +237,12 @@ steps:
             rescan_targets: $decision_rescan_targets
           },
           previous_followup: {
+            source_kind: $previous_followup_source_kind,
             priority_mode: $previous_followup_priority_mode,
             confidence_level: $previous_followup_confidence_level,
+            queue_followup_effective: $previous_followup_queue_followup_effective,
+            manual_first_targets_list: $previous_followup_manual_targets,
+            high_confidence_targets_list: $previous_followup_high_confidence_targets,
             targets_list: $previous_followup_targets_list
           }
         }' > {{Output}}/ai-analysis/.input/operator-queue-context.json
@@ -336,6 +365,13 @@ steps:
       DECISION_FOCUS_JSON='[]'
       DECISION_PRIORITY_JSON='[]'
       DECISION_RESCAN_JSON='[]'
+      PREV_SOURCE_KIND="none"
+      PREV_PRIORITY_MODE=""
+      PREV_CONFIDENCE_LEVEL=""
+      PREV_QUEUE_EFFECTIVE=false
+      PREV_MANUAL_TARGETS_JSON='[]'
+      PREV_HIGH_CONFIDENCE_TARGETS_JSON='[]'
+      PREV_COMBINED_TARGETS_JSON='[]'
       if [ -f "{{appliedDecisionFile}}" ] && jq empty "{{appliedDecisionFile}}" 2>/dev/null; then
         ACTIVE_DECISION_FILE="{{appliedDecisionFile}}"
         DECISION_SOURCE_KIND="applied-ai-decision"
@@ -370,6 +406,30 @@ steps:
         sed -n '/^[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$RAW_FILE" > "$JSON_FILE"
       fi
 
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREV_SOURCE_KIND="resume-context"
+        PREV_PRIORITY_MODE=$(jq -r '.priority_mode // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.confidence_level // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_QUEUE_EFFECTIVE=$(jq -r 'if .queue_followup_effective != null then .queue_followup_effective elif .followup_summary.queue_followup_effective != null then .followup_summary.queue_followup_effective else ((.followup_summary.retest_queued_targets // 0) > 0) end' "{{resumeContextFile}}" 2>/dev/null || echo false)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.refined_targets.priority_targets // []) + (.seed_targets.retest_targets // []) + (.seed_targets.rescan_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{resumeContextFile}}" 2>/dev/null || echo '[]')
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        PREV_SOURCE_KIND="decision-file"
+        PREV_PRIORITY_MODE=$(jq -r '.seed_focus.priority_mode // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_CONFIDENCE_LEVEL=$(jq -r '.seed_focus.confidence_level // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
+        PREV_QUEUE_EFFECTIVE=$(jq -r '.seed_focus.queue_followup_effective // .execution_feedback.queue_followup_effective // false' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo false)
+        PREV_MANUAL_TARGETS_JSON=$(jq -c '.seed_targets.manual_first_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_HIGH_CONFIDENCE_TARGETS_JSON=$(jq -c '.seed_targets.high_confidence_targets // []' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+        PREV_COMBINED_TARGETS_JSON=$(jq -c '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.semantic_targets // [])) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end)' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo '[]')
+      elif [ -n "{{previous_followup_combined_targets_list}}" ]; then
+        PREV_SOURCE_KIND="queued-params"
+        PREV_PRIORITY_MODE="{{previous_followup_priority_mode}}"
+        PREV_CONFIDENCE_LEVEL="{{previous_followup_confidence_level}}"
+        PREV_COMBINED_TARGETS_JSON=$(csv_or_json_to_array "{{previous_followup_combined_targets_list}}")
+      fi
+
       if [ -s "$JSON_FILE" ] && jq empty "$JSON_FILE" 2>/dev/null; then
         jq \
           --arg decision_source_kind "$DECISION_SOURCE_KIND" \
@@ -377,16 +437,65 @@ steps:
           --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
           --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
           --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
+          --arg previous_followup_source_kind "$PREV_SOURCE_KIND" \
+          --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
+          --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
+          --argjson previous_followup_queue_followup_effective "$PREV_QUEUE_EFFECTIVE" \
+          --argjson previous_followup_manual_targets "$PREV_MANUAL_TARGETS_JSON" \
+          --argjson previous_followup_high_confidence_targets "$PREV_HIGH_CONFIDENCE_TARGETS_JSON" \
+          --argjson previous_followup_targets_list "$PREV_COMBINED_TARGETS_JSON" \
           '
+          def unique_list($items):
+            reduce ($items[]? | .[]?) as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end);
+          def target_in($arr; $value):
+            (($arr | index($value)) != null);
           .summary = ((.summary // {}) + {
             total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
             p1_tasks: (.summary.p1_tasks // 0),
             p2_tasks: (.summary.p2_tasks // 0),
             decision_source_kind: $decision_source_kind,
-            decision_target_count: $decision_target_count
+            decision_target_count: $decision_target_count,
+            previous_followup_source_kind: $previous_followup_source_kind,
+            previous_priority_mode: $previous_followup_priority_mode,
+            previous_confidence_level: $previous_followup_confidence_level,
+            previous_queue_followup_effective: $previous_followup_queue_followup_effective
           })
-          | .focus_targets = (((.focus_targets // []) + $decision_focus_targets + $decision_priority_targets + $decision_rescan_targets) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end))
-          | .tasks = (.tasks // [])
+          | .focus_targets = (
+              if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
+                unique_list([$previous_followup_manual_targets, $previous_followup_high_confidence_targets, (.focus_targets // []), $decision_focus_targets, $decision_priority_targets, $decision_rescan_targets, $previous_followup_targets_list])
+              else
+                unique_list([(.focus_targets // []), $decision_focus_targets, $decision_priority_targets, $decision_rescan_targets])
+              end
+            )
+          | .tasks = (
+              (
+                if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
+                  [
+                    ($previous_followup_manual_targets + $previous_followup_high_confidence_targets)[]? | {
+                      id: "",
+                      priority: "P1",
+                      target: .,
+                      title: "Resume manual-first follow-up",
+                      reason: "resume-context manual-first target",
+                      procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
+                      expected_outcome: "Confirm whether the target can be exploited or chained further",
+                      evidence: ["resume_context", "manual_first"]
+                    }
+                  ] + (.tasks // [])
+                else
+                  (.tasks // [])
+                end
+              )
+              | reduce .[] as $item ([]; if ((map(.target // "") | index($item.target // "")) == null) then . + [$item] else . end)
+              | map(
+                  .priority = (
+                    if target_in($previous_followup_manual_targets; .target) then "P1"
+                    elif target_in($previous_followup_high_confidence_targets; .target) and ((.priority // "") == "" or .priority == "P2" or .priority == "P3") then "P1"
+                    else (.priority // "P2")
+                    end
+                  )
+                )
+            )
         ' "$JSON_FILE" > {{operatorQueueOutput}}
       else
         if [ "$DECISION_TARGET_COUNT" -gt 0 ] 2>/dev/null; then
@@ -400,7 +509,19 @@ steps:
         else
           : > "$FALLBACK_TARGETS"
         fi
-        if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+        if [ "$PREV_SOURCE_KIND" = "resume-context" ]; then
+          if [ "$PREV_PRIORITY_MODE" = "manual-first" ]; then
+            {
+              printf '%s\n' "$PREV_MANUAL_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null
+              printf '%s\n' "$PREV_HIGH_CONFIDENCE_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null
+              printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null
+              cat "$FALLBACK_TARGETS" 2>/dev/null || true
+            } | awk 'NF && !seen[$0]++' > "$FALLBACK_TARGETS.tmp" 2>/dev/null && mv "$FALLBACK_TARGETS.tmp" "$FALLBACK_TARGETS" || true
+          else
+            printf '%s\n' "$PREV_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null >> "$FALLBACK_TARGETS" || true
+            awk 'NF && !seen[$0]++' "$FALLBACK_TARGETS" > "$FALLBACK_TARGETS.tmp" 2>/dev/null && mv "$FALLBACK_TARGETS.tmp" "$FALLBACK_TARGETS" || true
+          fi
+        elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
           jq -r '((.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$FALLBACK_TARGETS" || true
           awk 'NF && !seen[$0]++' "$FALLBACK_TARGETS" > "$FALLBACK_TARGETS.tmp" 2>/dev/null && mv "$FALLBACK_TARGETS.tmp" "$FALLBACK_TARGETS" || true
         elif [ -n "{{previous_followup_combined_targets_list}}" ]; then
@@ -442,16 +563,65 @@ steps:
         --argjson decision_focus_targets "$DECISION_FOCUS_JSON" \
         --argjson decision_priority_targets "$DECISION_PRIORITY_JSON" \
         --argjson decision_rescan_targets "$DECISION_RESCAN_JSON" \
+        --arg previous_followup_source_kind "$PREV_SOURCE_KIND" \
+        --arg previous_followup_priority_mode "$PREV_PRIORITY_MODE" \
+        --arg previous_followup_confidence_level "$PREV_CONFIDENCE_LEVEL" \
+        --argjson previous_followup_queue_followup_effective "$PREV_QUEUE_EFFECTIVE" \
+        --argjson previous_followup_manual_targets "$PREV_MANUAL_TARGETS_JSON" \
+        --argjson previous_followup_high_confidence_targets "$PREV_HIGH_CONFIDENCE_TARGETS_JSON" \
+        --argjson previous_followup_targets_list "$PREV_COMBINED_TARGETS_JSON" \
         '
+        def unique_list($items):
+          reduce ($items[]? | .[]?) as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end);
+        def target_in($arr; $value):
+          (($arr | index($value)) != null);
         .summary = ((.summary // {}) + {
           total_tasks: (.summary.total_tasks // ([.tasks[]?] | length)),
           p1_tasks: (.summary.p1_tasks // 0),
           p2_tasks: (.summary.p2_tasks // 0),
           decision_source_kind: $decision_source_kind,
-          decision_target_count: $decision_target_count
+          decision_target_count: $decision_target_count,
+          previous_followup_source_kind: $previous_followup_source_kind,
+          previous_priority_mode: $previous_followup_priority_mode,
+          previous_confidence_level: $previous_followup_confidence_level,
+          previous_queue_followup_effective: $previous_followup_queue_followup_effective
         })
-        | .focus_targets = (((.focus_targets // []) + $decision_focus_targets + $decision_priority_targets + $decision_rescan_targets) | reduce .[] as $item ([]; if ($item != null and $item != "" and (index($item) == null)) then . + [$item] else . end))
-        | .tasks = (.tasks // [])
+        | .focus_targets = (
+            if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
+              unique_list([$previous_followup_manual_targets, $previous_followup_high_confidence_targets, (.focus_targets // []), $decision_focus_targets, $decision_priority_targets, $decision_rescan_targets, $previous_followup_targets_list])
+            else
+              unique_list([(.focus_targets // []), $decision_focus_targets, $decision_priority_targets, $decision_rescan_targets])
+            end
+          )
+        | .tasks = (
+            (
+              if $previous_followup_source_kind == "resume-context" and $previous_followup_priority_mode == "manual-first" then
+                [
+                  ($previous_followup_manual_targets + $previous_followup_high_confidence_targets)[]? | {
+                    id: "",
+                    priority: "P1",
+                    target: .,
+                    title: "Resume manual-first follow-up",
+                    reason: "resume-context manual-first target",
+                    procedure: "Validate exploitability, authorization boundary, business logic abuse, and pivot potential manually",
+                    expected_outcome: "Confirm whether the target can be exploited or chained further",
+                    evidence: ["resume_context", "manual_first"]
+                  }
+                ] + (.tasks // [])
+              else
+                (.tasks // [])
+              end
+            )
+            | reduce .[] as $item ([]; if ((map(.target // "") | index($item.target // "")) == null) then . + [$item] else . end)
+            | map(
+                .priority = (
+                  if target_in($previous_followup_manual_targets; .target) then "P1"
+                  elif target_in($previous_followup_high_confidence_targets; .target) and ((.priority // "") == "" or .priority == "P2" or .priority == "P3") then "P1"
+                  else (.priority // "P2")
+                  end
+                )
+              )
+          )
       ' {{operatorQueueOutput}} > {{operatorQueueOutput}}.tmp 2>/dev/null && mv {{operatorQueueOutput}}.tmp {{operatorQueueOutput}} || true
 
       rm -f "$RAW_FILE" "$JSON_FILE" "$FALLBACK_TARGETS" 2>/dev/null || true

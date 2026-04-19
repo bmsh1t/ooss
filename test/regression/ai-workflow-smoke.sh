@@ -163,12 +163,19 @@ applied_followup_kind=$(jq -er '.source.followup_source_kind' "$APPLIED_DECISION
 retest_total=$(jq -er '.summary.total_targets // 0' "$RETEST_PLAN")
 retest_decision_source=$(jq -er '.summary.decision_source_kind // ""' "$RETEST_PLAN")
 retest_decision_targets=$(jq -er '.summary.decision_target_count // 0' "$RETEST_PLAN")
+retest_prev_source=$(jq -er '.summary.previous_followup_source_kind // ""' "$RETEST_PLAN")
+retest_prev_queue_effective=$(jq -er '.summary.previous_followup_queue_followup_effective' "$RETEST_PLAN")
+retest_automation_queue=$(jq -er '.automation_queue | length' "$RETEST_PLAN")
 operator_total=$(jq -er '.summary.total_tasks // 0' "$OPERATOR_QUEUE")
 operator_decision_source=$(jq -er '.summary.decision_source_kind // ""' "$OPERATOR_QUEUE")
 operator_decision_targets=$(jq -er '.summary.decision_target_count // 0' "$OPERATOR_QUEUE")
+operator_prev_source=$(jq -er '.summary.previous_followup_source_kind // ""' "$OPERATOR_QUEUE")
+operator_prev_mode=$(jq -er '.summary.previous_priority_mode // ""' "$OPERATOR_QUEUE")
+operator_focus_first=$(jq -er '.focus_targets[0] // ""' "$OPERATOR_QUEUE")
 campaign_ready=$(jq -er '.handoff_ready' "$CAMPAIGN_HANDOFF")
 campaign_decision_focus_targets=$(jq -er '.counts.decision_focus_targets // 0' "$CAMPAIGN_HANDOFF")
 campaign_target_count=$(jq -er '.counts.campaign_targets' "$CAMPAIGN_HANDOFF")
+campaign_prev_source=$(jq -er '.campaign_profile.previous_followup_source_kind // ""' "$CAMPAIGN_HANDOFF")
 campaign_create_status=$(jq -er '.status' "$CAMPAIGN_CREATE")
 campaign_create_id=$(jq -er '.campaign_id' "$CAMPAIGN_CREATE")
 campaign_create_runs=$(jq -er '.queued_runs' "$CAMPAIGN_CREATE")
@@ -199,12 +206,19 @@ assert_eq "$applied_followup_kind" "decision-file" "applied decision follow-up s
 assert_ge "$retest_total" 2 "retest plan total targets"
 assert_eq "$retest_decision_source" "applied-ai-decision" "retest plan decision source"
 assert_ge "$retest_decision_targets" 2 "retest plan decision target count"
+assert_eq "$retest_prev_source" "resume-context" "retest plan previous follow-up source"
+assert_eq "$retest_prev_queue_effective" "true" "retest plan previous queue effectiveness"
+assert_eq "$retest_automation_queue" "0" "retest plan automation queue suppressed by resume gate"
 assert_ge "$operator_total" 2 "operator queue total tasks"
 assert_eq "$operator_decision_source" "applied-ai-decision" "operator queue decision source"
 assert_ge "$operator_decision_targets" 2 "operator queue decision target count"
+assert_eq "$operator_prev_source" "resume-context" "operator queue previous follow-up source"
+assert_eq "$operator_prev_mode" "manual-first" "operator queue previous priority mode"
+assert_contains "$operator_focus_first" "/admin" "operator queue manual-first focus ordering"
 assert_eq "$campaign_ready" "true" "campaign handoff readiness"
 assert_ge "$campaign_decision_focus_targets" 2 "campaign handoff decision focus target count"
 assert_ge "$campaign_target_count" 3 "campaign handoff target count"
+assert_eq "$campaign_prev_source" "resume-context" "campaign handoff previous follow-up source"
 assert_eq "$campaign_create_status" "created" "campaign creation status"
 assert_ge "$campaign_create_runs" 3 "campaign queued run count"
 assert_eq "$retest_queue_status" "queued" "retest queue status"
