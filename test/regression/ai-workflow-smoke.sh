@@ -8,7 +8,6 @@ OSMEDEUS_BIN="${OSMEDEUS_BIN:-${ROOT_DIR}/build/bin/osmedeus}"
 WORKSPACES_DIR="${WORKSPACES_DIR:-${BASE_DIR}/workspaces}"
 TARGET="${TARGET:-smoke-ai-regression.example.com}"
 SMOKE_FLOW_PATH="${SMOKE_FLOW_PATH:-${WORKFLOW_DIR}/ai-smoke/superdomain-ai-followup-smoke-flow.yaml}"
-RUNTIME_WORKFLOW_DIR="${RUNTIME_WORKFLOW_DIR:-${BASE_DIR}/runtime-workflows}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -80,14 +79,12 @@ fi
 cd "$ROOT_DIR"
 rm -rf "$BASE_DIR"
 mkdir -p "$BASE_DIR" "$WORKSPACES_DIR"
-cp -R "$WORKFLOW_DIR" "$RUNTIME_WORKFLOW_DIR"
-RUNTIME_SMOKE_FLOW_PATH="${RUNTIME_WORKFLOW_DIR}/ai-smoke/superdomain-ai-followup-smoke-flow.yaml"
 
 cat >"$BASE_DIR/osm-settings.yaml" <<EOF
 base_folder: "$BASE_DIR"
 environments:
   workspaces: "$WORKSPACES_DIR"
-  workflows: "$RUNTIME_WORKFLOW_DIR"
+  workflows: "$WORKFLOW_DIR"
 database:
   db_engine: sqlite
   db_path: "{{base_folder}}/database-osm.sqlite"
@@ -103,16 +100,16 @@ OSM_SKIP_PATH_SETUP=1 \
 OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
-  --workflow-folder "$RUNTIME_WORKFLOW_DIR" \
-  workflow validate "$RUNTIME_SMOKE_FLOW_PATH" \
+  --workflow-folder "$WORKFLOW_DIR" \
+  workflow validate "$SMOKE_FLOW_PATH" \
   >"$BASE_DIR/validate.log" 2>&1
 
 OSM_SKIP_PATH_SETUP=1 \
 OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
-  --workflow-folder "$RUNTIME_WORKFLOW_DIR" \
-  run -f "$RUNTIME_SMOKE_FLOW_PATH" -t "$TARGET" \
+  --workflow-folder "$WORKFLOW_DIR" \
+  run -f "$SMOKE_FLOW_PATH" -t "$TARGET" \
   >"$BASE_DIR/run.log" 2>&1
 
 WORKSPACE_DIR=$(find "$WORKSPACES_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
@@ -230,21 +227,21 @@ assert_eq "$knowledge_context_workspace" "$WORKSPACE" "knowledge context workspa
 assert_eq "$knowledge_context_learning_workspace" "$WORKSPACE" "knowledge learning workspace"
 assert_eq "$knowledge_context_retrieval_workspace" "shared-kb" "knowledge retrieval workspace"
 
-campaign_status_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" campaign status "$campaign_create_id")
+campaign_status_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" campaign status "$campaign_create_id")
 campaign_status_total=$(printf '%s' "$campaign_status_json" | jq -er '.summary.targets_total')
 campaign_status_auto_deep_scan=$(printf '%s' "$campaign_status_json" | jq -er '.campaign.auto_deep_scan')
 assert_ge "$campaign_status_total" 3 "campaign status total targets"
 assert_eq "$campaign_status_auto_deep_scan" "true" "campaign auto deep scan flag"
 
-queued_runs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" query runs --workflow ai-followup-target-module)
+queued_runs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" query runs --workflow "ai-smoke/ai-followup-target-module.yaml")
 queued_runs_count=$(printf '%s' "$queued_runs_json" | jq -er 'length')
 assert_ge "$queued_runs_count" 3 "queued follow-up run count"
 
-kb_docs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" kb docs -w "$WORKSPACE")
+kb_docs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb docs -w "$WORKSPACE")
 kb_docs_count=$(printf '%s' "$kb_docs_json" | jq -er '.data | length')
 assert_ge "$kb_docs_count" 3 "knowledge learned document count"
 
-kb_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" kb search -w "$WORKSPACE" --query "operator queue")
+kb_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb search -w "$WORKSPACE" --query "operator queue")
 kb_search_count=$(printf '%s' "$kb_search_json" | jq -er 'length')
 assert_ge "$kb_search_count" 1 "knowledge search hit count"
 

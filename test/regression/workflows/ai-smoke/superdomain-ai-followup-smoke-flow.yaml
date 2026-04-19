@@ -18,7 +18,7 @@ modules:
     path: osmedeus-base/workflows/fragments/do-ai-retest-planning.yaml
     depends_on: [ai-apply-decision]
     params:
-      retestFlow: "ai-followup-target-module"
+      retestFlow: "ai-smoke/ai-followup-target-module.yaml"
       retestPriority: "critical"
 
   - name: ai-operator-queue
@@ -30,10 +30,10 @@ modules:
     depends_on: [ai-retest-planning, ai-operator-queue, ai-apply-decision]
     params:
       enableCampaignCreate: true
-      campaignWorkflow: "ai-followup-target-module"
+      campaignWorkflow: "ai-smoke/ai-followup-target-module.yaml"
       campaignWorkflowKind: "module"
       campaignPriority: "critical"
-      campaignDeepScanWorkflow: "ai-deep-followup-module"
+      campaignDeepScanWorkflow: "ai-smoke/ai-deep-followup-module.yaml"
       campaignDeepScanWorkflowKind: "module"
       campaignAutoDeepScan: true
       campaignHighRiskSeverities: "critical,high"
@@ -43,7 +43,7 @@ modules:
     depends_on: [ai-retest-planning, ai-campaign-handoff]
     params:
       enableRetestQueue: true
-      retestFlow: "ai-followup-target-module"
+      retestFlow: "ai-smoke/ai-followup-target-module.yaml"
       retestWorkflowKind: "module"
       retestPriority: "critical"
       knowledgeWorkspace: "shared-kb"
