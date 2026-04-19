@@ -4,7 +4,7 @@ description: Controlled smoke regression for the superdomain AI follow-up chain.
 
 modules:
   - name: seed-fixtures
-    path: seed-ai-followup-fixtures-module.yaml
+    path: ai-smoke/seed-ai-followup-fixtures-module.yaml
 
   - name: ai-intelligent-analysis
     path: osmedeus-base/workflows/fragments/do-ai-intelligent-analysis.yaml

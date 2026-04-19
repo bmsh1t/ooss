@@ -3,10 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BASE_DIR="${BASE_DIR:-/tmp/osm-ai-workflow-smoke}"
-WORKFLOW_DIR="${WORKFLOW_DIR:-${ROOT_DIR}/test/regression/workflows/ai-smoke}"
+WORKFLOW_DIR="${WORKFLOW_DIR:-${ROOT_DIR}/test/regression/workflows}"
 OSMEDEUS_BIN="${OSMEDEUS_BIN:-${ROOT_DIR}/build/bin/osmedeus}"
 WORKSPACES_DIR="${WORKSPACES_DIR:-${BASE_DIR}/workspaces}"
 TARGET="${TARGET:-smoke-ai-regression.example.com}"
+SMOKE_FLOW_PATH="${SMOKE_FLOW_PATH:-${WORKFLOW_DIR}/ai-smoke/superdomain-ai-followup-smoke-flow.yaml}"
+RUNTIME_WORKFLOW_DIR="${RUNTIME_WORKFLOW_DIR:-${BASE_DIR}/runtime-workflows}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -65,6 +67,11 @@ if [[ ! -d "$WORKFLOW_DIR" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$SMOKE_FLOW_PATH" ]]; then
+  echo "smoke workflow not found: $SMOKE_FLOW_PATH" >&2
+  exit 1
+fi
+
 if [[ ! -x "$OSMEDEUS_BIN" ]]; then
   echo "osmedeus binary not found or not executable: $OSMEDEUS_BIN" >&2
   exit 1
@@ -73,12 +80,14 @@ fi
 cd "$ROOT_DIR"
 rm -rf "$BASE_DIR"
 mkdir -p "$BASE_DIR" "$WORKSPACES_DIR"
+cp -R "$WORKFLOW_DIR" "$RUNTIME_WORKFLOW_DIR"
+RUNTIME_SMOKE_FLOW_PATH="${RUNTIME_WORKFLOW_DIR}/ai-smoke/superdomain-ai-followup-smoke-flow.yaml"
 
 cat >"$BASE_DIR/osm-settings.yaml" <<EOF
 base_folder: "$BASE_DIR"
 environments:
   workspaces: "$WORKSPACES_DIR"
-  workflows: "$WORKFLOW_DIR"
+  workflows: "$RUNTIME_WORKFLOW_DIR"
 database:
   db_engine: sqlite
   db_path: "{{base_folder}}/database-osm.sqlite"
@@ -94,16 +103,16 @@ OSM_SKIP_PATH_SETUP=1 \
 OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
-  --workflow-folder "$WORKFLOW_DIR" \
-  workflow validate superdomain-ai-followup-smoke-flow \
+  --workflow-folder "$RUNTIME_WORKFLOW_DIR" \
+  workflow validate "$RUNTIME_SMOKE_FLOW_PATH" \
   >"$BASE_DIR/validate.log" 2>&1
 
 OSM_SKIP_PATH_SETUP=1 \
 OSM_WORKSPACES="$WORKSPACES_DIR" \
 "$OSMEDEUS_BIN" \
   --base-folder "$BASE_DIR" \
-  --workflow-folder "$WORKFLOW_DIR" \
-  run -f superdomain-ai-followup-smoke-flow -t "$TARGET" \
+  --workflow-folder "$RUNTIME_WORKFLOW_DIR" \
+  run -f "$RUNTIME_SMOKE_FLOW_PATH" -t "$TARGET" \
   >"$BASE_DIR/run.log" 2>&1
 
 WORKSPACE_DIR=$(find "$WORKSPACES_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
@@ -122,6 +131,9 @@ CAMPAIGN_HANDOFF="$AI_DIR/campaign-handoff-$WORKSPACE.json"
 CAMPAIGN_CREATE="$AI_DIR/campaign-create-$WORKSPACE.json"
 RETEST_QUEUE="$AI_DIR/retest-queue-summary-$WORKSPACE.json"
 FOLLOWUP_DECISION="$AI_DIR/followup-decision-$WORKSPACE.json"
+RESUME_CONTEXT="$AI_DIR/resume-context-$WORKSPACE.json"
+NEXT_ACTIONS="$AI_DIR/next-actions-$WORKSPACE.json"
+OPERATOR_SUMMARY="$AI_DIR/operator-summary-$WORKSPACE.md"
 KNOWLEDGE_CONTEXT="$AI_DIR/unified-analysis-knowledge-$WORKSPACE.json"
 KNOWLEDGE_LOG="$AI_DIR/knowledge-learning-$WORKSPACE.log"
 
@@ -134,6 +146,9 @@ for required_file in \
   "$CAMPAIGN_CREATE" \
   "$RETEST_QUEUE" \
   "$FOLLOWUP_DECISION" \
+  "$RESUME_CONTEXT" \
+  "$NEXT_ACTIONS" \
+  "$OPERATOR_SUMMARY" \
   "$KNOWLEDGE_CONTEXT" \
   "$KNOWLEDGE_LOG"; do
   [[ -f "$required_file" ]] || {
@@ -167,6 +182,13 @@ followup_campaign_status=$(jq -er '.followup_summary.campaign_create_status' "$F
 followup_passive_targets=$(jq -er '.followup_summary.passive_targets // 0' "$FOLLOWUP_DECISION")
 followup_priority_mode=$(jq -er '.seed_focus.priority_mode' "$FOLLOWUP_DECISION")
 followup_reuse_sources=$(jq -er '(.seed_focus.reuse_sources // []) | join(",")' "$FOLLOWUP_DECISION")
+resume_source=$(jq -er '.followup_decision_source' "$RESUME_CONTEXT")
+resume_next_phase=$(jq -er '.next_phase' "$RESUME_CONTEXT")
+resume_priority_mode=$(jq -er '.priority_mode' "$RESUME_CONTEXT")
+resume_campaign_status=$(jq -er '.campaign_create.status' "$RESUME_CONTEXT")
+resume_passive_targets=$(jq -er '.followup_summary.passive_targets // 0' "$RESUME_CONTEXT")
+resume_reuse_sources=$(jq -er '(.reuse_sources // []) | join(",")' "$RESUME_CONTEXT")
+next_actions_count=$(jq -er 'if type == "array" then length else error("next-actions must be an array") end' "$NEXT_ACTIONS")
 knowledge_context_workspace=$(jq -er '.workspace' "$KNOWLEDGE_CONTEXT")
 knowledge_context_learning_workspace=$(jq -er '.learning_workspace' "$KNOWLEDGE_CONTEXT")
 knowledge_context_retrieval_workspace=$(jq -er '.retrieval_workspace' "$KNOWLEDGE_CONTEXT")
@@ -195,25 +217,34 @@ assert_ge "$followup_passive_targets" 3 "follow-up passive target count"
 assert_eq "$followup_priority_mode" "manual-first" "follow-up priority mode"
 assert_eq "$followup_next_phase" "manual-exploitation" "follow-up next phase"
 assert_contains "$followup_reuse_sources" "passive-web-risk" "follow-up reuse sources"
+assert_eq "$resume_source" "followup-decision" "resume context source"
+assert_eq "$resume_priority_mode" "manual-first" "resume context priority mode"
+assert_eq "$resume_next_phase" "manual-exploitation" "resume context next phase"
+assert_eq "$resume_campaign_status" "created" "resume context campaign status"
+assert_ge "$resume_passive_targets" 3 "resume context passive target count"
+assert_contains "$resume_reuse_sources" "passive-web-risk" "resume context reuse sources"
+assert_ge "$next_actions_count" 1 "next actions count"
+grep -q 'Next phase: manual-exploitation' "$OPERATOR_SUMMARY"
+grep -q 'Campaign status: created' "$OPERATOR_SUMMARY"
 assert_eq "$knowledge_context_workspace" "$WORKSPACE" "knowledge context workspace"
 assert_eq "$knowledge_context_learning_workspace" "$WORKSPACE" "knowledge learning workspace"
 assert_eq "$knowledge_context_retrieval_workspace" "shared-kb" "knowledge retrieval workspace"
 
-campaign_status_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" campaign status "$campaign_create_id")
+campaign_status_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" campaign status "$campaign_create_id")
 campaign_status_total=$(printf '%s' "$campaign_status_json" | jq -er '.summary.targets_total')
 campaign_status_auto_deep_scan=$(printf '%s' "$campaign_status_json" | jq -er '.campaign.auto_deep_scan')
 assert_ge "$campaign_status_total" 3 "campaign status total targets"
 assert_eq "$campaign_status_auto_deep_scan" "true" "campaign auto deep scan flag"
 
-queued_runs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" query runs --workflow ai-followup-target-module)
+queued_runs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" query runs --workflow ai-followup-target-module)
 queued_runs_count=$(printf '%s' "$queued_runs_json" | jq -er 'length')
 assert_ge "$queued_runs_count" 3 "queued follow-up run count"
 
-kb_docs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb docs -w "$WORKSPACE")
+kb_docs_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" kb docs -w "$WORKSPACE")
 kb_docs_count=$(printf '%s' "$kb_docs_json" | jq -er '.data | length')
 assert_ge "$kb_docs_count" 3 "knowledge learned document count"
 
-kb_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$WORKFLOW_DIR" kb search -w "$WORKSPACE" --query "operator queue")
+kb_search_json=$(OSM_SKIP_PATH_SETUP=1 OSM_WORKSPACES="$WORKSPACES_DIR" "$OSMEDEUS_BIN" --silent --json --base-folder "$BASE_DIR" --workflow-folder "$RUNTIME_WORKFLOW_DIR" kb search -w "$WORKSPACE" --query "operator queue")
 kb_search_count=$(printf '%s' "$kb_search_json" | jq -er 'length')
 assert_ge "$kb_search_count" 1 "knowledge search hit count"
 
