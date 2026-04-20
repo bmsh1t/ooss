@@ -76,6 +76,8 @@ steps:
   - name: build-post-followup-decision
     type: bash
     pre_condition: "{{enablePostFollowupCoordination}}"
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
 
@@ -557,6 +559,8 @@ steps:
   - name: render-post-followup-markdown
     type: bash
     pre_condition: "{{enablePostFollowupCoordination}}"
+    on_error:
+      - action: continue
     command: |
       {
         echo "# AI Post-Followup Decision"
@@ -580,6 +584,8 @@ steps:
   - name: write-resume-autopilot-artifacts
     type: bash
     pre_condition: "{{enablePostFollowupCoordination}}"
+    on_error:
+      - action: continue
     command: |
       mkdir -p {{Output}}/ai-analysis
 
@@ -588,9 +594,9 @@ steps:
         SOURCE_KIND="followup-decision"
         SOURCE_FILE_FOR_RESUME="{{followupDecisionOutput}}"
       else
-        SOURCE_FILE="{{Output}}/ai-analysis/.followup-decision-fallback-{{TargetSpace}}.json"
+        SOURCE_FILE="{{followupDecisionOutput}}"
         SOURCE_KIND="inline-fallback"
-        SOURCE_FILE_FOR_RESUME=""
+        SOURCE_FILE_FOR_RESUME="{{followupDecisionOutput}}"
         jq -n \
           --arg generated_at "$(date -Iseconds)" \
           '{
@@ -611,7 +617,10 @@ steps:
               retest_queue_status: "not_requested",
               resume_suppressed_actions: [],
               reused_actions: [],
-              skipped_duplicate_actions: []
+              skipped_duplicate_actions: [],
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
             },
             refined_targets: {
               focus_areas: [],
@@ -655,20 +664,23 @@ steps:
               campaign_followup_recommended: false,
               queue_followup_effective: false
             },
+            execution_feedback: {
+              next_phase: "knowledge-consolidation",
+              keep_aggressive_scan: false,
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
             next_actions: [
               "Persist the final follow-up decision package for future reruns and manual handoff"
             ]
           }' > "$SOURCE_FILE"
       fi
 
-      jq -n \
-        --arg generated_at "$(date -Iseconds)" \
-        --arg target "{{Target}}" \
-        --arg target_space "{{TargetSpace}}" \
-        --arg source_kind "$SOURCE_KIND" \
-        --arg source_file "$SOURCE_FILE_FOR_RESUME" \
-        --slurpfile source "$SOURCE_FILE" \
-        '($source[0] // {}) as $doc
+      jq -n         --arg generated_at "$(date -Iseconds)"         --arg target "{{Target}}"         --arg target_space "{{TargetSpace}}"         --arg source_kind "$SOURCE_KIND"         --arg source_file "$SOURCE_FILE_FOR_RESUME"         --slurpfile source "$SOURCE_FILE"         '($source[0] // {}) as $doc
+        | ($doc.seed_focus.manual_followup_needed // $doc.execution_feedback.manual_followup_needed // (($doc.followup_summary.operator_tasks // 0) > 0 or ($doc.followup_summary.rescan_critical // 0) > 0 or ($doc.followup_summary.rescan_high // 0) > 0)) as $manual_followup_needed
+        | ($doc.seed_focus.campaign_followup_recommended // $doc.execution_feedback.campaign_followup_recommended // ((($doc.followup_summary.campaign_ready // false) == true) and (($doc.followup_summary.campaign_targets // 0) > 0))) as $campaign_followup_recommended
+        | ($doc.seed_focus.queue_followup_effective // $doc.execution_feedback.queue_followup_effective // ((($doc.followup_summary.retest_queued_targets // 0) > 0) or ((($doc.followup_summary.resume_suppressed_actions // []) | index("retest-queue")) != null))) as $queue_followup_effective
         | {
             generated_at: $generated_at,
             target: $target,
@@ -683,11 +695,16 @@ steps:
             reasoning: ($doc.seed_focus.reasoning // "no_followup_decision"),
             reuse_sources: ($doc.seed_focus.reuse_sources // []),
             signal_scores: ($doc.seed_focus.signal_scores // {}),
+            manual_followup_needed: $manual_followup_needed,
+            campaign_followup_recommended: $campaign_followup_recommended,
+            queue_followup_effective: $queue_followup_effective,
             refined_targets: {
               focus_areas: ($doc.refined_targets.focus_areas // []),
               priority_targets: ($doc.refined_targets.priority_targets // [])
             },
             seed_targets: {
+              focus_areas: ($doc.seed_targets.focus_areas // $doc.refined_targets.focus_areas // []),
+              priority_targets: ($doc.seed_targets.priority_targets // $doc.refined_targets.priority_targets // []),
               rescan_targets: ($doc.seed_targets.rescan_targets // []),
               retest_targets: ($doc.seed_targets.retest_targets // []),
               operator_targets: ($doc.seed_targets.operator_targets // []),
@@ -697,7 +714,11 @@ steps:
               manual_first_targets: ($doc.seed_targets.manual_first_targets // []),
               high_confidence_targets: ($doc.seed_targets.high_confidence_targets // [])
             },
-            followup_summary: ($doc.followup_summary // {}),
+            followup_summary: (($doc.followup_summary // {}) + {
+              manual_followup_needed: $manual_followup_needed,
+              campaign_followup_recommended: $campaign_followup_recommended,
+              queue_followup_effective: $queue_followup_effective
+            }),
             campaign_create: {
               status: ($doc.followup_summary.campaign_create_status // "not_requested"),
               campaign_id: ($doc.followup_summary.campaign_create_id // ""),
@@ -735,8 +756,239 @@ steps:
         jq -r '.next_actions[]? | "- \(.)"' "$SOURCE_FILE" 2>/dev/null || true
       } > "{{operatorSummaryOutput}}"
 
-      if [ "$SOURCE_FILE" = "{{Output}}/ai-analysis/.followup-decision-fallback-{{TargetSpace}}.json" ]; then
-        rm -f "$SOURCE_FILE" 2>/dev/null || true
+  - name: ensure-resume-autopilot-fallback-artifacts
+    type: bash
+    pre_condition: "{{enablePostFollowupCoordination}}"
+    on_error:
+      - action: continue
+    command: |
+      mkdir -p {{Output}}/ai-analysis
+
+      if [ ! -f "{{followupDecisionOutput}}" ] || ! jq empty "{{followupDecisionOutput}}" >/dev/null 2>&1; then
+        jq -n           --arg generated_at "$(date -Iseconds)"           '{
+            generated_at: $generated_at,
+            followup_summary: {
+              retest_targets: 0,
+              operator_tasks: 0,
+              campaign_targets: 0,
+              passive_targets: 0,
+              retest_queued_targets: 0,
+              rescan_findings: 0,
+              rescan_critical: 0,
+              rescan_high: 0,
+              campaign_ready: false,
+              campaign_create_status: "not_requested",
+              campaign_create_id: "",
+              campaign_create_queued_runs: 0,
+              retest_queue_status: "not_requested",
+              resume_suppressed_actions: [],
+              reused_actions: [],
+              skipped_duplicate_actions: [],
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
+            refined_targets: {
+              focus_areas: [],
+              priority_targets: []
+            },
+            seed_targets: {
+              focus_areas: [],
+              priority_targets: [],
+              rescan_targets: [],
+              retest_targets: [],
+              operator_targets: [],
+              campaign_targets: [],
+              confirmed_targets: [],
+              semantic_targets: [],
+              rescan_critical_targets: [],
+              rescan_high_targets: [],
+              manual_first_targets: [],
+              high_confidence_targets: []
+            },
+            seed_focus: {
+              scan_profile: "focused",
+              severity: "critical,high",
+              reasoning: "resume-autopilot-fallback-defaults",
+              next_phase: "knowledge-consolidation",
+              priority_mode: "knowledge-first",
+              confidence_level: "low",
+              reuse_sources: [],
+              signal_scores: {
+                confirmed_urls: 0,
+                retest_targets: 0,
+                operator_tasks: 0,
+                campaign_targets: 0,
+                passive_targets: 0,
+                retest_queued_targets: 0,
+                rescan_critical: 0,
+                rescan_high: 0,
+                escalation_score: 0
+              },
+              keep_aggressive_scan: false,
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
+            execution_feedback: {
+              next_phase: "knowledge-consolidation",
+              keep_aggressive_scan: false,
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
+            next_actions: [
+              "Persist the final follow-up decision package for future reruns and manual handoff"
+            ]
+          }' > "{{followupDecisionOutput}}"
+      fi
+
+      if [ ! -f "{{followupDecisionMd}}" ] || [ ! -s "{{followupDecisionMd}}" ]; then
+        {
+          echo "# AI Post-Followup Decision"
+          echo "## 目标: {{Target}}"
+          echo ""
+          echo "- Base profile: focused"
+          echo "- Base severity: critical,high"
+          echo "- Reasoning: resume-autopilot-fallback-defaults"
+          echo ""
+          echo "## Follow-up Summary"
+          echo "- Retest targets: 0"
+          echo "- Operator tasks: 0"
+          echo "- Campaign targets: 0"
+          echo "- Passive targets: 0"
+          echo "- Retest queued: 0"
+          echo "- Rescan findings: 0 (critical=0, high=0)"
+          echo "- Campaign ready: false"
+          echo "- Campaign create: not_requested"
+          echo "- Campaign id:"
+          echo "- Campaign queued runs: 0"
+          echo "- Retest queue: not_requested"
+          echo "- Resume-suppressed actions:"
+          echo "- Reused actions:"
+          echo "- Skipped duplicate actions:"
+          echo ""
+          echo "## Seed Focus"
+          echo "- Scan profile: focused"
+          echo "- Severity: critical,high"
+          echo "- Next phase: knowledge-consolidation"
+          echo "- Priority mode: knowledge-first"
+          echo "- Confidence: low"
+          echo "- Reuse sources:"
+          echo ""
+          echo "## Refined Priority Targets"
+          echo "- none"
+          echo ""
+          echo "## Next Actions"
+          echo "- Persist the final follow-up decision package for future reruns and manual handoff"
+        } > "{{followupDecisionMd}}"
+      fi
+
+      if [ ! -f "{{resumeContextOutput}}" ] || ! jq empty "{{resumeContextOutput}}" >/dev/null 2>&1; then
+        jq -n           --arg generated_at "$(date -Iseconds)"           --arg target "{{Target}}"           --arg target_space "{{TargetSpace}}"           '{
+            generated_at: $generated_at,
+            target: $target,
+            target_space: $target_space,
+            followup_decision_source: "fallback-defaults",
+            followup_decision_file: "{{followupDecisionOutput}}",
+            next_phase: "knowledge-consolidation",
+            priority_mode: "knowledge-first",
+            confidence_level: "low",
+            scan_profile: "focused",
+            severity: "critical,high",
+            reasoning: "resume-autopilot-fallback-defaults",
+            reuse_sources: [],
+            signal_scores: {
+              confirmed_urls: 0,
+              retest_targets: 0,
+              operator_tasks: 0,
+              campaign_targets: 0,
+              passive_targets: 0,
+              retest_queued_targets: 0,
+              rescan_critical: 0,
+              rescan_high: 0,
+              escalation_score: 0
+            },
+            manual_followup_needed: false,
+            campaign_followup_recommended: false,
+            queue_followup_effective: false,
+            refined_targets: {
+              focus_areas: [],
+              priority_targets: []
+            },
+            seed_targets: {
+              focus_areas: [],
+              priority_targets: [],
+              rescan_targets: [],
+              retest_targets: [],
+              operator_targets: [],
+              campaign_targets: [],
+              confirmed_targets: [],
+              semantic_targets: [],
+              manual_first_targets: [],
+              high_confidence_targets: []
+            },
+            followup_summary: {
+              retest_targets: 0,
+              operator_tasks: 0,
+              campaign_targets: 0,
+              passive_targets: 0,
+              retest_queued_targets: 0,
+              rescan_findings: 0,
+              rescan_critical: 0,
+              rescan_high: 0,
+              campaign_ready: false,
+              campaign_create_status: "not_requested",
+              campaign_create_id: "",
+              campaign_create_queued_runs: 0,
+              retest_queue_status: "not_requested",
+              resume_suppressed_actions: [],
+              reused_actions: [],
+              skipped_duplicate_actions: [],
+              manual_followup_needed: false,
+              campaign_followup_recommended: false,
+              queue_followup_effective: false
+            },
+            campaign_create: {
+              status: "not_requested",
+              campaign_id: "",
+              queued_runs: 0
+            },
+            retest_queue: {
+              status: "not_requested",
+              queued_targets: 0
+            },
+            next_actions: [
+              "Persist the final follow-up decision package for future reruns and manual handoff"
+            ]
+          }' > "{{resumeContextOutput}}"
+      fi
+
+      if [ ! -f "{{nextActionsOutput}}" ] || ! jq empty "{{nextActionsOutput}}" >/dev/null 2>&1; then
+        echo '["Persist the final follow-up decision package for future reruns and manual handoff"]' > "{{nextActionsOutput}}"
+      fi
+
+      if [ ! -f "{{operatorSummaryOutput}}" ] || [ ! -s "{{operatorSummaryOutput}}" ]; then
+        {
+          echo "# AI Operator Summary"
+          echo "## Target: {{Target}}"
+          echo ""
+          echo "- Next phase: knowledge-consolidation"
+          echo "- Priority mode: knowledge-first"
+          echo "- Confidence: low"
+          echo "- Scan profile: focused"
+          echo "- Severity: critical,high"
+          echo "- Campaign status: not_requested"
+          echo "- Campaign id:"
+          echo "- Queued retests: 0"
+          echo "- Operator tasks: 0"
+          echo "- Resume-suppressed actions:"
+          echo "- Reused actions:"
+          echo "- Skipped duplicate actions:"
+          echo ""
+          echo "## Next Actions"
+          echo "- Persist the final follow-up decision package for future reruns and manual handoff"
+        } > "{{operatorSummaryOutput}}"
       fi
 
   - name: log-post-followup-complete
