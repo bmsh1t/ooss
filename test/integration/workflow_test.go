@@ -3866,6 +3866,91 @@ func TestExecuteAITargetedRescanCollectsPreviousFollowupTargets(t *testing.T) {
 	assert.Contains(t, cfgText, "RESCAN_TIMEOUT=21600")
 }
 
+func TestExecuteAITargetedRescanPrefersResumeContextOverDecisionFile(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-targeted-rescan.yaml"))
+	require.NoError(t, err)
+
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "preflight-targeted-rescan-runtime", "run-targeted-nuclei", "extract-rescan-findings", "merge-rescan-findings-into-main-results", "refresh-clean-vuln-jsonl", "import-rescan-findings":
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "ai-targeted-rescan-resume-context-priority"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "followup_decision_source": "resume",
+  "scan_profile": "balanced",
+  "severity": "high,medium",
+  "seed_targets": {
+    "manual_first_targets": ["https://resume.example.com/admin"],
+    "high_confidence_targets": ["https://resume.example.com/upload"],
+    "rescan_targets": ["https://resume.example.com/graphql"],
+    "confirmed_targets": ["https://resume.example.com/confirmed"]
+  },
+  "refined_targets": {
+    "priority_targets": ["https://resume.example.com/priority"]
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
+  "seed_targets": {
+    "manual_first_targets": ["https://decision.example.com/admin"],
+    "high_confidence_targets": ["https://decision.example.com/upload"],
+    "rescan_targets": ["https://decision.example.com/graphql"],
+    "confirmed_targets": ["https://decision.example.com/confirmed"]
+  },
+  "seed_focus": {
+    "scan_profile": "aggressive",
+    "severity": "critical"
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	targetsData, err := os.ReadFile(filepath.Join(aiDir, "rescan-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t,
+		[]string{
+			"https://resume.example.com/admin",
+			"https://resume.example.com/upload",
+			"https://resume.example.com/graphql",
+			"https://resume.example.com/confirmed",
+			"https://resume.example.com/priority",
+		},
+		strings.Split(strings.TrimSpace(string(targetsData)), "\n"),
+	)
+	assert.NotContains(t, string(targetsData), "decision.example.com")
+
+	cfgData, err := os.ReadFile(filepath.Join(aiDir, ".rescan-config-"+targetSpace+".sh"))
+	require.NoError(t, err)
+	cfgText := string(cfgData)
+	assert.Contains(t, cfgText, "RESCAN_SEVERITY=high,medium")
+	assert.Contains(t, cfgText, "RESCAN_THREADS=12")
+	assert.Contains(t, cfgText, "RESCAN_RATE_LIMIT=40")
+	assert.Contains(t, cfgText, "RESCAN_TIMEOUT=21600")
+	assert.NotContains(t, cfgText, "RESCAN_SEVERITY=critical")
+}
+
 func TestExecuteAITargetedRescanUsesDecisionFollowupSemanticPriorityTargets(t *testing.T) {
 	workflowsPath := getRealWorkflowsPath()
 	loader := parser.NewLoader(workflowsPath)
@@ -4328,6 +4413,110 @@ func TestExecuteAIRetestQueueFallsBackToPreviousFollowupSeed(t *testing.T) {
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_status=created")
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_id=camp-retest-7")
 	assert.Contains(t, callLine, "-p previous_followup_campaign_create_queued_runs=3")
+}
+
+func TestExecuteAIRetestQueuePrefersResumeContextSeedOverDecisionFile(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "fragments", "do-ai-retest-queue.yaml"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	callsPath := installStubOsmedeus(t)
+	targetSpace := "retest-queue-resume-context-priority"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	aiDir := filepath.Join(outputDir, "ai-analysis")
+
+	writeTestFile(t, filepath.Join(aiDir, "resume-context-"+targetSpace+".json"), `{
+  "scan_profile": "resume-profile",
+  "severity": "high",
+  "followup_decision_source": "resume",
+  "priority_mode": "manual-first",
+  "confidence_level": "high",
+  "next_phase": "manual-exploitation",
+  "reasoning": "resume-context-should-win",
+  "seed_targets": {
+    "manual_first_targets": ["https://resume.example.com/admin"],
+    "high_confidence_targets": ["https://resume.example.com/upload"],
+    "retest_targets": ["https://resume.example.com/review"]
+  },
+  "refined_targets": {
+    "priority_targets": ["https://resume.example.com/confirmed"],
+    "focus_areas": ["auth", "admin"]
+  },
+  "followup_summary": {
+    "queue_followup_effective": false
+  }
+}`)
+	writeTestFile(t, filepath.Join(aiDir, "followup-decision-"+targetSpace+".json"), `{
+  "seed_targets": {
+    "manual_first_targets": ["https://decision.example.com/admin"],
+    "high_confidence_targets": ["https://decision.example.com/upload"],
+    "retest_targets": ["https://decision.example.com/review"],
+    "priority_targets": ["https://decision.example.com/confirmed"]
+  },
+  "seed_focus": {
+    "reasoning": "decision-file-should-lose",
+    "scan_profile": "decision-profile",
+    "severity": "critical",
+    "priority_mode": "auto",
+    "confidence_level": "medium",
+    "next_phase": "queue"
+  }
+}`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":             "https://app.example.com",
+		"space_name":         targetSpace,
+		"enableRetestQueue":  "true",
+		"retestFlow":         "web-analysis",
+		"knowledgeWorkspace": "shared-kb",
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+
+	summaryData, err := os.ReadFile(filepath.Join(aiDir, "retest-queue-summary-"+targetSpace+".json"))
+	require.NoError(t, err)
+	var summary map[string]interface{}
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "queued", summary["status"])
+	assert.Equal(t, "resume-context", summary["target_source"])
+	assert.Equal(t, "resume-context", summary["previous_followup_source_kind"])
+	assert.Equal(t, "resume-context-should-win", summary["previous_reasoning"])
+	assert.Equal(t, "resume-profile", summary["previous_scan_profile"])
+	assert.Equal(t, "manual-first", summary["previous_priority_mode"])
+	assert.Equal(t, "high", summary["previous_confidence_level"])
+	assert.Equal(t, "manual-exploitation", summary["previous_next_phase"])
+	assert.Equal(t, float64(4), summary["queued_targets"])
+	assert.Equal(t, float64(4), summary["previous_followup_targets"])
+
+	fallbackTargetsData, err := os.ReadFile(filepath.Join(aiDir, ".retest-queue-fallback-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"https://resume.example.com/review",
+		"https://resume.example.com/admin",
+		"https://resume.example.com/upload",
+		"https://resume.example.com/confirmed",
+	}, strings.Split(strings.TrimSpace(string(fallbackTargetsData)), "\n"))
+	assert.NotContains(t, string(fallbackTargetsData), "decision.example.com")
+
+	callsData, err := os.ReadFile(callsPath)
+	require.NoError(t, err)
+	callLine := strings.TrimSpace(string(callsData))
+	assert.Contains(t, callLine, "worker queue new -f web-analysis")
+	assert.Contains(t, callLine, ".retest-queue-fallback-targets-"+targetSpace+".txt")
+	assert.Contains(t, callLine, "-p previous_followup_reasoning=resume-context-should-win")
+	assert.Contains(t, callLine, "-p previous_followup_scan_profile=resume-profile")
+	assert.NotContains(t, callLine, "decision-file-should-lose")
 }
 
 func TestExecuteAIRetestQueueFallsBackToQueuedPreviousFollowupParams(t *testing.T) {
@@ -4934,6 +5123,10 @@ func TestExecuteAIRetestPlanningSkipsDuplicateQueueWhenResumeQueueEffective(t *t
 	automationQueue, ok := plan["automation_queue"].([]interface{})
 	require.True(t, ok)
 	assert.Empty(t, automationQueue)
+
+	retestTargetsData, err := os.ReadFile(filepath.Join(aiDir, "retest-targets-"+targetSpace+".txt"))
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(retestTargetsData)))
 }
 
 func TestExecuteAIRetestPlanningConsumesQueuedPreviousFollowupTargetLists(t *testing.T) {

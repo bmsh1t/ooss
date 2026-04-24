@@ -351,7 +351,14 @@ steps:
         fi
 
         if [ ! -f "$ACTIVE_TARGET_FILE" ] || [ ! -s "$ACTIVE_TARGET_FILE" ]; then
-          if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+          if [ "$PREVIOUS_FOLLOWUP_SOURCE_KIND" = "resume-context" ] && [ -n "$PREVIOUS_COMBINED_TARGETS_LIST" ]; then
+            printf '%s\n' "$PREVIOUS_COMBINED_TARGETS_JSON" | jq -r '.[]? // empty' 2>/dev/null > "{{retestQueueFallbackTargetsFile}}" || true
+            PREVIOUS_FOLLOWUP_TARGETS=$(count_lines "{{retestQueueFallbackTargetsFile}}")
+            if [ "$PREVIOUS_FOLLOWUP_TARGETS" -gt 0 ]; then
+              ACTIVE_TARGET_FILE="{{retestQueueFallbackTargetsFile}}"
+              TARGET_SOURCE="resume-context"
+            fi
+          elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
             jq -r '((.seed_targets.retest_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.rescan_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null \
               | awk 'NF && !seen[$0]++' > "{{retestQueueFallbackTargetsFile}}" || true
             PREVIOUS_FOLLOWUP_TARGETS=$(count_lines "{{retestQueueFallbackTargetsFile}}")

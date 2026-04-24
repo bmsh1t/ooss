@@ -1006,10 +1006,18 @@ steps:
       }
 
       jq -r '
-        [
-          .targets[]?.target,
-          .automation_queue[]?.target
-        ] | map(select(. != null and . != "")) | .[]
+        if (.summary.previous_followup_source_kind == "resume-context" and .summary.previous_followup_queue_followup_effective == true) then
+          [
+            .automation_queue[]?.target
+          ]
+        else
+          [
+            .targets[]?.target,
+            .automation_queue[]?.target
+          ]
+        end
+        | map(select(. != null and . != ""))
+        | .[]
       ' {{retestPlanOutput}} 2>/dev/null | awk 'NF && !seen[$0]++' > {{retestTargetsFile}} || true
 
       TARGET_COUNT=$(count_lines_safe "{{retestTargetsFile}}")

@@ -56,6 +56,71 @@
 
 ## 当前待继续事项
 
+### 2026-04-24 补充：`ai-retest-queue / ai-retest-planning` 数据流实证
+
+已完成两类轻量 smoke（均为 `--disable-db`）：
+
+1. `ai-retest-planning`
+   - 场景：仅提供 `resume-context`，且 `queue_followup_effective=true`
+   - 结果：
+     - `retest-plan-*.json` 中 `automation_queue=[]`
+     - 修复前：`retest-targets-*.txt` 仍导出了 resume seed 目标
+     - 修复后：`retest-targets-*.txt` 已被抑制为 0 行
+   - 结论：
+     - planning 仍保留 `plan.targets/manual_checks` 供人工接管
+     - 但自动 queue 消费链不再继续吃这批旧 seed
+
+2. `ai-retest-queue`
+   - 场景 A：`resume-context.queue_followup_effective=true` 且 `retest-targets` 非空
+     - 结果：稳定 `skipped`
+     - `reason=resume_queue_already_effective`
+   - 场景 B：`resume-context` 与 `followup-decision` 同时存在、且没有 `retest-targets/retest-plan`
+     - 修复前：fallback seed 实际优先吃了 `followup-decision`
+     - 修复后：fallback seed 现在优先吃 `resume-context`
+     - 新的 `target_source=resume-context`
+
+### 2026-04-24 已落地修复
+
+文件：
+- `osmedeus-base/workflows/fragments/do-ai-retest-queue.yaml`
+- `osmedeus-base/workflows/fragments/do-ai-retest-planning.yaml`
+- `osmedeus-base/workflows/fragments/do-ai-targeted-rescan.yaml`
+- `test/integration/workflow_test.go`
+
+改动：
+1. `ai-retest-queue` 在 fallback seed 选取时，来源优先级已拉平为：
+   - `resume-context`
+   - `previousFollowupDecisionFile`
+   - `previous_followup_*` queue params
+
+2. 新增集成测试，锁定“resume-context 优先于 decision-file”行为
+3. `ai-retest-planning` 在 `resume-context + queue_followup_effective=true` 时：
+   - 保留 `plan.targets/manual_checks`
+   - 抑制 `retest-targets` 自动导出
+4. `ai-targeted-rescan` 现在也已补齐 `resume-context` 优先级：
+   - rescan target seed 优先吃 `resume-context`
+   - rescan severity/profile 也优先吃 `resume-context`
+   - 避免继续落回旧 `followup-decision`
+
+### 2026-04-24 验证结果
+
+- validate 通过：
+  - `do-ai-retest-queue`
+  - `do-ai-retest-planning`
+  - `do-ai-targeted-rescan`
+- 定向集成测试通过：
+  - `TestExecuteAIRetestQueueSkipsDuplicateQueueWhenResumeQueueEffective`
+  - `TestExecuteAIRetestQueuePrefersResumeContextSeedOverDecisionFile`
+  - `TestExecuteAIRetestQueueFallsBackToPreviousFollowupSeed`
+  - `TestExecuteAIRetestPlanningSkipsDuplicateQueueWhenResumeQueueEffective`
+  - `TestExecuteAIRetestPlanningConsumesQueuedPreviousFollowupTargetLists`
+  - `TestExecuteAIRetestPlanningMergesPreviousFollowupAdvisory`
+  - `TestExecuteAITargetedRescanPrefersResumeContextOverDecisionFile`
+- 轻量 smoke 复测通过：
+  - `resume-context + decision-file` 并存时，fallback target 已来自 `resume-context`
+  - `resume_queue_already_effective` 仍保持稳定跳过
+  - `resume-context + queue_followup_effective=true` 时，`retest-targets` 已为空，但 `plan.targets` 仍保留
+
 ### 优先级 P1：继续压 `ai-retest-queue + ai-retest-planning`
 目标：把“重复下发 / 续跑去重 / 已有效 queue 的抑制”继续做实证和收口。
 

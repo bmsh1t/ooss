@@ -40,6 +40,8 @@ params:
     default: "{{Output}}/ai-analysis/ai-decision-{{TargetSpace}}.json"
   - name: appliedDecisionFile
     default: "{{Output}}/ai-analysis/applied-ai-decision-{{TargetSpace}}.json"
+  - name: resumeContextFile
+    default: "{{Output}}/ai-analysis/resume-context-{{TargetSpace}}.json"
   - name: previousFollowupDecisionFile
     default: "{{Output}}/ai-analysis/followup-decision-{{TargetSpace}}.json"
   - name: previous_followup_targets
@@ -189,7 +191,10 @@ steps:
       if [ -f "$ACTIVE_DECISION_FILE" ] && jq empty "$ACTIVE_DECISION_FILE" 2>/dev/null; then
         jq -r '.targets.rescan_targets[]? // .rescan_targets[]? // empty' "$ACTIVE_DECISION_FILE" 2>/dev/null >> "$TARGET_TMP" || true
       fi
-      if [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
+      if [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        jq -r '((.seed_targets.rescan_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.refined_targets.priority_targets // []))[]? // empty' "{{resumeContextFile}}" 2>/dev/null >> "$TARGET_TMP" || true
+      elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
         jq -r '((.seed_targets.rescan_targets // []) + (.seed_targets.manual_first_targets // []) + (.seed_targets.high_confidence_targets // []) + (.seed_targets.rescan_critical_targets // []) + (.seed_targets.rescan_high_targets // []) + (.seed_targets.confirmed_targets // []) + (.seed_targets.priority_targets // .refined_targets.priority_targets // []))[]? // empty' "{{previousFollowupDecisionFile}}" 2>/dev/null >> "$TARGET_TMP" || true
       else
         PREV_PARAM_MANUAL_JSON=$(csv_or_json_to_array "{{previous_followup_manual_first_targets_list}}")
@@ -285,6 +290,24 @@ steps:
         fi
 
         echo "[Rescan] AI decision loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
+      elif [ -f "{{resumeContextFile}}" ] \
+        && jq -e '(.scan_profile? != null) and (.severity? != null) and ((.followup_decision_source? != null) or (.refined_targets? != null) or (.seed_targets? != null))' "{{resumeContextFile}}" >/dev/null 2>&1; then
+        PREV_SEVERITY=$(jq -r '.severity // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        PREV_PROFILE=$(jq -r '.scan_profile // ""' "{{resumeContextFile}}" 2>/dev/null || echo "")
+        [ -n "$PREV_SEVERITY" ] && SEVERITY="$PREV_SEVERITY"
+        case "$PREV_PROFILE" in
+          aggressive)
+            THREADS=15
+            RATE_LIMIT=50
+            TIMEOUT="28800"
+            ;;
+          balanced)
+            THREADS=12
+            RATE_LIMIT=40
+            TIMEOUT="21600"
+            ;;
+        esac
+        echo "[Rescan] Resume context loaded: severity=$SEVERITY threads=$THREADS rate=$RATE_LIMIT timeout=$TIMEOUT"
       elif [ -f "{{previousFollowupDecisionFile}}" ] && jq empty "{{previousFollowupDecisionFile}}" 2>/dev/null; then
         PREV_SEVERITY=$(jq -r '.seed_focus.severity // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
         PREV_PROFILE=$(jq -r '.seed_focus.scan_profile // ""' "{{previousFollowupDecisionFile}}" 2>/dev/null || echo "")
