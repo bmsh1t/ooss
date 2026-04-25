@@ -26,6 +26,7 @@ type KnowledgeSearchRequest struct {
 	WorkspaceLayers     []string `json:"workspace_layers,omitempty"`
 	ScopeLayers         []string `json:"scope_layers,omitempty"`
 	Limit               int      `json:"limit,omitempty"`
+	ExactID             bool     `json:"exact_id,omitempty"`
 	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
 	SampleTypes         []string `json:"sample_types,omitempty"`
 	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
@@ -174,6 +175,7 @@ func SearchKnowledge(cfg *config.Config) fiber.Handler {
 			ScopeLayers:         req.ScopeLayers,
 			Query:               req.Query,
 			Limit:               req.Limit,
+			ExactID:             req.ExactID,
 			MinSourceConfidence: req.MinSourceConfidence,
 			SampleTypes:         req.SampleTypes,
 			ExcludeSampleTypes:  req.ExcludeSampleTypes,

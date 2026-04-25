@@ -43,6 +43,7 @@ var (
 	kbMinSourceConfidence float64
 	kbSampleTypes         []string
 	kbExcludeSampleTypes  []string
+	kbExactID             bool
 	kbPrint               bool
 	kbOutputDir           string
 	kbYakitDB             string
@@ -131,6 +132,7 @@ func init() {
 	kbSearchCmd.Flags().IntVar(&kbLimit, "limit", 10, "maximum number of results")
 	kbSearchCmd.Flags().StringSliceVar(&kbWorkspaceLayers, "workspace-layer", nil, "preferred workspace layers in ranking order")
 	kbSearchCmd.Flags().StringSliceVar(&kbScopeLayers, "scope-layer", nil, "preferred scope layers in ranking order")
+	kbSearchCmd.Flags().BoolVar(&kbExactID, "exact-id", false, "treat query as an exact security knowledge ID such as CWE-79 or T1059")
 	kbSearchCmd.Flags().Float64Var(&kbMinSourceConfidence, "min-confidence", 0, "skip learned results below this source confidence")
 	kbSearchCmd.Flags().StringSliceVar(&kbSampleTypes, "sample-type", nil, "include only specific learned sample types")
 	kbSearchCmd.Flags().StringSliceVar(&kbExcludeSampleTypes, "exclude-sample-type", nil, "exclude specific learned sample types")
@@ -596,6 +598,7 @@ func runKBSearch(cmd *cobra.Command, args []string) error {
 		ScopeLayers:         kbScopeLayers,
 		Query:               kbQuery,
 		Limit:               kbLimit,
+		ExactID:             kbExactID,
 		MinSourceConfidence: kbMinSourceConfidence,
 		SampleTypes:         kbSampleTypes,
 		ExcludeSampleTypes:  kbExcludeSampleTypes,

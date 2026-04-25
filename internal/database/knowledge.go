@@ -49,6 +49,7 @@ type KnowledgeSearchOptions struct {
 	ScopeLayers         []string
 	Query               string
 	Limit               int
+	ExactID             bool
 	MinSourceConfidence float64
 	SampleTypes         []string
 	ExcludeSampleTypes  []string
@@ -204,6 +205,10 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 	if query == "" {
 		return []KnowledgeSearchHit{}, nil
 	}
+	exactID := opts.ExactID
+	if exactID && !isLikelyKnowledgeIdentifierQuery(query) {
+		return []KnowledgeSearchHit{}, nil
+	}
 	workspaces := normalizeKnowledgeWorkspaceLayers(opts.Workspace, opts.WorkspaceLayers)
 	scopeLayers := normalizeKnowledgeScopeLayers(opts.ScopeLayers)
 	limit := opts.Limit
@@ -232,6 +237,36 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 		ColumnExpr("COALESCE(kd.metadata_json, '') AS doc_metadata").
 		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id").
 		Where("(LOWER(kc.content) LIKE ? ESCAPE '\\' OR LOWER(kd.title) LIKE ? ESCAPE '\\' OR LOWER(kd.source_path) LIKE ? ESCAPE '\\')", pattern, pattern, pattern)
+
+	if exactID {
+		q = addExactKnowledgeIdentifierFilter(q, query)
+	}
+
+	// 对 CWE-79 / CAPEC-592 / T1059 / MCP01:2025 这类安全知识 ID，
+	// 先把标题或 source_path 精确指向该 ID 的文档排进候选集，避免
+	// CWE-79 被 CWE-791、CWE-792 这类前缀相同的记录挤出 limit*8 候选窗口。
+	if isLikelyKnowledgeIdentifierQuery(query) {
+		escapedQuery := escapeKnowledgeLike(strings.ToLower(query))
+		q = q.OrderExpr(
+			`CASE
+				WHEN LOWER(kd.title) = ? THEN 0
+				WHEN LOWER(kd.title) LIKE ? ESCAPE '\' THEN 0
+				WHEN LOWER(kd.title) LIKE ? ESCAPE '\' THEN 0
+				WHEN LOWER(kd.source_path) LIKE ? ESCAPE '\' THEN 0
+				WHEN LOWER(kd.source_path) LIKE ? ESCAPE '\' THEN 0
+				WHEN LOWER(kd.title) LIKE ? ESCAPE '\' THEN 1
+				WHEN LOWER(kd.source_path) LIKE ? ESCAPE '\' THEN 2
+				ELSE 3
+			END ASC`,
+			strings.ToLower(query),
+			escapedQuery+":%",
+			escapedQuery+" (%",
+			"%/"+escapedQuery,
+			"%/"+escapedQuery+"@%",
+			escapedQuery+"%",
+			"%/"+escapedQuery+"%",
+		)
+	}
 
 	if len(workspaces) == 1 {
 		q = q.Where("kc.workspace = ?", workspaces[0])
@@ -298,6 +333,18 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 	}
 
 	return results, nil
+}
+
+func addExactKnowledgeIdentifierFilter(q *bun.SelectQuery, query string) *bun.SelectQuery {
+	escapedQuery := escapeKnowledgeLike(strings.ToLower(strings.TrimSpace(query)))
+	return q.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+		return query.
+			WhereOr("LOWER(kd.title) = ?", escapedQuery).
+			WhereOr("LOWER(kd.title) LIKE ? ESCAPE '\\'", escapedQuery+":%").
+			WhereOr("LOWER(kd.title) LIKE ? ESCAPE '\\'", escapedQuery+" (%").
+			WhereOr("LOWER(kd.source_path) LIKE ? ESCAPE '\\'", "%/"+escapedQuery).
+			WhereOr("LOWER(kd.source_path) LIKE ? ESCAPE '\\'", "%/"+escapedQuery+"@%")
+	})
 }
 
 // ListKnowledgeChunks returns joined chunk/document rows for export and offline indexing.
@@ -422,6 +469,7 @@ func computeKnowledgeScore(query, title, sourcePath, content string) float64 {
 	score := float64(strings.Count(contentLower, queryLower) * 12)
 	score += float64(strings.Count(titleLower, queryLower) * 25)
 	score += float64(strings.Count(pathLower, queryLower) * 8)
+	score += computeKnowledgeIdentifierBoost(queryLower, titleLower, pathLower, contentLower)
 
 	for _, term := range terms {
 		if len(term) < 2 {
@@ -433,6 +481,83 @@ func computeKnowledgeScore(query, title, sourcePath, content string) float64 {
 	}
 
 	return score
+}
+
+func computeKnowledgeIdentifierBoost(queryLower, titleLower, pathLower, contentLower string) float64 {
+	if !isLikelyKnowledgeIdentifierQuery(queryLower) {
+		return 0
+	}
+
+	score := 0.0
+	if hasKnowledgeIdentifierBoundary(titleLower, queryLower) {
+		score += 220
+	}
+	if hasKnowledgeIdentifierBoundary(pathLower, queryLower) {
+		score += 180
+	}
+	// 内容里的精确 ID 也有参考价值，但不能压过标题/路径精确命中；
+	// 例如 CWE-791 的层级里出现 CWE-79，不应排在 CWE-79 本体前面。
+	if hasKnowledgeIdentifierBoundary(contentLower, queryLower) {
+		score += 20
+	}
+	return score
+}
+
+func isLikelyKnowledgeIdentifierQuery(query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if len(query) < 3 || strings.ContainsAny(query, " \t\r\n") {
+		return false
+	}
+
+	hasLetter := false
+	hasDigit := false
+	for _, r := range query {
+		switch {
+		case r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '-' || r == '.' || r == ':' || r == '_':
+			// 安全知识 ID 中常见的分隔符，例如 CWE-79、T1059.003、MCP01:2025。
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+func hasKnowledgeIdentifierBoundary(text, query string) bool {
+	text = strings.ToLower(text)
+	query = strings.ToLower(strings.TrimSpace(query))
+	if text == "" || query == "" {
+		return false
+	}
+
+	start := 0
+	for {
+		idx := strings.Index(text[start:], query)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		beforeOK := idx == 0 || !isKnowledgeIdentifierChar(rune(text[idx-1]))
+		afterIdx := idx + len(query)
+		afterOK := afterIdx >= len(text) || !isKnowledgeIdentifierChar(rune(text[afterIdx]))
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func isKnowledgeIdentifierChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		r == '-' ||
+		r == '.' ||
+		r == ':' ||
+		r == '_'
 }
 
 func computeKnowledgeLayerBoost(workspaces []string, workspace string) float64 {

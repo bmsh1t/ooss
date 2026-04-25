@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -162,6 +163,106 @@ func TestSearchKnowledgeWithOptions_FiltersByConfidenceAndSampleType(t *testing.
 	require.Len(t, results, 1)
 	require.NotNil(t, results[0].Metadata)
 	require.Equal(t, "verified", results[0].Metadata.SampleType)
+}
+
+func TestSearchKnowledgeWithOptions_RanksExactSecurityIdentifier(t *testing.T) {
+	cfg, cleanup := setupKnowledgeSearchTestDB(t)
+	defer cleanup()
+	_ = cfg
+
+	ctx := context.Background()
+	// 模拟真实 security-kb 里 CWE-791/792 会被 LIKE "%cwe-79%" 命中的场景。
+	seedSecurityIdentifierSearchFixture(t, ctx)
+
+	results, err := SearchKnowledgeWithOptions(ctx, KnowledgeSearchOptions{
+		Workspace: "security-kb",
+		Query:     "CWE-79",
+		Limit:     1,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "security-sqlite://cwe/CWE-79", results[0].SourcePath)
+}
+
+func TestSearchKnowledgeWithOptions_ExactSecurityIdentifierFiltersPrefixCollisions(t *testing.T) {
+	cfg, cleanup := setupKnowledgeSearchTestDB(t)
+	defer cleanup()
+	_ = cfg
+
+	seedSecurityIdentifierSearchFixture(t, context.Background())
+
+	results, err := SearchKnowledgeWithOptions(context.Background(), KnowledgeSearchOptions{
+		Workspace: "security-kb",
+		Query:     "CWE-79",
+		Limit:     10,
+		ExactID:   true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "security-sqlite://cwe/CWE-79", results[0].SourcePath)
+
+	results, err = SearchKnowledgeWithOptions(context.Background(), KnowledgeSearchOptions{
+		Workspace: "security-kb",
+		Query:     "xss",
+		Limit:     10,
+		ExactID:   true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, results)
+}
+
+func seedSecurityIdentifierSearchFixture(t *testing.T, ctx context.Context) {
+	t.Helper()
+	now := time.Now()
+
+	for id := 790; id <= 799; id++ {
+		cweID := "CWE-" + strconv.Itoa(id)
+		require.NoError(t, UpsertKnowledgeDocument(ctx, &KnowledgeDocument{
+			Workspace:   "security-kb",
+			SourcePath:  "security-sqlite://cwe/" + cweID,
+			SourceType:  "sqlite-import",
+			DocType:     "md",
+			Title:       cweID + ": Prefix Collision",
+			ContentHash: "doc-hash-" + cweID,
+			Status:      "ready",
+			ChunkCount:  1,
+			TotalBytes:  64,
+			Metadata:    `{"labels":["cwe"]}`,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}, []KnowledgeChunk{{
+			Workspace:   "security-kb",
+			ChunkIndex:  0,
+			Section:     "Overview",
+			Content:     cweID + " contains repeated CWE-79-like prefix text but is not the requested identifier.",
+			ContentHash: "chunk-hash-" + cweID,
+			Metadata:    `{"labels":["cwe"]}`,
+			CreatedAt:   now,
+		}}))
+	}
+
+	require.NoError(t, UpsertKnowledgeDocument(ctx, &KnowledgeDocument{
+		Workspace:   "security-kb",
+		SourcePath:  "security-sqlite://cwe/CWE-79",
+		SourceType:  "sqlite-import",
+		DocType:     "md",
+		Title:       "CWE-79: Cross-site Scripting",
+		ContentHash: "doc-hash-cwe-79",
+		Status:      "ready",
+		ChunkCount:  1,
+		TotalBytes:  64,
+		Metadata:    `{"labels":["cwe"]}`,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, []KnowledgeChunk{{
+		Workspace:   "security-kb",
+		ChunkIndex:  0,
+		Section:     "Overview",
+		Content:     "CWE-79 is the requested Cross-site Scripting weakness.",
+		ContentHash: "chunk-hash-cwe-79",
+		Metadata:    `{"labels":["cwe"]}`,
+		CreatedAt:   now,
+	}}))
 }
 
 func setupKnowledgeSearchTestDB(t *testing.T) (*config.Config, func()) {
