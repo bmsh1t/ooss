@@ -1,0 +1,20 @@
+kind: flow
+name: superdomain-extensive-ai-security-kb
+description: Superdomain extensive AI workflow with security-kb as the global base knowledge layer
+extends: superdomain-extensive-ai-optimized
+tags: recon, domain, extensive, ai, knowledge-base
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f superdomain-extensive-ai-security-kb -t example.com
+
+override:
+  params:
+    # 只把 security-kb 作为全局只读基座层；目标扫描学习仍保留在 {{TargetSpace}} 工作区。
+    sharedKnowledgeWorkspace: shared-web
+    globalKnowledgeWorkspace: security-kb
+    includeKnowledgeBase: true
+    enableSemanticSearch: true
+    enablePostVulnSemanticSearch: true
+    # 默认不自动创建 campaign/queue，避免一次扫描产生额外排队任务。
+    enableCampaignCreate: false
+    enableRetestQueue: false
