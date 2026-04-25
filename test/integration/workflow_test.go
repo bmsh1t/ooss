@@ -721,6 +721,30 @@ func TestSuperdomainAIWorkflowFollowupTogglesExposed(t *testing.T) {
 	}
 }
 
+func TestSuperdomainAIWorkflowDefaultsSecurityKBAsGlobalKnowledge(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+		"superdomain-extensive-ai-lite",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			assertWorkflowHasParam(t, workflow, "knowledgeWorkspace", "{{TargetSpace}}")
+			assertWorkflowHasParam(t, workflow, "sharedKnowledgeWorkspace", "")
+			assertWorkflowHasParam(t, workflow, "globalKnowledgeWorkspace", "security-kb")
+		})
+	}
+}
+
 func TestSuperdomainAIWorkflowPreviousFollowupParamsExposed(t *testing.T) {
 	workflows := []string{
 		"superdomain-extensive-ai-optimized",
