@@ -5,11 +5,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
+)
+
+var (
+	knowledgeCWEIdentifierPattern    = regexp.MustCompile(`^cwe-\d+$`)
+	knowledgeCAPECIdentifierPattern  = regexp.MustCompile(`^capec-\d+$`)
+	knowledgeAttackIdentifierPattern = regexp.MustCompile(`^t\d{4}(?:\.\d{3})?$`)
+	knowledgeASIIdentifierPattern    = regexp.MustCompile(`^asi\d{2,}$`)
+	knowledgeMCPIdentifierPattern    = regexp.MustCompile(`^mcp\d{2,}(?::\d{4})?$`)
+	knowledgeOWASPIdentifierPattern  = regexp.MustCompile(`^a\d{2}(?:[@:]\d{4})?$`)
+	knowledgeSTRIDEIdentifierPattern = regexp.MustCompile(`^stride[\s:_-]+([stride])$`)
 )
 
 // KnowledgeDocumentQuery controls knowledge document list queries.
@@ -49,6 +60,7 @@ type KnowledgeSearchOptions struct {
 	ScopeLayers         []string
 	Query               string
 	Limit               int
+	ExactID             bool
 	MinSourceConfidence float64
 	SampleTypes         []string
 	ExcludeSampleTypes  []string
@@ -66,6 +78,14 @@ type knowledgeSearchCandidate struct {
 	ContentHash   string `bun:"content_hash"`
 	ChunkMetadata string `bun:"chunk_metadata"`
 	DocMetadata   string `bun:"doc_metadata"`
+}
+
+type knowledgeIdentifierQuery struct {
+	Family    string
+	Canonical string
+	BaseID    string
+	PathID    string
+	Year      string
 }
 
 // KnowledgeChunkExportRow contains a normalized chunk plus its parent document metadata.
@@ -204,6 +224,10 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 	if query == "" {
 		return []KnowledgeSearchHit{}, nil
 	}
+	identifier, hasIdentifier := detectKnowledgeIdentifier(query)
+	if opts.ExactID && !hasIdentifier {
+		return []KnowledgeSearchHit{}, nil
+	}
 	workspaces := normalizeKnowledgeWorkspaceLayers(opts.Workspace, opts.WorkspaceLayers)
 	scopeLayers := normalizeKnowledgeScopeLayers(opts.ScopeLayers)
 	limit := opts.Limit
@@ -231,7 +255,22 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 		ColumnExpr("COALESCE(kc.metadata_json, '') AS chunk_metadata").
 		ColumnExpr("COALESCE(kd.metadata_json, '') AS doc_metadata").
 		Join("JOIN knowledge_documents AS kd ON kd.id = kc.document_id").
-		Where("(LOWER(kc.content) LIKE ? ESCAPE '\\' OR LOWER(kd.title) LIKE ? ESCAPE '\\' OR LOWER(kd.source_path) LIKE ? ESCAPE '\\')", pattern, pattern, pattern)
+		WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+			query = query.WhereOr("LOWER(kc.content) LIKE ? ESCAPE '\\'", pattern)
+			query = query.WhereOr("LOWER(kd.title) LIKE ? ESCAPE '\\'", pattern)
+			query = query.WhereOr("LOWER(kd.source_path) LIKE ? ESCAPE '\\'", pattern)
+			if hasIdentifier {
+				query = addKnowledgeIdentifierCandidateConditions(query, identifier)
+			}
+			return query
+		})
+
+	if opts.ExactID {
+		q = addExactKnowledgeIdentifierFilter(q, identifier)
+	}
+	if hasIdentifier {
+		q = orderKnowledgeIdentifierCandidates(q, identifier)
+	}
 
 	if len(workspaces) == 1 {
 		q = q.Where("kc.workspace = ?", workspaces[0])
@@ -260,6 +299,7 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 			continue
 		}
 		score := computeKnowledgeScore(query, candidate.Title, candidate.SourcePath, candidate.Content)
+		score += computeKnowledgeIdentifierBoost(identifier, hasIdentifier, candidate.Title, candidate.SourcePath, candidate.Content, candidate.ChunkMetadata, candidate.DocMetadata)
 		score += computeKnowledgeLayerBoost(workspaces, candidate.Workspace)
 		score += computeKnowledgeScopeBoost(scopeLayers, candidate.ChunkMetadata, candidate.DocMetadata)
 		score += ComputeKnowledgeMetadataBoost(query, metadata)
@@ -298,6 +338,71 @@ func SearchKnowledgeWithOptions(ctx context.Context, opts KnowledgeSearchOptions
 	}
 
 	return results, nil
+}
+
+func addKnowledgeIdentifierCandidateConditions(q *bun.SelectQuery, identifier knowledgeIdentifierQuery) *bun.SelectQuery {
+	// ID 查询要额外把标题、路径、metadata 精确命中的记录拉进候选集。
+	// 否则 CWE-79 这类短 ID 可能被大量 CWE-790/CWE-791 前缀碰撞记录挤出 limit*8 窗口。
+	for _, pattern := range knowledgeIdentifierTitleLikePatterns(identifier) {
+		q = q.WhereOr("LOWER(kd.title) LIKE ? ESCAPE '\\'", pattern)
+	}
+	for _, pattern := range knowledgeIdentifierSourcePathLikePatterns(identifier) {
+		q = q.WhereOr("LOWER(kd.source_path) LIKE ? ESCAPE '\\'", pattern)
+	}
+	for _, pattern := range knowledgeIdentifierMetadataLikePatterns(identifier) {
+		q = q.WhereOr("LOWER(COALESCE(kc.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+		q = q.WhereOr("LOWER(COALESCE(kd.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+	}
+	return q
+}
+
+func addExactKnowledgeIdentifierFilter(q *bun.SelectQuery, identifier knowledgeIdentifierQuery) *bun.SelectQuery {
+	// --exact-id 是强过滤模式：只保留文档身份本身匹配的记录。
+	// 普通正文里提到该 ID 的相关文档仍可在非 exact 模式下返回。
+	return q.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+		for _, value := range knowledgeIdentifierTitleExactValues(identifier) {
+			query = query.WhereOr("LOWER(kd.title) = ?", value)
+		}
+		for _, pattern := range knowledgeIdentifierTitleLikePatterns(identifier) {
+			query = query.WhereOr("LOWER(kd.title) LIKE ? ESCAPE '\\'", pattern)
+		}
+		for _, pattern := range knowledgeIdentifierSourcePathLikePatterns(identifier) {
+			query = query.WhereOr("LOWER(kd.source_path) LIKE ? ESCAPE '\\'", pattern)
+		}
+		for _, pattern := range knowledgeIdentifierMetadataLikePatterns(identifier) {
+			query = query.WhereOr("LOWER(COALESCE(kc.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+			query = query.WhereOr("LOWER(COALESCE(kd.metadata_json, '')) LIKE ? ESCAPE '\\'", pattern)
+		}
+		return query
+	})
+}
+
+func orderKnowledgeIdentifierCandidates(q *bun.SelectQuery, identifier knowledgeIdentifierQuery) *bun.SelectQuery {
+	// 在 SQL 候选阶段先把精确身份命中排到前面，避免数据库 limit 先截断掉真正目标。
+	orderTerms := make([]string, 0)
+	args := make([]interface{}, 0)
+
+	for _, value := range knowledgeIdentifierTitleExactValues(identifier) {
+		orderTerms = append(orderTerms, "LOWER(kd.title) = ?")
+		args = append(args, value)
+	}
+	for _, pattern := range knowledgeIdentifierTitleLikePatterns(identifier) {
+		orderTerms = append(orderTerms, "LOWER(kd.title) LIKE ? ESCAPE '\\'")
+		args = append(args, pattern)
+	}
+	for _, pattern := range knowledgeIdentifierSourcePathLikePatterns(identifier) {
+		orderTerms = append(orderTerms, "LOWER(kd.source_path) LIKE ? ESCAPE '\\'")
+		args = append(args, pattern)
+	}
+	for _, pattern := range knowledgeIdentifierMetadataLikePatterns(identifier) {
+		orderTerms = append(orderTerms, "LOWER(COALESCE(kd.metadata_json, '')) LIKE ? ESCAPE '\\'")
+		args = append(args, pattern)
+	}
+	if len(orderTerms) == 0 {
+		return q
+	}
+
+	return q.OrderExpr("CASE WHEN "+strings.Join(orderTerms, " OR ")+" THEN 0 ELSE 1 END ASC", args...)
 }
 
 // ListKnowledgeChunks returns joined chunk/document rows for export and offline indexing.
@@ -433,6 +538,260 @@ func computeKnowledgeScore(query, title, sourcePath, content string) float64 {
 	}
 
 	return score
+}
+
+func detectKnowledgeIdentifier(query string) (knowledgeIdentifierQuery, bool) {
+	// 只识别明确的安全知识 ID。单独的 S/T/D 这类字符不算 ID，
+	// 避免普通短词搜索被 STRIDE 单字母分类误伤。
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return knowledgeIdentifierQuery{}, false
+	}
+
+	if match := knowledgeSTRIDEIdentifierPattern.FindStringSubmatch(normalized); len(match) == 2 {
+		return knowledgeIdentifierQuery{
+			Family:    "stride",
+			Canonical: "stride:" + match[1],
+			BaseID:    match[1],
+			PathID:    match[1],
+		}, true
+	}
+
+	compact := strings.ReplaceAll(normalized, " ", "")
+	switch {
+	case knowledgeCWEIdentifierPattern.MatchString(compact):
+		return knowledgeIdentifierQuery{Family: "cwe", Canonical: compact, BaseID: compact, PathID: compact}, true
+	case knowledgeCAPECIdentifierPattern.MatchString(compact):
+		return knowledgeIdentifierQuery{Family: "capec", Canonical: compact, BaseID: compact, PathID: compact}, true
+	case knowledgeAttackIdentifierPattern.MatchString(compact):
+		return knowledgeIdentifierQuery{Family: "attack", Canonical: compact, BaseID: compact, PathID: compact}, true
+	case knowledgeASIIdentifierPattern.MatchString(compact):
+		return knowledgeIdentifierQuery{Family: "agentic", Canonical: compact, BaseID: compact, PathID: compact}, true
+	case knowledgeMCPIdentifierPattern.MatchString(compact):
+		return knowledgeIdentifierQuery{Family: "agentic", Canonical: compact, BaseID: compact, PathID: compact}, true
+	case knowledgeOWASPIdentifierPattern.MatchString(compact):
+		baseID := compact
+		year := ""
+		if idx := strings.IndexAny(compact, "@:"); idx >= 0 {
+			baseID = compact[:idx]
+			year = compact[idx+1:]
+		}
+		pathID := baseID
+		canonical := baseID
+		if year != "" {
+			pathID = baseID + "@" + year
+			canonical = pathID
+		}
+		return knowledgeIdentifierQuery{Family: "owasp", Canonical: canonical, BaseID: baseID, PathID: pathID, Year: year}, true
+	default:
+		return knowledgeIdentifierQuery{}, false
+	}
+}
+
+func computeKnowledgeIdentifierBoost(identifier knowledgeIdentifierQuery, ok bool, title, sourcePath, content string, metadata ...string) float64 {
+	if !ok {
+		return 0
+	}
+
+	titleLower := strings.ToLower(title)
+	pathLower := strings.ToLower(sourcePath)
+	contentLower := strings.ToLower(content)
+
+	score := 0.0
+	// 标题、路径、metadata 代表“文档身份”，权重大于正文里的关系引用。
+	// 例如 CWE-352 正文提到 CWE-79，不应排在 CWE-79 本体前面。
+	for _, value := range knowledgeIdentifierTitleExactValues(identifier) {
+		if titleLower == value {
+			score += 2000
+		}
+	}
+	for _, pattern := range knowledgeIdentifierTitleBoundaryValues(identifier) {
+		if hasKnowledgeIdentifierBoundary(titleLower, pattern) {
+			score += 1800
+			break
+		}
+	}
+	for _, value := range knowledgeIdentifierPathBoundaryValues(identifier) {
+		if hasKnowledgeIdentifierBoundary(pathLower, value) {
+			score += 1600
+			break
+		}
+	}
+	for _, value := range knowledgeIdentifierMetadataExactValues(identifier) {
+		if metadataHasKnowledgeIdentifierValue(value, metadata...) {
+			score += 1500
+			break
+		}
+	}
+	for _, value := range knowledgeIdentifierContentBoundaryValues(identifier) {
+		if hasKnowledgeIdentifierBoundary(contentLower, value) {
+			score += 80
+			break
+		}
+	}
+	return score
+}
+
+func knowledgeIdentifierTitleExactValues(identifier knowledgeIdentifierQuery) []string {
+	switch identifier.Family {
+	case "stride":
+		return []string{"stride " + identifier.BaseID}
+	default:
+		return []string{identifier.Canonical}
+	}
+}
+
+func knowledgeIdentifierTitleBoundaryValues(identifier knowledgeIdentifierQuery) []string {
+	switch identifier.Family {
+	case "stride":
+		return []string{"stride " + identifier.BaseID, "stride:" + identifier.BaseID}
+	case "owasp":
+		if identifier.Year != "" {
+			return []string{identifier.BaseID + " (" + identifier.Year + ")", identifier.PathID}
+		}
+		return []string{identifier.BaseID}
+	default:
+		return []string{identifier.Canonical}
+	}
+}
+
+func knowledgeIdentifierPathBoundaryValues(identifier knowledgeIdentifierQuery) []string {
+	switch identifier.Family {
+	case "stride":
+		return []string{"stride_cwe/" + identifier.PathID}
+	case "owasp":
+		if identifier.Year == "" {
+			return []string{"owasp_top10/" + identifier.BaseID}
+		}
+		return []string{"owasp_top10/" + identifier.PathID}
+	default:
+		return []string{identifier.PathID}
+	}
+}
+
+func knowledgeIdentifierContentBoundaryValues(identifier knowledgeIdentifierQuery) []string {
+	values := knowledgeIdentifierTitleBoundaryValues(identifier)
+	if identifier.Family == "owasp" && identifier.Year != "" {
+		values = append(values, identifier.BaseID+"::"+identifier.Year)
+	}
+	return values
+}
+
+func knowledgeIdentifierMetadataExactValues(identifier knowledgeIdentifierQuery) []string {
+	values := []string{identifier.Canonical, identifier.PathID}
+	switch identifier.Family {
+	case "stride":
+		values = append(values, identifier.BaseID)
+	case "owasp":
+		values = append(values, identifier.BaseID)
+		if identifier.Year != "" {
+			values = append(values, identifier.BaseID+"::"+identifier.Year)
+		}
+	}
+	return uniqueKnowledgeTerms(values)
+}
+
+func knowledgeIdentifierTitleLikePatterns(identifier knowledgeIdentifierQuery) []string {
+	values := make([]string, 0)
+	for _, titleID := range knowledgeIdentifierTitleBoundaryValues(identifier) {
+		escaped := escapeKnowledgeLike(titleID)
+		values = append(values,
+			escaped+":%",
+			escaped+" (%",
+			escaped+" -%",
+			escaped+" —%",
+		)
+	}
+	return uniqueKnowledgeTerms(values)
+}
+
+func knowledgeIdentifierSourcePathLikePatterns(identifier knowledgeIdentifierQuery) []string {
+	switch identifier.Family {
+	case "stride":
+		return []string{"%/stride\\_cwe/" + escapeKnowledgeLike(identifier.PathID)}
+	case "owasp":
+		if identifier.Year == "" {
+			return []string{
+				"%/owasp\\_top10/" + escapeKnowledgeLike(identifier.BaseID),
+				"%/owasp\\_top10/" + escapeKnowledgeLike(identifier.BaseID) + "@%",
+			}
+		}
+		return []string{"%/owasp\\_top10/" + escapeKnowledgeLike(identifier.PathID)}
+	default:
+		return []string{"%/" + escapeKnowledgeLike(identifier.PathID)}
+	}
+}
+
+func knowledgeIdentifierMetadataLikePatterns(identifier knowledgeIdentifierQuery) []string {
+	patterns := make([]string, 0)
+	for _, value := range knowledgeIdentifierMetadataExactValues(identifier) {
+		escaped := escapeKnowledgeLike(value)
+		patterns = append(patterns,
+			`%"source_id":"`+escaped+`"%`,
+			`%"source_id": "`+escaped+`"%`,
+			`%"stix_id":"`+escaped+`"%`,
+			`%"stix_id": "`+escaped+`"%`,
+		)
+	}
+	return uniqueKnowledgeTerms(patterns)
+}
+
+func hasKnowledgeIdentifierBoundary(text, query string) bool {
+	text = strings.ToLower(text)
+	query = strings.ToLower(strings.TrimSpace(query))
+	if text == "" || query == "" {
+		return false
+	}
+
+	start := 0
+	for {
+		idx := strings.Index(text[start:], query)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		beforeOK := idx == 0 || !isKnowledgeIdentifierChar(rune(text[idx-1]))
+		afterIdx := idx + len(query)
+		afterOK := afterIdx >= len(text) || !isKnowledgeIdentifierChar(rune(text[afterIdx]))
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func metadataHasKnowledgeIdentifierValue(value string, metadata ...string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, raw := range metadata {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			continue
+		}
+		for _, key := range []string{"source_id", "stix_id"} {
+			if strings.EqualFold(parseKnowledgeMetadataString(parsed[key]), value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isKnowledgeIdentifierChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		r == '-' ||
+		r == '.' ||
+		r == ':' ||
+		r == '_' ||
+		r == '@'
 }
 
 func computeKnowledgeLayerBoost(workspaces []string, workspace string) float64 {

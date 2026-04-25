@@ -670,6 +670,7 @@ func TestSuperdomainAIWorkflowOperationalWiring(t *testing.T) {
 			})
 			assert.ElementsMatch(t, []string{"report"}, knowledgeAutolearn.DependsOn)
 
+			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-skills-loader"), "{{enableLlmAnalysis}}")
 			assertModulePreCondition(t, earlySemantic, "{{enableSemanticSearch}}")
 			assertModulePreCondition(t, intelligent, optionalFlowToggleCondition("enableLlmAnalysis", "enableIntelligentAnalysis"))
 			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-apply-decision"), optionalFlowToggleCondition("enableLlmAnalysis", "enableAiDecision"))
@@ -741,6 +742,30 @@ func TestSuperdomainAIWorkflowDefaultsSecurityKBAsGlobalKnowledge(t *testing.T) 
 			assertWorkflowHasParam(t, workflow, "knowledgeWorkspace", "{{TargetSpace}}")
 			assertWorkflowHasParam(t, workflow, "sharedKnowledgeWorkspace", "")
 			assertWorkflowHasParam(t, workflow, "globalKnowledgeWorkspace", "security-kb")
+		})
+	}
+}
+
+func TestSuperdomainAIWorkflowSemanticSearchGatesFollowOuterToggles(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+		"superdomain-extensive-ai-lite",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-semantic-search"), "{{enableSemanticSearch}}")
+			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-post-vuln-semantic-search"), "{{enableSemanticSearch}} && {{enablePostVulnSemanticSearch}}")
+			assertModulePreCondition(t, findModuleRef(t, workflow, "ai-decision-semantic-search"), "{{enableLlmAnalysis}} && {{enableSemanticSearch}}")
 		})
 	}
 }

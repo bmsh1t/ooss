@@ -145,6 +145,7 @@ type SearchOptions struct {
 	ScopeLayers         []string `json:"scope_layers,omitempty"`
 	Query               string   `json:"query"`
 	Limit               int      `json:"limit,omitempty"`
+	ExactID             bool     `json:"exact_id,omitempty"`
 	MinSourceConfidence float64  `json:"min_source_confidence,omitempty"`
 	SampleTypes         []string `json:"sample_types,omitempty"`
 	ExcludeSampleTypes  []string `json:"exclude_sample_types,omitempty"`
@@ -2063,6 +2064,7 @@ func SearchWithOptions(ctx context.Context, opts SearchOptions) ([]database.Know
 		ScopeLayers:         opts.ScopeLayers,
 		Query:               opts.Query,
 		Limit:               opts.Limit,
+		ExactID:             opts.ExactID,
 		MinSourceConfidence: opts.MinSourceConfidence,
 		SampleTypes:         opts.SampleTypes,
 		ExcludeSampleTypes:  opts.ExcludeSampleTypes,

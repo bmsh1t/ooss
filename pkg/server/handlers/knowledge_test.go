@@ -145,6 +145,72 @@ func TestSearchVectorKnowledgeValidation(t *testing.T) {
 	assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode)
 }
 
+func TestSearchKnowledgeSupportsExactID(t *testing.T) {
+	cfg, cleanup := setupKnowledgeHandlerDB(t)
+	defer cleanup()
+
+	now := time.Now()
+	for _, item := range []struct {
+		id    string
+		title string
+	}{
+		{id: "CWE-791", title: "CWE-791: Prefix Collision"},
+		{id: "CWE-79", title: "CWE-79: Cross-site Scripting"},
+	} {
+		require.NoError(t, database.UpsertKnowledgeDocument(context.Background(), &database.KnowledgeDocument{
+			Workspace:   "security-kb",
+			SourcePath:  "security-sqlite://cwe/" + item.id,
+			SourceType:  "sqlite-import",
+			DocType:     "md",
+			Title:       item.title,
+			ContentHash: "doc-hash-" + item.id,
+			Status:      "ready",
+			ChunkCount:  1,
+			TotalBytes:  64,
+			Metadata:    `{"source_table":"cwe","source_id":"` + item.id + `","labels":["cwe"]}`,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}, []database.KnowledgeChunk{{
+			Workspace:   "security-kb",
+			ChunkIndex:  0,
+			Section:     "Overview",
+			Content:     item.id + " content mentioning CWE-79 for relation context.",
+			ContentHash: "chunk-hash-" + item.id,
+			Metadata:    `{"source_table":"cwe","source_id":"` + item.id + `","labels":["cwe"]}`,
+			CreatedAt:   now,
+		}}))
+	}
+
+	app := fiber.New()
+	app.Post("/knowledge/search", SearchKnowledge(cfg))
+
+	body, err := json.Marshal(KnowledgeSearchRequest{
+		Workspace: "security-kb",
+		Query:     "CWE-79",
+		Limit:     10,
+		ExactID:   true,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/knowledge/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, fiber.StatusOK, resp.StatusCode)
+	defer resp.Body.Close()
+
+	var payload struct {
+		Total int `json:"total"`
+		Data  []struct {
+			SourcePath string `json:"source_path"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	require.Equal(t, 1, payload.Total)
+	require.Len(t, payload.Data, 1)
+	assert.Equal(t, "security-sqlite://cwe/CWE-79", payload.Data[0].SourcePath)
+}
+
 func TestKnowledgeVectorRankingSourcePreservesEmptyFirstResult(t *testing.T) {
 	assert.Equal(t, "", knowledgeVectorRankingSource([]vectorkb.SearchHit{{
 		RankingSource: "",

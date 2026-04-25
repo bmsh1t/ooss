@@ -439,7 +439,7 @@ modules:
   - name: ai-post-vuln-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [vuln-suite, ai-skills-loader]
-    pre_condition: "{{enablePostVulnSemanticSearch}}"
+    pre_condition: "{{enableSemanticSearch}} && {{enablePostVulnSemanticSearch}}"
     params:
       semanticIndexDir: "{{Output}}/ai-analysis/semantic-index-post-vuln"
       searchResultsOutput: "{{Output}}/ai-analysis/semantic-search-post-vuln-{{TargetSpace}}.json"
@@ -498,7 +498,7 @@ modules:
   - name: ai-decision-semantic-search
     path: fragments/do-ai-semantic-search.yaml
     depends_on: [ai-apply-decision]
-    pre_condition: "{{enableLlmAnalysis}}"
+    pre_condition: "{{enableLlmAnalysis}} && {{enableSemanticSearch}}"
     params:
       semanticIndexDir: "{{Output}}/ai-analysis/semantic-index-decision-followup"
       searchResultsOutput: "{{Output}}/ai-analysis/semantic-search-decision-followup-{{TargetSpace}}.json"
