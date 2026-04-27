@@ -136,7 +136,7 @@ params:
   - name: urlfinderTimeout
     default: "2h"
   - name: toolsDir
-    default: "/home/himan/Tools"
+    default: "${HOME}/Tools"
   - name: waymoreTimeout
     default: "60m"
   - name: waymoreLimit

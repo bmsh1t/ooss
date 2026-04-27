@@ -15,7 +15,7 @@ tags: gf, js, param, analysis, patterns, secrets, websocket, graphql
 params:
   # 工具路径
   - name: toolsDir
-    default: "/home/himan/Tools"
+    default: "${HOME}/Tools"
 
   # 功能开关
   - name: enableGfPatterns
@@ -91,7 +91,7 @@ params:
   - name: jsLiveLinksFile
     default: "{{outputDir}}/js-live-{{TargetSpace}}.txt"
   - name: jsUrlsFile
-    default: "{{Output}}/links/js-urls-{{TargetSpace}}.txt"
+    default: "{{outputDir}}/js-urls-{{TargetSpace}}.txt"
   - name: jsSecretsFile
     default: "{{outputDir}}/js-secrets-{{TargetSpace}}.txt"
   - name: jsSecretsJsmapFile
@@ -136,6 +136,8 @@ params:
     default: "{{outputDir}}/js-new-subs-{{TargetSpace}}.txt"
   - name: jsResolvedSubsFile
     default: "{{outputDir}}/js-resolved-subs-{{TargetSpace}}.txt"
+  - name: jsExternalHostsFile
+    default: "{{outputDir}}/js-external-hosts-{{TargetSpace}}.txt"
 
   # LLM Secrets 分析配置
   - name: enableLlmSecretsAnalysis
@@ -183,6 +185,7 @@ dependencies:
     - anew
     - katana
     - arjun
+    - p1radup
     - titus
     - trufflehog
     - httpx
@@ -241,7 +244,7 @@ reports:
   - name: js-links
     path: "{{jsLinksFile}}"
     type: text
-    description: JavaScript URLs extracted by subjs
+    description: JavaScript URLs extracted by katana and subjs
 
   - name: js-live-links
     path: "{{jsLiveLinksFile}}"
@@ -251,12 +254,12 @@ reports:
   - name: js-urls
     path: "{{jsUrlsFile}}"
     type: text
-    description: URLs extracted from JavaScript by katana
+    description: Verified JavaScript URLs used by downstream LLM and JS secret scans
 
   - name: js-endpoints
     path: "{{jsEndpointsFile}}"
     type: text
-    description: Endpoints extracted from JavaScript files
+    description: API and endpoint URLs extracted from JavaScript-aware crawl output
 
   - name: js-secrets
     path: "{{jsSecretsFile}}"
@@ -287,6 +290,10 @@ reports:
     path: "{{jsResolvedSubsFile}}"
     type: text
     description: New subdomains extracted from JS/crawl outputs
+  - name: js-external-hosts
+    path: "{{jsExternalHostsFile}}"
+    type: text
+    description: External hosts extracted from JS/crawl outputs
 
 # -----------------------------------------------------------------------------
 # STEPS SECTION
@@ -345,44 +352,113 @@ steps:
       - action: continue
 
   # ===========================================================================
-  # Phase 3: JavaScript Analysis (reconftw style)
+  # Phase 3: JavaScript Analysis (reconftw-inspired, local semantics)
   # ===========================================================================
   - name: extract-js-urls
-    type: function
+    type: bash
     pre_condition: '{{enableJsAnalysis}} && file_exists("{{httpFile}}")'
-    log: "Extracting JavaScript URLs with subjs"
-    functions:
-      - 'exec_cmd("subjs -ua \"Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0\" -c 40 < {{httpFile}} 2>/dev/null | grep -aEo \"https?://[^ ]+\" | anew -q {{jsLinksFile}} || true")'
+    log: "Extracting JavaScript and endpoint URLs with katana/subjs"
+    command: |
+      mkdir -p "{{outputDir}}" "$(dirname "{{jsUrlsFile}}")" 2>/dev/null || true
+      : > "{{jsLinksFile}}"
+      : > "{{jsLiveLinksFile}}"
+      : > "{{jsUrlsFile}}"
+      : > "{{jsEndpointsFile}}"
+      : > "{{jsJsmapUrlsFile}}"
+
+      if [ -s "{{httpFile}}" ]; then
+        static_ext_re='\.([eE][oO][tT]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[cC][sS][sS]|[tT][iI][fF][fF]?|[pP][nN][gG]|[tT][tT][fF]|[oO][tT][fF]|[wW][oO][fF][fF]2?|[iI][cC][oO]|[pP][dD][fF]|[sS][vV][gG]|[tT][xX][tT]|[mM]?[jJ][sS]|[mM][aA][pP])([?#].*)?$'
+        # subjs 作为轻量补充源：只负责补 JS 文件 URL。
+        subjs -ua "Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0" -c 40 < "{{httpFile}}" 2>/dev/null \
+          | grep -aEo 'https?://[^ ]+' \
+          | sed -E 's/["'\''<>),;]+$//' \
+          | grep -aiE '\.m?js([?#].*)?$|\.m?js([/?&].*)' \
+          | anew -q "{{jsLinksFile}}" || true
+
+        katana_out="{{outputDir}}/katana-js-crawl-{{TargetSpace}}.txt"
+        katana_urls="{{outputDir}}/katana-js-crawl-urls-{{TargetSpace}}.txt"
+        : > "$katana_out"
+        : > "$katana_urls"
+
+        # reconftw 风格：以真实 Web 入口为起点，用 katana -jc 抽取 crawl/JS 里暴露的 URL。
+        katana -silent -list "{{httpFile}}" -jc -kf all -d 2 -fs rdn -c {{jsThreads}} 2>/dev/null > "$katana_out" || true
+
+        if [ -s "$katana_out" ]; then
+          grep -aEo 'https?://[^ ]+' "$katana_out" 2>/dev/null \
+            | sed -E 's/["'\''<>),;]+$//' \
+            | sed '/^$/d' \
+            | sort -u > "$katana_urls" || true
+
+          # JS 源文件与 sourcemap 单独留档，供后续 xnLinkFinder/mantra/sourcemapper 使用。
+          grep -aiE '\.m?js([?#].*)?$|\.m?js([/?&].*)' "$katana_urls" 2>/dev/null | anew -q "{{jsLinksFile}}" || true
+          grep -aiE '\.map([/?#].*)?$' "$katana_urls" 2>/dev/null | anew -q "{{jsJsmapUrlsFile}}" || true
+
+          # 本地工作流里 jsUrlsFile 是“JS 文件 URL”清单；API/参数端点写入 jsEndpointsFile，
+          # 再回灌 combinedUrlsFile，供 Arjun、GraphQL/WebSocket、AI 上下文继续消费。
+          grep -aEv "$static_ext_re" "$katana_urls" 2>/dev/null \
+            | anew -q "{{jsEndpointsFile}}" || true
+          grep -aEv "$static_ext_re" "$katana_urls" 2>/dev/null \
+            | anew -q "{{combinedUrlsFile}}" || true
+        fi
+
+        rm -f "$katana_urls" 2>/dev/null || true
+      fi
     on_error:
       - action: continue
 
   - name: verify-js-urls
-    type: function
+    type: bash
     pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLinksFile}}")'
     log: "Verifying live JavaScript URLs"
-    functions:
-      - 'exec_cmd("httpx -silent -follow-redirects -random-agent -status-code -content-type -mc 200 -ct javascript -timeout 10 -threads {{jsThreads}} < {{jsLinksFile}} 2>/dev/null | awk \"/\\\\[200\\\\]/ && /javascript/ {print \\$1}\" | anew -q {{jsLiveLinksFile}} || true")'
+    command: |
+      mkdir -p "$(dirname "{{jsLiveLinksFile}}")" "$(dirname "{{jsUrlsFile}}")" 2>/dev/null || true
+      live_tmp="{{outputDir}}/js-live-verified-{{TargetSpace}}.tmp"
+      : > "{{jsLiveLinksFile}}"
+      : > "{{jsUrlsFile}}"
+      : > "$live_tmp"
+      if [ -s "{{jsLinksFile}}" ]; then
+        httpx -silent -follow-redirects -random-agent -status-code -content-type -mc 200 -timeout 10 -threads {{jsThreads}} < {{jsLinksFile}} 2>/dev/null \
+          | awk 'BEGIN{IGNORECASE=1} /\[200\]/ { url=$1; if ($0 ~ /(javascript|ecmascript)/ || url ~ /\.m?js([?#].*)?$/) print url }' \
+          | sort -u > "$live_tmp" || true
+        [ -s "$live_tmp" ] && cat "$live_tmp" | anew -q "{{jsLiveLinksFile}}" || true
+        # jsUrlsFile 是给 LLM code review 与 vuln-suite secret-js-scan 使用的已验证 JS 文件 URL 清单。
+        [ -s "$live_tmp" ] && cat "$live_tmp" | anew -q "{{jsUrlsFile}}" || true
+      fi
+      rm -f "$live_tmp" 2>/dev/null || true
     on_error:
       - action: continue
 
   - name: katana-js-crawl
-    type: function
-    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
-    log: "Crawling JavaScript files with katana"
-    functions:
-      - 'exec_cmd("katana -jsl {{jsLiveLinksFile}} -jc -d 1 -c {{jsThreads}} -fs rdn -aff -o {{jsUrlsFile}} 2>/dev/null || true")'
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}") && file_length("{{jsLiveLinksFile}}") > 0'
+    log: "Extracting endpoints from live JavaScript files with katana"
+    command: |
+      tmp_js_urls="{{outputDir}}/katana-jsl-urls-{{TargetSpace}}.txt"
+      static_ext_re='\.([eE][oO][tT]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[cC][sS][sS]|[tT][iI][fF][fF]?|[pP][nN][gG]|[tT][tT][fF]|[oO][tT][fF]|[wW][oO][fF][fF]2?|[iI][cC][oO]|[pP][dD][fF]|[sS][vV][gG]|[tT][xX][tT]|[mM]?[jJ][sS]|[mM][aA][pP])([?#].*)?$'
+      : > "$tmp_js_urls"
+      katana -silent -jsl "{{jsLiveLinksFile}}" -jc -d 1 -c {{jsThreads}} -fs rdn -aff -o "$tmp_js_urls" 2>/dev/null || true
+      if [ -s "$tmp_js_urls" ]; then
+        grep -aEo 'https?://[^ ]+' "$tmp_js_urls" 2>/dev/null \
+          | sed -E 's/["'\''<>),;]+$//' \
+          | sort -u > "$tmp_js_urls.norm" || true
+        grep -aiE '\.m?js([?#].*)?$|\.m?js([/?&].*)' "$tmp_js_urls.norm" 2>/dev/null | anew -q "{{jsLinksFile}}" || true
+        grep -aiE '\.map([/?#].*)?$' "$tmp_js_urls.norm" 2>/dev/null | anew -q "{{jsJsmapUrlsFile}}" || true
+        grep -aEv "$static_ext_re" "$tmp_js_urls.norm" 2>/dev/null | anew -q "{{jsEndpointsFile}}" || true
+        grep -aEv "$static_ext_re" "$tmp_js_urls.norm" 2>/dev/null | anew -q "{{combinedUrlsFile}}" || true
+      fi
+      rm -f "$tmp_js_urls" "$tmp_js_urls.norm" 2>/dev/null || true
     on_error:
       - action: continue
 
   - name: jsa-deep-analysis
     type: bash
-    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}") && file_length("{{jsLiveLinksFile}}") > 0'
     log: "Running JSA deep analysis for JS URL extraction (DEEP mode)"
     command: |
-      if [ -s "{{jsUrlsFile}}" ]; then
+      if [ -s "{{jsLiveLinksFile}}" ]; then
         # 使用 JSA 工具从 JS 文件中提取更多 URL (与 reconftw DEEP 模式一致)
         if [ -x "{{toolsDir}}/JSA/venv/bin/python3" ] && [ -f "{{toolsDir}}/JSA/jsa.py" ]; then
-          interlace -tL {{jsUrlsFile}} -threads 10 -c "{{toolsDir}}/JSA/venv/bin/python3 {{toolsDir}}/JSA/jsa.py -f _target_ | anew -q {{combinedUrlsFile}}" 2>/dev/null || true
+          interlace -tL {{jsLiveLinksFile}} -threads 10 -c "{{toolsDir}}/JSA/venv/bin/python3 {{toolsDir}}/JSA/jsa.py -f _target_ | anew -q {{combinedUrlsFile}}" 2>/dev/null || true
           echo "[JSA] Deep JS analysis completed"
         fi
       fi
@@ -391,7 +467,7 @@ steps:
 
   - name: sourcemap-analysis
     type: bash
-    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
+    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}") && file_length("{{jsLiveLinksFile}}") > 0'
     log: "Extracting from sourcemaps"
     command: |
       mkdir -p {{jsSourcemapDir}} 2>/dev/null || true
@@ -399,32 +475,48 @@ steps:
       # 使用 interlace 并行处理 sourcemap
       interlace -tL {{jsLiveLinksFile}} -threads 10 -c "sourcemapper -jsurl '_target_' -output {{jsSourcemapDir}}/_cleantarget_" 2>/dev/null || true
       
-      # 从 sourcemap 提取 URLs (find 需要括号分组)
-      find {{jsSourcemapDir}} \( -name "*.js" -o -name "*.ts" \) 2>/dev/null | jsluice urls 2>/dev/null | jq -r .url 2>/dev/null > {{jsJsmapUrlsFile}} || true
+      # 从 sourcemap 提取 URLs；使用 anew 追加，避免覆盖 katana 已发现的 .map URL。
+      sourcemap_urls="{{outputDir}}/sourcemap-urls-{{TargetSpace}}.txt"
+      : > "$sourcemap_urls"
+      find {{jsSourcemapDir}} \( -name "*.js" -o -name "*.ts" \) 2>/dev/null | jsluice urls 2>/dev/null | jq -r .url 2>/dev/null > "$sourcemap_urls" || true
+      [ -s "$sourcemap_urls" ] && cat "$sourcemap_urls" | anew -q {{jsJsmapUrlsFile}} || true
+      rm -f "$sourcemap_urls" 2>/dev/null || true
     on_error:
       - action: continue
 
   - name: extract-js-endpoints
     type: bash
-    pre_condition: '{{enableJsAnalysis}} && file_exists("{{jsLiveLinksFile}}")'
+    pre_condition: '{{enableJsAnalysis}} && ((file_exists("{{jsLiveLinksFile}}") && file_length("{{jsLiveLinksFile}}") > 0) || (file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0) || (file_exists("{{jsJsmapUrlsFile}}") && file_length("{{jsJsmapUrlsFile}}") > 0))'
     log: "Extracting JS endpoints with xnLinkFinder"
     command: |
+      static_ext_re='\.([eE][oO][tT]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[cC][sS][sS]|[tT][iI][fF][fF]?|[pP][nN][gG]|[tT][tT][fF]|[oO][tT][fF]|[wW][oO][fF][fF]2?|[iI][cC][oO]|[pP][dD][fF]|[sS][vV][gG]|[tT][xX][tT]|[mM]?[jJ][sS]|[mM][aA][pP])([?#].*)?$'
+      xnf_tmp="{{outputDir}}/xnlinkfinder-endpoints-{{TargetSpace}}.tmp"
+      : >> "{{jsEndpointsFile}}"
+      : > "$xnf_tmp"
       # 使用 xnLinkFinder 收集 endpoints (带 scope 过滤)
-      if [ -f "{{subdomainsFile}}" ]; then
-        xnLinkFinder -i {{jsLiveLinksFile}} -sf {{subdomainsFile}} -d 2 -o {{jsEndpointsFile}} 2>/dev/null || true
-      else
-        xnLinkFinder -i {{jsLiveLinksFile}} -d 2 -o {{jsEndpointsFile}} 2>/dev/null || true
+      if [ -s "{{jsLiveLinksFile}}" ]; then
+        if [ -f "{{subdomainsFile}}" ]; then
+          xnLinkFinder -i {{jsLiveLinksFile}} -sf {{subdomainsFile}} -d 2 -o "$xnf_tmp" 2>/dev/null || true
+        else
+          xnLinkFinder -i {{jsLiveLinksFile}} -d 2 -o "$xnf_tmp" 2>/dev/null || true
+        fi
       fi
-      
-      # 合并 katana 和 jsluice 的结果
-      [ -s {{jsUrlsFile}} ] && cat {{jsUrlsFile}} | anew -q {{jsEndpointsFile}} || true
-      [ -s {{jsJsmapUrlsFile}} ] && cat {{jsJsmapUrlsFile}} | anew -q {{jsEndpointsFile}} || true
+
+      [ -s "$xnf_tmp" ] && cat "$xnf_tmp" | anew -q "{{jsEndpointsFile}}" || true
+      [ -s "$xnf_tmp" ] && cat "$xnf_tmp" | anew -q "{{combinedUrlsFile}}" || true
+
+      # 合并 sourcemap/jsluice 的 endpoint；JS 文件和 .map 文件本身不进入 endpoint 清单。
+      if [ -s "{{jsJsmapUrlsFile}}" ]; then
+        grep -aEv "$static_ext_re" "{{jsJsmapUrlsFile}}" 2>/dev/null | anew -q "{{jsEndpointsFile}}" || true
+        grep -aEv "$static_ext_re" "{{jsJsmapUrlsFile}}" 2>/dev/null | anew -q "{{combinedUrlsFile}}" || true
+      fi
+      rm -f "$xnf_tmp" 2>/dev/null || true
     on_error:
       - action: continue
 
   - name: js-secret-scan
     type: bash
-    pre_condition: '{{enableJsAnalysis}} && {{enableJsSecretScan}} && file_exists("{{jsLiveLinksFile}}")'
+    pre_condition: '{{enableJsAnalysis}} && {{enableJsSecretScan}} && file_exists("{{jsLiveLinksFile}}") && file_length("{{jsLiveLinksFile}}") > 0'
     log: "Scanning JS for secrets"
     command: |
       cat {{jsLiveLinksFile}} | mantra -ua "Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0" -s 2>/dev/null | anew -q {{jsSecretsFile}} || true
@@ -492,9 +584,36 @@ steps:
     log: "Resolving new subdomains from JS extraction"
     command: |
       : > {{jsResolvedSubsFile}}
+      : > {{jsExternalHostsFile}}
       
       # DNS 验证
       puredns resolve {{jsNewSubsFile}} --wildcard-tests 30 -w {{jsResolvedSubsFile}} 2>/dev/null || true
+
+      # 只把目标域名自身及其子域名并入主子域名文件；
+      # 非目标域名单独留档，避免既污染主扫描目标，又丢失潜在线索。
+      if [ -s "{{jsResolvedSubsFile}}" ]; then
+        : > {{jsResolvedSubsFile}}.filtered
+        awk -v target="{{Target}}" -v in_scope="{{jsResolvedSubsFile}}.filtered" -v external_hosts="{{jsExternalHostsFile}}" '
+          BEGIN {
+            target = tolower(target)
+          }
+          {
+            line = tolower($0)
+            if (line == target) {
+              print $0 >> in_scope
+              next
+            }
+            if (length(line) > length(target) && substr(line, length(line) - length(target), length(target) + 1) == "." target) {
+              print $0 >> in_scope
+              next
+            }
+            print $0 >> external_hosts
+          }
+        ' {{jsResolvedSubsFile}} 2>/dev/null || true
+        sort -u {{jsResolvedSubsFile}}.filtered -o {{jsResolvedSubsFile}}.filtered 2>/dev/null || true
+        sort -u {{jsExternalHostsFile}} -o {{jsExternalHostsFile}} 2>/dev/null || true
+        mv {{jsResolvedSubsFile}}.filtered {{jsResolvedSubsFile}} 2>/dev/null || true
+      fi
       
       # 合并到子域名文件
       if [ -s "{{jsResolvedSubsFile}}" ]; then
@@ -512,7 +631,13 @@ steps:
     pre_condition: '{{enableParamDiscovery}} && file_exists("{{combinedUrlsFile}}")'
     log: "Preparing URLs with parameters for Arjun"
     command: |
-      grep -E '[?&]' {{combinedUrlsFile}} 2>/dev/null | head -n {{paramLimit}} > {{outputDir}}/arjun-input.txt || true
+      : > {{outputDir}}/arjun-input.txt
+      raw_input="{{outputDir}}/arjun-input-raw.txt"
+      grep -E '[?&]' {{combinedUrlsFile}} 2>/dev/null | head -n {{paramLimit}} > "$raw_input" || true
+      if [ -s "$raw_input" ]; then
+        p1radup -i "$raw_input" -o {{outputDir}}/arjun-input.txt -s 2>/dev/null || sort -u "$raw_input" > {{outputDir}}/arjun-input.txt
+      fi
+      rm -f "$raw_input" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -769,7 +894,7 @@ steps:
   # ===========================================================================
   - name: llm-js-api-extraction
     type: llm
-    pre_condition: '{{enableLlmJsApiExtract}} && file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0'
+    pre_condition: '{{enableLlmJsApiExtract}} && ((file_exists("{{jsUrlsFile}}") && file_length("{{jsUrlsFile}}") > 0) || (file_exists("{{jsEndpointsFile}}") && file_length("{{jsEndpointsFile}}") > 0))'
     log: "Extracting hidden API endpoints from JS files with LLM"
     timeout: 300
     on_error:
@@ -803,7 +928,7 @@ steps:
           {{readFile("{{jsUrlsFile}}")}}
           
           Known endpoints from JS analysis:
-          No endpoints data
+          {{readFile("{{jsEndpointsFile}}")}}
           
           URL parameters found:
           No params data
@@ -850,7 +975,7 @@ steps:
   # ===========================================================================
   - name: llm-sensitive-context-analysis
     type: llm
-    pre_condition: '{{enableLlmSensitiveContext}} && (file_exists("{{jsSecretsFile}}") || file_exists("{{jsSecretsJsmapFile}}") || file_exists("{{jsEndpointsFile}}"))'
+    pre_condition: '{{enableLlmSensitiveContext}} && ((file_exists("{{jsSecretsFile}}") && file_length("{{jsSecretsFile}}") > 0) || (file_exists("{{jsSecretsJsmapFile}}") && file_length("{{jsSecretsJsmapFile}}") > 0) || (file_exists("{{jsEndpointsFile}}") && file_length("{{jsEndpointsFile}}") > 0))'
     log: "Analyzing sensitive info context with LLM"
     timeout: 300
     on_error:

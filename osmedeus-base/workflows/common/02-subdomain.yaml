@@ -61,7 +61,7 @@ params:
     default: "{{ExternalData}}/wordlists/dns/subdomains.txt"
     description: "Wordlist for NOERROR testing"
   - name: noerrorThreads
-    default: 100
+    default: 300
   - name: recursivePassiveTop
     default: 20
     description: "Top N subdomains for recursive passive"
@@ -72,7 +72,7 @@ params:
   - name: gitlabTokensFile
     default: "{{ExternalConfigs}}/gitlab_tokens.txt"
   - name: subdomainExternalTimeout
-    default: "5m"
+    default: "45m"
     description: "Per-tool timeout for external subdomain enumerators"
 
   # 输出文件
@@ -246,13 +246,13 @@ steps:
     command: |
       : > {{noerrorFile}}
       random_subdomain="${RANDOM}thistotallynotexist${RANDOM}.{{Target}}"
-      dns_response=$(echo "$random_subdomain" | dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
+      dns_response=$(echo "$random_subdomain" | timeout --foreground -k 1m dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
       if [ "$dns_response" = "[NXDOMAIN]" ]; then
         if [ -s "{{noerrorWordlist}}" ]; then
-          dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+         timeout --foreground -k 1m dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
         else
           echo -e "www\nmail\nftp\ntest\nadmin\ndev\nstaging\napi\napp\nportal\nvpn\nremote\nblog\nshop\nstore\nsecure\nlogin\ndashboard\ncdn\nstatic\nassets" > {{Output}}/subdomain/noerror_wordlist.txt
-          dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{Output}}/subdomain/noerror_wordlist.txt -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+         timeout --foreground -k 1m dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{Output}}/subdomain/noerror_wordlist.txt -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
           rm -f {{Output}}/subdomain/noerror_wordlist.txt 2>/dev/null || true
         fi
         if [ -s "{{noerrorFile}}" ]; then

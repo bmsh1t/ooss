@@ -55,7 +55,7 @@ params:
     default: "10m"
     description: "Per-tool timeout for fingerprint helpers"
   - name: toolsDir
-    default: "/home/himan/Tools"
+    default: "${HOME}/Tools"
   - name: cmseekPath
     default: "{{toolsDir}}/CMSeeK/cmseek.py"
 

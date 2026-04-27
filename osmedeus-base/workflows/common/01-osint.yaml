@@ -100,7 +100,7 @@ params:
   # 工具路径
   # =========================
   - name: toolsDir
-    default: "/home/himan/Tools"
+    default: "${HOME}/Tools"
   - name: cloudenumDir
     default: "{{toolsDir}}/cloud_enum"
   - name: cloudenumThreads
@@ -110,7 +110,7 @@ params:
     default: true
   - name: osintExternalTimeout
     type: string
-    default: "60s"
+    default: "60m"
     description: "Hard timeout for slower third-party OSINT helper tools"
 
   # =========================
@@ -453,8 +453,8 @@ steps:
       if [ -z "$GHLEAKS_BIN" ] && [ -x "{{toolsDir}}/ghleaks/ghleaks" ]; then
         GHLEAKS_BIN="{{toolsDir}}/ghleaks/ghleaks"
       fi
-      if [ -z "$GHLEAKS_BIN" ] && [ -x "/root/Tools/ghleaks/ghleaks" ]; then
-        GHLEAKS_BIN="/root/Tools/ghleaks/ghleaks"
+      if [ -z "$GHLEAKS_BIN" ] && [ -x "${HOME}/Tools/ghleaks/ghleaks" ]; then
+        GHLEAKS_BIN="${HOME}/Tools/ghleaks/ghleaks"
       fi
       if [ -n "$GHLEAKS_BIN" ]; then
         "$GHLEAKS_BIN" -q {{Target}} --threads 5 --report {{githubLeaksOutput}} --no-banner 2>/dev/null || true
