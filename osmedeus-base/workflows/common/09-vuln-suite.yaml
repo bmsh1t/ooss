@@ -720,10 +720,16 @@ steps:
       [ -n "$AI_TIMEOUT" ] && EFFECTIVE_TIMEOUT="$AI_TIMEOUT"
       
       # User-Agent 轮换配置
-      UA_OPTS=""
+      NUCLEI_HEADER="{{defaultUA}}"
       if [ "{{enableUserAgentRotation}}" = "true" ]; then
-        # Nuclei 内置随机 UA
-        UA_OPTS="-rc"
+        # nuclei v3 的 -rc 是 report-config，不是 random client；
+        # 这里在 workflow 层选择一个 UA，再通过 -H 显式传入，避免参数语义漂移。
+        case "$(shuf -i 1-4 -n 1 2>/dev/null || echo 1)" in
+          1) NUCLEI_HEADER="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36" ;;
+          2) NUCLEI_HEADER="User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36" ;;
+          3) NUCLEI_HEADER="User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36" ;;
+          4) NUCLEI_HEADER="User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1" ;;
+        esac
         echo "[NUCLEI] User-Agent rotation enabled"
       fi
       
@@ -750,7 +756,7 @@ steps:
       if [ "{{enableAssetPrioritization}}" = "true" ] && [ -s "{{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt" ]; then
         # 先扫描高优先级资产
         echo "[NUCLEI] Scanning high-priority assets first..."
-        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>>"$NUCLEI_LOG" || PRIORITY_RC=$?
+        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "$NUCLEI_HEADER" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l {{vulnSuiteDir}}/high-priority-{{TargetSpace}}.txt -irr -o {{nucleiOutputJsonl}}.priority $PROXY_OPTS {{extraNuclei}} >>"$NUCLEI_LOG" 2>&1 || PRIORITY_RC=$?
         SCAN_FILE="{{vulnSuiteDir}}/normal-priority-{{TargetSpace}}.txt"
         echo "[NUCLEI] Now scanning remaining assets..."
       fi
@@ -763,7 +769,7 @@ steps:
       
       # 执行扫描
       if [ -s "$SCAN_FILE" ]; then
-        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "{{defaultUA}}" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $UA_OPTS $PROXY_OPTS {{extraNuclei}} > /dev/null 2>>"$NUCLEI_LOG" || MAIN_RC=$?
+        timeout -k 1m "$EFFECTIVE_TIMEOUT" nuclei -H "$NUCLEI_HEADER" -silent -c $THREADS -rate-limit $RATELIMIT -jsonl -severity "$SEVERITY" -t $TEMPLATES -l $SCAN_FILE -irr -o {{nucleiOutputJsonl}} $JITTER_OPTS $PROXY_OPTS {{extraNuclei}} >>"$NUCLEI_LOG" 2>&1 || MAIN_RC=$?
       else
         echo "[NUCLEI] No remaining targets for main scan: $SCAN_FILE"
       fi

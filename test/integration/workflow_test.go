@@ -770,6 +770,50 @@ func TestSuperdomainAIWorkflowSemanticSearchGatesFollowOuterToggles(t *testing.T
 	}
 }
 
+
+func TestSuperdomainAIWorkflowDisablesNoerrorByDefault(t *testing.T) {
+	workflows := []string{
+		"superdomain-extensive-ai-optimized",
+		"superdomain-extensive-ai-stable",
+		"superdomain-extensive-ai-hybrid",
+		"superdomain-extensive-ai-lite",
+	}
+
+	p := parser.NewParser()
+	root := getRealWorkflowsPath()
+
+	for _, workflowName := range workflows {
+		t.Run(workflowName, func(t *testing.T) {
+			file := filepath.Join(root, workflowName+".yaml")
+			workflow, err := p.Parse(file)
+			require.NoError(t, err)
+
+			// noerror-scan 会触发大字典 DNS NOERROR 枚举，默认应关闭；需要时由用户显式开启。
+			assertWorkflowHasParam(t, workflow, "enableNoerror", false)
+		})
+	}
+}
+
+func TestSubdomainNoerrorScanUsesTimeoutAndBoundedThreads(t *testing.T) {
+	p := parser.NewParser()
+	workflow, err := p.Parse(filepath.Join(getRealWorkflowsPath(), "common", "02-subdomain.yaml"))
+	require.NoError(t, err)
+
+	assertWorkflowHasParam(t, workflow, "noerrorThreads", 200)
+
+	var noerror *core.Step
+	for i := range workflow.Steps {
+		if workflow.Steps[i].Name == "noerror-scan" {
+			noerror = &workflow.Steps[i]
+			break
+		}
+	}
+	require.NotNil(t, noerror, "noerror-scan step should exist")
+	assert.Contains(t, noerror.Command, "timeout --foreground -k 15s {{subdomainExternalTimeout}} dnsx")
+	assert.Contains(t, noerror.Command, "-t {{noerrorThreads}}")
+	assert.NotContains(t, noerror.Command, "\n          dnsx -d {{Target}}")
+}
+
 func TestSuperdomainAIWorkflowPreviousFollowupParamsExposed(t *testing.T) {
 	workflows := []string{
 		"superdomain-extensive-ai-optimized",
@@ -2185,6 +2229,432 @@ cat
 
 	_, err = os.Stat(filepath.Join(vulnDir, "js-content"))
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestExecuteVulnSuiteNucleiScanUserAgentRotationDoesNotPassReportConfigFlag(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "09-vuln-suite.yaml"))
+	require.NoError(t, err)
+	workflow.Dependencies = nil
+
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "create-output-folder", "nuclei-scan":
+		default:
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "vuln-suite-nuclei-ua-rotation"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	argsFile := filepath.Join(t.TempDir(), "nuclei-args.txt")
+
+	writeTestFile(t, httpFile, "https://app.example.com\n")
+	installStubCommand(t, "nuclei", fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  printf '%%s\n' "$arg" >> %q
+  if [ "$arg" = "-rc" ]; then
+    printf 'flag needs an argument: -rc\n'
+    exit 2
+  fi
+done
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+[ -n "$out" ] && : > "$out"
+`, argsFile))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	argsData, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	args := strings.Fields(string(argsData))
+	assert.NotContains(t, args, "-rc")
+	assert.Contains(t, args, "-H")
+	assert.Contains(t, string(argsData), "User-Agent:")
+}
+
+func TestExecuteContentAnalysisDeduplicatesArjunInputWithP1radup(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "07-content-analysis.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, workflow.Dependencies.Commands, "p1radup")
+
+	workflow.Dependencies = nil
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "create-output-folders", "prepare-arjun-input", "arjun-scan":
+		default:
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "content-analysis-arjun-dedup"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	combinedUrlsFile := filepath.Join(outputDir, "content-analysis", "combined-urls.txt")
+
+	writeTestFile(t, combinedUrlsFile, strings.Join([]string{
+		"https://app.example.com/search?q=red",
+		"https://app.example.com/search?q=red",
+		"https://app.example.com/profile?id=42",
+	}, "\n")+"\n")
+
+	p1radupMarker := filepath.Join(t.TempDir(), "p1radup.called")
+	arjunSeenInput := filepath.Join(t.TempDir(), "arjun-input.txt")
+
+	installStubCommand(t, "p1radup", fmt.Sprintf(`#!/bin/sh
+input=""
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -i)
+      shift
+      input="$1"
+      ;;
+    -o)
+      shift
+      output="$1"
+      ;;
+  esac
+  shift
+done
+printf 'called\n' > %q
+awk '!seen[$0]++' "$input" > "$output"
+`, p1radupMarker))
+
+	installStubCommand(t, "arjun", fmt.Sprintf(`#!/bin/sh
+input=""
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -i)
+      shift
+      input="$1"
+      ;;
+    -oJ|-o)
+      shift
+      output="$1"
+      ;;
+  esac
+  shift
+done
+cp "$input" %q
+if [ -n "$output" ]; then
+  printf '[]\n' > "$output"
+fi
+`, arjunSeenInput))
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	_, err = os.Stat(p1radupMarker)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(arjunSeenInput)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"https://app.example.com/search?q=red",
+		"https://app.example.com/profile?id=42",
+	}, strings.Fields(string(data)))
+}
+
+func TestExecuteContentAnalysisVerifyJSUrlsKeepsLiveJSByExtension(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "07-content-analysis.yaml"))
+	require.NoError(t, err)
+
+	workflow.Dependencies = nil
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "create-output-folders", "verify-js-urls":
+		default:
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "content-analysis-js-live-extension"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	jsLinksFile := filepath.Join(outputDir, "content-analysis", "js-links-"+targetSpace+".txt")
+	jsLiveLinksFile := filepath.Join(outputDir, "content-analysis", "js-live-"+targetSpace+".txt")
+	jsUrlsFile := filepath.Join(outputDir, "content-analysis", "js-urls-"+targetSpace+".txt")
+
+	writeTestFile(t, jsLinksFile, "https://cdn.example.com/static/app.js\n")
+	installStubCommand(t, "httpx", `#!/bin/sh
+cat >/dev/null
+printf 'https://cdn.example.com/static/app.js [200] [application/octet-stream]\n'
+`)
+	installStubCommand(t, "anew", `#!/bin/sh
+quiet=false
+if [ "$1" = "-q" ]; then
+  quiet=true
+  shift
+fi
+out="$1"
+mkdir -p "$(dirname "$out")"
+while IFS= read -r line; do
+  grep -Fxq "$line" "$out" 2>/dev/null || printf '%s\n' "$line" >> "$out"
+  [ "$quiet" = true ] || printf '%s\n' "$line"
+done
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "https://app.example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	data, err := os.ReadFile(jsLiveLinksFile)
+	require.NoError(t, err)
+	assert.Equal(t, "https://cdn.example.com/static/app.js\n", string(data))
+
+	data, err = os.ReadFile(jsUrlsFile)
+	require.NoError(t, err)
+	assert.Equal(t, "https://cdn.example.com/static/app.js\n", string(data))
+}
+
+func TestExecuteContentAnalysisKatanaCrawlClassifiesJSMapsAndAPIURLs(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "07-content-analysis.yaml"))
+	require.NoError(t, err)
+
+	workflow.Dependencies = nil
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "create-output-folders", "extract-js-urls":
+		default:
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "content-analysis-katana-classify"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	httpFile := filepath.Join(outputDir, "probing", "http-"+targetSpace+".txt")
+	jsLinksFile := filepath.Join(outputDir, "content-analysis", "js-links-"+targetSpace+".txt")
+	jsUrlsFile := filepath.Join(outputDir, "content-analysis", "js-urls-"+targetSpace+".txt")
+	jsEndpointsFile := filepath.Join(outputDir, "content-analysis", "js-endpoints-"+targetSpace+".txt")
+	jsMapFile := filepath.Join(outputDir, "content-analysis", "js-jsmap-urls-"+targetSpace+".txt")
+	combinedUrlsFile := filepath.Join(outputDir, "content-analysis", "combined-urls.txt")
+
+	writeTestFile(t, httpFile, "https://app.example.com\n")
+	// js-urls 是下游 JS secret/LLM 消费的 JS 文件列表，不应被 API 端点污染。
+	writeTestFile(t, jsUrlsFile, "https://stale.example.com/old-api\n")
+
+	installStubCommand(t, "subjs", `#!/bin/sh
+cat >/dev/null
+`)
+	installStubCommand(t, "katana", `#!/bin/sh
+cat >/dev/null
+printf '%s\n' \
+  'https://app.example.com/static/app.js' \
+  'https://app.example.com/static/app.js.map' \
+  'https://app.example.com/api/v1/users?role=admin' \
+  'https://app.example.com/assets/logo.png'
+`)
+	installStubCommand(t, "anew", `#!/bin/sh
+quiet=false
+if [ "$1" = "-q" ]; then
+  quiet=true
+  shift
+fi
+out="$1"
+mkdir -p "$(dirname "$out")"
+while IFS= read -r line; do
+  grep -Fxq "$line" "$out" 2>/dev/null || printf '%s\n' "$line" >> "$out"
+  [ "$quiet" = true ] || printf '%s\n' "$line"
+done
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	data, err := os.ReadFile(jsLinksFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://app.example.com/static/app.js"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsMapFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://app.example.com/static/app.js.map"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsUrlsFile)
+	require.NoError(t, err)
+	assert.Empty(t, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsEndpointsFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://app.example.com/api/v1/users?role=admin"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(combinedUrlsFile)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Fields(string(data)), "https://app.example.com/api/v1/users?role=admin")
+	assert.NotContains(t, strings.Fields(string(data)), "https://stale.example.com/old-api")
+	assert.NotContains(t, strings.Fields(string(data)), "https://app.example.com/assets/logo.png")
+}
+
+func TestExecuteContentAnalysisKatanaJSLCrawlKeepsJSUrlsAsVerifiedJSFiles(t *testing.T) {
+	workflowsPath := getRealWorkflowsPath()
+	loader := parser.NewLoader(workflowsPath)
+
+	workflow, err := loader.LoadWorkflowByPath(filepath.Join(workflowsPath, "common", "07-content-analysis.yaml"))
+	require.NoError(t, err)
+
+	workflow.Dependencies = nil
+	for i := range workflow.Steps {
+		switch workflow.Steps[i].Name {
+		case "create-output-folders", "katana-js-crawl":
+		default:
+			workflow.Steps[i].PreCondition = "false"
+		}
+	}
+
+	ctx := context.Background()
+	cfg := testConfig(t)
+	cfg.WorkflowsPath = workflowsPath
+
+	targetSpace := "content-analysis-katana-jsl-classify"
+	outputDir := filepath.Join(cfg.WorkspacesPath, targetSpace)
+	jsLinksFile := filepath.Join(outputDir, "content-analysis", "js-links-"+targetSpace+".txt")
+	jsLiveLinksFile := filepath.Join(outputDir, "content-analysis", "js-live-"+targetSpace+".txt")
+	jsUrlsFile := filepath.Join(outputDir, "content-analysis", "js-urls-"+targetSpace+".txt")
+	jsEndpointsFile := filepath.Join(outputDir, "content-analysis", "js-endpoints-"+targetSpace+".txt")
+	jsMapFile := filepath.Join(outputDir, "content-analysis", "js-jsmap-urls-"+targetSpace+".txt")
+	combinedUrlsFile := filepath.Join(outputDir, "content-analysis", "combined-urls.txt")
+
+	writeTestFile(t, jsLiveLinksFile, "https://cdn.example.com/static/app.js\n")
+	writeTestFile(t, jsUrlsFile, "https://cdn.example.com/static/app.js\n")
+
+	installStubCommand(t, "katana", `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      shift
+      out="$1"
+      ;;
+  esac
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf '%s\n' \
+  'https://cdn.example.com/static/lazy.js' \
+  'https://cdn.example.com/static/lazy.js.map' \
+  'https://app.example.com/api/v2/items?x=1' \
+  'https://cdn.example.com/img/logo.svg' > "$out"
+`)
+	installStubCommand(t, "anew", `#!/bin/sh
+quiet=false
+if [ "$1" = "-q" ]; then
+  quiet=true
+  shift
+fi
+out="$1"
+mkdir -p "$(dirname "$out")"
+while IFS= read -r line; do
+  grep -Fxq "$line" "$out" 2>/dev/null || printf '%s\n' "$line" >> "$out"
+  [ "$quiet" = true ] || printf '%s\n' "$line"
+done
+`)
+
+	exec := executor.NewExecutor()
+	exec.SetDryRun(false)
+	exec.SetSpinner(false)
+
+	result, err := exec.ExecuteModule(ctx, workflow, map[string]string{
+		"target":     "example.com",
+		"space_name": targetSpace,
+	}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, core.RunStatusCompleted, result.Status)
+	assertNoShellOpenErrors(t, result)
+
+	data, err := os.ReadFile(jsLinksFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://cdn.example.com/static/lazy.js"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsMapFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://cdn.example.com/static/lazy.js.map"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsEndpointsFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://app.example.com/api/v2/items?x=1"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(jsUrlsFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https://cdn.example.com/static/app.js"}, strings.Fields(string(data)))
+
+	data, err = os.ReadFile(combinedUrlsFile)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Fields(string(data)), "https://app.example.com/api/v2/items?x=1")
+	assert.NotContains(t, strings.Fields(string(data)), "https://cdn.example.com/img/logo.svg")
 }
 
 func TestExecuteVulnSuiteWebcacheScanWritesOutputWithoutSetupStep(t *testing.T) {
