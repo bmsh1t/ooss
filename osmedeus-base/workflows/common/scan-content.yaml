@@ -19,23 +19,23 @@ params:
 
   # speed tuning params
   - name: deparosMaxtime
-    default: "10m"
+    default: "30m"
   - name: deparosParallel
     default: "4"
   - name: deparosThreads
-    default: "16"
+    default: "30"
   - name: deparosTimeout
-    default: "12m"
+    default: "60m"
   - name: deparosSessionName
     default: "{{Today}}" # 2026-01-30
 
   ## ffuf params
   - name: ffufTimeout
-    default: "15m"
+    default: "80m"
   - name: ffufParallel
     default: "6"
   - name: ffThreads
-    default: "20"
+    default: "35"
 
   - name: defaultUA
     default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
@@ -168,13 +168,13 @@ steps:
 
         # Stable-default profile: keep tiny target sets on a much shorter leash.
         if [ "${INPUT_COUNT:-0}" -le 3 ]; then
-          DEPAROS_THREADS="8"
-          DEPAROS_MAXTIME="4m"
-          DEPAROS_TIMEOUT="6m"
+          DEPAROS_THREADS="15"
+          DEPAROS_MAXTIME="30m"
+          DEPAROS_TIMEOUT="30m"
         elif [ "${INPUT_COUNT:-0}" -le 10 ]; then
-          DEPAROS_THREADS="12"
-          DEPAROS_MAXTIME="6m"
-          DEPAROS_TIMEOUT="8m"
+          DEPAROS_THREADS="30"
+          DEPAROS_MAXTIME="60m"
+          DEPAROS_TIMEOUT="60m"
         fi
 
         timeout -k 1m "$DEPAROS_TIMEOUT" deparos discover --silent --threads "$DEPAROS_THREADS" -u '[[line]]' --db {{deparosDBDir}}/deparos_{{TargetSpace}}.db --session-name "{{deparosSessionName}}" --max-duration "$DEPAROS_MAXTIME"
@@ -230,11 +230,11 @@ steps:
         FF_TIMEOUT="{{ffufTimeout}}"
 
         if [ "${INPUT_COUNT:-0}" -le 3 ]; then
-          FF_THREADS="12"
-          FF_TIMEOUT="8m"
+          FF_THREADS="20"
+          FF_TIMEOUT="30m"
         elif [ "${INPUT_COUNT:-0}" -le 10 ]; then
-          FF_THREADS="16"
-          FF_TIMEOUT="10m"
+          FF_THREADS="40"
+          FF_TIMEOUT="60m"
         fi
 
         timeout -k 1m "$FF_TIMEOUT" ffuf -s -t "$FF_THREADS" -noninteractive -ac -acs advanced -timeout 15 -se -D -fc "429,404,400" -e "aspx,aspx~,php,php~,bak,bkp,cache,cgi,conf,inc,js,json,jsp,jsp~,log,old,txt" -json -H "{{defaultUA}}" -ac -s -fc "429,404,400" -json -u "[[line]]/FUZZ" -w {{contentDiscoverWordlist}}:FUZZ > {{Output}}/content-discovery/ffuf-raw-[[_id_]].json 2>/dev/null

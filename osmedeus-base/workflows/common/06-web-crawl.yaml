@@ -231,6 +231,8 @@ params:
   # =========================
   - name: brokenLinksFile
     default: "{{Output}}/links/broken-links-{{TargetSpace}}.txt"
+  - name: brokenLinkTakeoverCandidatesFile
+    default: "{{Output}}/links/broken-link-takeover-candidates-{{TargetSpace}}.txt"
   - name: brokenLinksLimit
     default: 500
 
@@ -298,6 +300,11 @@ reports:
     path: "{{urlNoDupesFile}}"
     type: text
     description: Final deduplicated URLs
+
+  - name: broken-link-takeover-candidates
+    path: "{{brokenLinkTakeoverCandidatesFile}}"
+    type: text
+    description: Broken external links that look like takeover or supply-chain risk candidates
 
   - name: archive-urls
     path: "{{archiveUrlFile}}"
@@ -706,13 +713,14 @@ steps:
   - name: filter-url-length
     type: bash
     log: "Filtering URLs by length limit"
-    pre_condition: "{{enableUrlProcessing}} && file_exists(\"{{linkFile}}\")"
+    pre_condition: "{{enableUrlProcessing}} && (file_exists(\"{{linkFile}}\") || file_exists(\"{{archiveUrlFile}}\") || file_exists(\"{{archiveInterestingUrlFile}}\"))"
     command: |
       : > {{Output}}/links/url-filtered.txt
-      if [ -s "{{linkFile}}" ]; then
-        # 过滤超长 URL (2048 字符限制，与 reconftw 一致)
-        awk -v max={{urlLengthLimit}} 'length($0) <= max' {{linkFile}} > {{Output}}/links/url-filtered.txt
-      fi
+      # 合并爬虫、归档和 interesting archive URL，再过滤超长 URL。
+      # 这样 URL 参数管线不会只依赖主动 spider 结果。
+      for src in "{{linkFile}}" "{{archiveUrlFile}}" "{{archiveInterestingUrlFile}}"; do
+        [ -s "$src" ] && cat "$src"
+      done | grep -aE '^https?://' 2>/dev/null | awk -v max={{urlLengthLimit}} 'length($0) <= max' | sort -u > {{Output}}/links/url-filtered.txt || true
     on_error:
       - action: continue
 
@@ -781,9 +789,37 @@ steps:
   # ===========================================================================
   - name: find-broken-links
     type: bash
-    log: "Finding broken links (4xx responses)"
-    pre_condition: "{{enableBrokenLinks}} && file_exists(\"{{linkFile}}\") && file_length(\"{{linkFile}}\") > 0"
-    command: 'cat {{linkFile}} | head -{{brokenLinksLimit}} | httpx -sc -silent -no-color 2>/dev/null | grep -E " [4][0-9][0-9] " > {{brokenLinksFile}} || true'
+    log: "Finding broken links and takeover candidates"
+    pre_condition: "{{enableBrokenLinks}} && (file_exists(\"{{linkFile}}\") || file_exists(\"{{archiveUrlFile}}\")) && command_exists(\"httpx\")"
+    command: |
+      : > {{brokenLinksFile}}
+      : > {{brokenLinkTakeoverCandidatesFile}}
+      tmp_input="{{Output}}/links/broken-links-input-{{TargetSpace}}.txt"
+
+      for src in "{{linkFile}}" "{{archiveUrlFile}}" "{{archiveInterestingUrlFile}}"; do
+        [ -s "$src" ] && cat "$src"
+      done | grep -aE '^https?://' 2>/dev/null | awk -v max={{urlLengthLimit}} 'length($0) <= max' | sort -u | head -n {{brokenLinksLimit}} > "$tmp_input" || true
+
+      if [ -s "$tmp_input" ]; then
+        httpx -l "$tmp_input" -sc -title -silent -no-color 2>/dev/null \
+          | awk '$0 ~ /\[(4[0-9][0-9])\]/ { print }' \
+          | sort -u > {{brokenLinksFile}} || true
+      fi
+
+      if [ -s "{{brokenLinksFile}}" ]; then
+        awk '{print $1}' {{brokenLinksFile}} 2>/dev/null \
+          | grep -aEi '(github\.io|githubusercontent\.com|herokuapp\.com|herokudns\.com|netlify\.app|vercel\.app|now\.sh|s3[.-][a-z0-9-]+\.amazonaws\.com|s3\.amazonaws\.com|s3-website[.-][a-z0-9-]+\.amazonaws\.com|cloudfront\.net|azurewebsites\.net|azureedge\.net|blob\.core\.windows\.net|storage\.googleapis\.com|web\.app|firebaseapp\.com|surge\.sh|pages\.dev|bitbucket\.io|readme\.io|zendesk\.com|helpscoutdocs\.com)' \
+          | sed 's|^|[broken-link-host] |' >> {{brokenLinkTakeoverCandidatesFile}} || true
+
+        grep -aEi "(NoSuchBucket|specified bucket does not exist|There isn't a GitHub Pages site here|No such app|There.s nothing here|Project not found|DEPLOYMENT_NOT_FOUND|Repository not found|not found|unclaimed)" {{brokenLinksFile}} 2>/dev/null \
+          | sed 's|^|[broken-link-fingerprint] |' >> {{brokenLinkTakeoverCandidatesFile}} || true
+
+        sort -u {{brokenLinkTakeoverCandidatesFile}} -o {{brokenLinkTakeoverCandidatesFile}} 2>/dev/null || true
+      fi
+
+      rm -f "$tmp_input" 2>/dev/null || true
+    on_error:
+      - action: continue
 
   # ===========================================================================
   # Phase 12: Summary

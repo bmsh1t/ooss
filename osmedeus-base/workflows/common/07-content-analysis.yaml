@@ -50,6 +50,10 @@ params:
     type: bool
     default: true
     description: "Classify URLs by file extension (.sql, .bak, .env, etc.)"
+  - name: enableCloudBucketSecretScan
+    type: bool
+    default: false
+    description: "Run trufflehog against inferred S3 buckets from content artifacts (off by default to avoid occupying main-scan resources)"
 
   # 输入文件
   - name: httpFile
@@ -82,6 +86,12 @@ params:
     default: "{{outputDir}}/combined-urls-raw.txt"
   - name: combinedUrlsFile
     default: "{{outputDir}}/combined-urls.txt"
+  - name: urlExtractFile
+    default: "{{Output}}/links/url-extract-{{TargetSpace}}.txt"
+    description: "Processed parameter URLs from web-crawl, equivalent to reconftw webs/url_extract.txt"
+  - name: urlNoDupesFile
+    default: "{{Output}}/links/url-extract-nodupes-{{TargetSpace}}.txt"
+    description: "p1radup deduplicated parameter URLs from web-crawl"
   - name: domainsRawFile
     default: "{{outputDir}}/domains-raw.txt"
   - name: domainsValidFile
@@ -138,6 +148,15 @@ params:
     default: "{{outputDir}}/js-resolved-subs-{{TargetSpace}}.txt"
   - name: jsExternalHostsFile
     default: "{{outputDir}}/js-external-hosts-{{TargetSpace}}.txt"
+  # 云存储候选输出复用 OSINT 目录，便于报告聚合且不并入主扫描目标。
+  - name: cloudStorageCandidatesOutput
+    default: "{{Output}}/osint/cloud-storage-candidates-{{TargetSpace}}.txt"
+  - name: s3BucketsOutput
+    default: "{{Output}}/osint/s3-buckets-{{TargetSpace}}.txt"
+  - name: cloudTrufflehogOutput
+    default: "{{Output}}/osint/cloud-trufflehog-{{TargetSpace}}.jsonl"
+  - name: cloudCandidateLimit
+    default: 500
 
   # LLM Secrets 分析配置
   - name: enableLlmSecretsAnalysis
@@ -295,6 +314,16 @@ reports:
     type: text
     description: External hosts extracted from JS/crawl outputs
 
+  - name: cloud-storage-candidates
+    path: "{{cloudStorageCandidatesOutput}}"
+    type: text
+    description: Cloud storage hosts and URLs found in crawl/archive/JS outputs
+
+  - name: s3-buckets
+    path: "{{s3BucketsOutput}}"
+    type: text
+    description: S3 bucket names inferred from crawl/archive/JS outputs
+
 # -----------------------------------------------------------------------------
 # STEPS SECTION
 # -----------------------------------------------------------------------------
@@ -345,8 +374,23 @@ steps:
     pre_condition: '{{enableGfPatterns}}'
     log: "Extracting vulnerability patterns"
     command: |
+      gf_input=""
+      for candidate in "{{urlNoDupesFile}}" "{{urlExtractFile}}" "{{combinedUrlsFile}}"; do
+        if [ -s "$candidate" ]; then
+          gf_input="$candidate"
+          break
+        fi
+      done
+
+      if [ -z "$gf_input" ]; then
+        echo "[GF] No URL input available; skipping pattern extraction."
+        exit 0
+      fi
+
       for pattern in lfi ssti sqli rce xss ssrf redirect; do
-        cat {{combinedUrlsFile}} | gf $pattern 2>/dev/null | anew -q {{gfDir}}/${pattern}-{{TargetSpace}}.txt || true
+        output_file="{{gfDir}}/${pattern}-{{TargetSpace}}.txt"
+        gf "$pattern" "$gf_input" 2>/dev/null | sort -u | anew -q "$output_file" || true
+        [ -s "$output_file" ] && sort -u "$output_file" -o "$output_file" 2>/dev/null || true
       done
     on_error:
       - action: continue
@@ -620,6 +664,113 @@ steps:
         cat {{jsResolvedSubsFile}} | anew -q {{subdomainsFile}} || true
         echo "[JS-EXTRACT] Found $(wc -l < {{jsResolvedSubsFile}} 2>/dev/null || echo 0) new subdomains from JS extraction"
       fi
+    on_error:
+      - action: continue
+
+  # ===========================================================================
+  # Phase 4a: Cloud storage candidates from crawl/archive/JS
+  # ===========================================================================
+  - name: extract-cloud-storage-from-content
+    type: bash
+    pre_condition: '{{enableJsAnalysis}} || {{enableJsSubExtract}}'
+    log: "Extracting cloud storage candidates from content artifacts"
+    command: |
+      mkdir -p "{{Output}}/osint" 2>/dev/null || true
+      touch {{cloudStorageCandidatesOutput}} {{s3BucketsOutput}} 2>/dev/null || true
+
+      collect_cloud_urls() {
+        src="$1"
+        label="$2"
+        [ -s "$src" ] || return 0
+        grep -aEio 'https?://[^[:space:]"'\''<>()]+' "$src" 2>/dev/null \
+          | sed 's/[),.;]*$//' \
+          | grep -aEi '(s3[.-][a-z0-9-]+\.amazonaws\.com|s3\.amazonaws\.com|s3-website[.-][a-z0-9-]+\.amazonaws\.com|storage\.googleapis\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|cloudfront\.net)' \
+          | sed "s|^|[$label] |" >> {{cloudStorageCandidatesOutput}} || true
+      }
+
+      collect_cloud_hosts() {
+        src="$1"
+        label="$2"
+        [ -s "$src" ] || return 0
+        grep -aEio '([a-z0-9][a-z0-9.-]*\.)?(s3[.-][a-z0-9-]+\.amazonaws\.com|s3\.amazonaws\.com|storage\.googleapis\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|cloudfront\.net)' "$src" 2>/dev/null \
+          | sed "s|^|[$label] |" >> {{cloudStorageCandidatesOutput}} || true
+      }
+
+      collect_cloud_urls "{{archiveUrlFile}}" "archive"
+      collect_cloud_urls "{{spiderUrlFile}}" "crawl"
+      collect_cloud_urls "{{combinedUrlsFile}}" "content"
+      collect_cloud_hosts "{{jsExternalHostsFile}}" "js-external-host"
+      sort -u {{cloudStorageCandidatesOutput}} -o {{cloudStorageCandidatesOutput}} 2>/dev/null || true
+
+      extract_s3_bucket() {
+        raw="$1"
+        target=$(printf '%s' "$raw" | sed -E 's/^\[[^]]+\] //')
+        case "$target" in
+          s3://*)
+            bucket="${target#s3://}"
+            bucket="${bucket%%/*}"
+            ;;
+          *)
+            no_scheme="${target#http://}"
+            no_scheme="${no_scheme#https://}"
+            host="${no_scheme%%/*}"
+            path="${no_scheme#*/}"
+            bucket=""
+            case "$host" in
+              *.s3.amazonaws.com|*.s3-*.amazonaws.com|*.s3.*.amazonaws.com)
+                bucket="${host%%.s3*}"
+                ;;
+              *.s3-website*.amazonaws.com)
+                bucket="${host%%.s3-website*}"
+                ;;
+              s3.amazonaws.com|s3-*.amazonaws.com|s3.*.amazonaws.com)
+                bucket="${path%%/*}"
+                ;;
+            esac
+            ;;
+        esac
+
+        if printf '%s' "$bucket" | grep -Eq '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'; then
+          printf '%s\n' "$bucket"
+        fi
+      }
+
+      s3_tmp="{{s3BucketsOutput}}.tmp"
+      cat {{s3BucketsOutput}} 2>/dev/null > "$s3_tmp" || true
+      if [ -s "{{cloudStorageCandidatesOutput}}" ]; then
+        while IFS= read -r candidate; do
+          extract_s3_bucket "$candidate"
+        done < {{cloudStorageCandidatesOutput}} >> "$s3_tmp" || true
+      fi
+      sort -u "$s3_tmp" 2>/dev/null | head -n {{cloudCandidateLimit}} > {{s3BucketsOutput}} || true
+      rm -f "$s3_tmp" 2>/dev/null || true
+    on_error:
+      - action: continue
+
+  - name: content-cloud-trufflehog
+    type: bash
+    pre_condition: '{{enableCloudBucketSecretScan}} && file_exists("{{s3BucketsOutput}}") && file_length("{{s3BucketsOutput}}") > 0 && command_exists("trufflehog")'
+    log: "Lightweight trufflehog scan for inferred S3 buckets"
+    command: |
+      mkdir -p "{{Output}}/osint" 2>/dev/null || true
+      touch {{cloudTrufflehogOutput}} 2>/dev/null || true
+      tmp_out="{{cloudTrufflehogOutput}}.content.tmp"
+      : > "$tmp_out"
+
+      head -n {{cloudCandidateLimit}} {{s3BucketsOutput}} | while IFS= read -r bucket_name; do
+        [ -z "$bucket_name" ] && continue
+        if command -v jq >/dev/null 2>&1; then
+          trufflehog s3 --bucket="$bucket_name" -j 2>/dev/null | jq -c 2>/dev/null >> "$tmp_out" || true
+        else
+          trufflehog s3 --bucket="$bucket_name" -j 2>/dev/null >> "$tmp_out" || true
+        fi
+      done
+
+      if [ -s "$tmp_out" ]; then
+        cat "$tmp_out" >> {{cloudTrufflehogOutput}} 2>/dev/null || true
+        sort -u {{cloudTrufflehogOutput}} -o {{cloudTrufflehogOutput}} 2>/dev/null || true
+      fi
+      rm -f "$tmp_out" 2>/dev/null || true
     on_error:
       - action: continue
 

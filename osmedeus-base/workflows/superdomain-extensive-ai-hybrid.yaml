@@ -76,7 +76,7 @@ params:
     description: "Enable AI code review"
   - name: enableLlmReport
     type: bool
-    default: false
+    default: true
     description: "Enable AI report generation"
   - name: enableVulnValidation
     type: bool

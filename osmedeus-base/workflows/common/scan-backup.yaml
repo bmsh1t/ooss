@@ -145,7 +145,7 @@ steps:
   - name: check-scanner-exists
     type: function
     log: "Checking if backup scanner exists"
-    pre_condition: '!file_exists("{{backupScannerPath}}")'
+    pre_condition: '!file_exists("{{backupScannerPath}}") && !file_exists(os_getenv("HOME") + "/Tools/ihoneyBakFileScan_Modify/ihoneyBakFileScan_Modify.py")'
     functions:
       - 'log_warn("Backup scanner not found at {{backupScannerPath}}, skipping...")'
       - 'skip()'
@@ -187,7 +187,21 @@ steps:
     log: "Running backup file leak scanner"
     pre_condition: '{{enableBackupScan}} && file_exists("{{backupOutputDir}}/targets.txt")'
     command: |
-      cd {{toolsDir}}/ihoneyBakFileScan_Modify
+      BACKUP_SCANNER_DIR="{{backupScannerDir}}"
+      BACKUP_SCANNER_PATH="$BACKUP_SCANNER_DIR/ihoneyBakFileScan_Modify.py"
+
+      # 函数 pre_condition 不会展开 ${HOME}；bash 这里会展开，因此再做一次实际路径兜底。
+      if [ ! -f "$BACKUP_SCANNER_PATH" ] && [ -f "${HOME}/Tools/ihoneyBakFileScan_Modify/ihoneyBakFileScan_Modify.py" ]; then
+        BACKUP_SCANNER_DIR="${HOME}/Tools/ihoneyBakFileScan_Modify"
+        BACKUP_SCANNER_PATH="$BACKUP_SCANNER_DIR/ihoneyBakFileScan_Modify.py"
+      fi
+
+      if [ ! -f "$BACKUP_SCANNER_PATH" ]; then
+        echo "[backup-scan] scanner not found: $BACKUP_SCANNER_PATH"
+        exit 0
+      fi
+
+      cd "$BACKUP_SCANNER_DIR" || exit 0
       
       # Build command arguments
       CMD="python3 ihoneyBakFileScan_Modify.py"

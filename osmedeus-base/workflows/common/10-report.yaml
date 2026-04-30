@@ -150,9 +150,9 @@ params:
   - name: llmRiskAssessment
     default: "{{Output}}/report/llm-risk-assessment-{{TargetSpace}}.md"
     description: "LLM-generated risk assessment"
-  - name: llmRecommendations
-    default: "{{Output}}/report/llm-recommendations-{{TargetSpace}}.md"
-    description: "LLM-generated remediation recommendations"
+  - name: llmExploitationPlan
+    default: "{{Output}}/report/llm-exploitation-plan-{{TargetSpace}}.md"
+    description: "LLM-generated exploitation and attack expansion plan"
   - name: enableLlmAttackSurface
     type: bool
     default: true
@@ -1008,13 +1008,13 @@ steps:
     messages:
       - role: system
         content: |
-          You are a senior security consultant. Generate an executive summary for a security assessment.
-          Focus on business impact, not technical details.
+          You are a senior penetration tester summarizing an authorized assessment.
+          Focus on exploitable exposure, operator priorities, and business impact.
           Include:
           1. Overall risk level (Critical/High/Medium/Low)
-          2. Key findings summary
+          2. Key exploitable findings summary
           3. Business impact assessment
-          4. Recommended actions
+          4. Operator next actions for validation and attack surface expansion
           
           Format in plain text, keep it concise for C-level executives. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
@@ -1074,12 +1074,12 @@ steps:
     messages:
       - role: system
         content: |
-          You are a security risk analyst. Generate a detailed risk assessment.
+          You are a security risk analyst supporting authorized exploitation planning.
           Include:
-          1. Vulnerability breakdown by severity
-          2. Attack surface analysis
-          3. Threat modeling insights
-          4. Risk scoring (CVSS context)
+          1. Vulnerability breakdown by exploitability and severity
+          2. Likely exploit paths and chaining opportunities
+          3. High-value assets and required preconditions
+          4. Risk scoring with operator confidence and false-positive notes
           
           Format in plain text with clear sections. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
@@ -1125,27 +1125,29 @@ steps:
     on_error:
       - action: continue
 
-  - name: llm-recommendations
+  - name: llm-exploitation-plan
     type: llm
     pre_condition: '{{enableLlmReport}} && file_exists("{{nucleiFile}}")'
-    log: "Generating remediation recommendations with LLM"
+    log: "Generating exploitation plan with LLM"
     timeout: 300
     on_error:
       - action: continue
     messages:
       - role: system
         content: |
-          You are a security consultant. Generate actionable remediation recommendations.
+          You are a senior penetration tester conducting an authorized security assessment.
+          Generate a practical manual exploitation and post-exploitation expansion plan.
           Prioritize by:
-          1. Critical vulnerabilities requiring immediate action
-          2. Quick wins that can be implemented quickly
-          3. Long-term security improvements
+          1. Findings with realistic exploitability and strong evidence
+          2. Paths that can chain into authentication bypass, privilege escalation, data exposure, or account takeover
+          3. Targets that can expand the attack surface through APIs, JS endpoints, cloud assets, third-party services, or exposed admin panels
           
-          Include specific steps and code examples where applicable.
+          Include operator-safe validation steps, required preconditions, payload categories, evidence to capture, and follow-up collection tasks.
+          Keep the output focused on exploitation evidence, validation paths, and expansion tasks; only mention defensive context when it is necessary to explain false positives.
           Output in plain text only. Do not include template placeholders or brace-delimited markers in your response.
       - role: user
         content: |
-          Generate remediation recommendations for {{Target}}:
+          Generate a manual exploitation and attack-surface expansion plan for {{Target}}:
           
           ## Vulnerabilities
           {{readFile("{{nucleiFile}}")}}
@@ -1160,32 +1162,32 @@ steps:
           {{readFile("{{operatorQueueFile}}")}}
           {{readFile("{{campaignHandoffFile}}")}}
     exports:
-      recommendations: "{{llm_recommendations_content}}"
+      exploitation_plan: "{{llm_exploitation_plan_content}}"
 
-  - name: persist-llm-recommendations-raw
+  - name: persist-llm-exploitation-plan-raw
     type: function
     pre_condition: "{{enableLlmReport}}"
     functions:
-      - 'save_content(typeof recommendations !== "undefined" ? recommendations : "", "{{reportDir}}/.llm-recommendations-raw-{{TargetSpace}}.txt")'
+      - 'save_content(typeof exploitation_plan !== "undefined" ? exploitation_plan : "", "{{reportDir}}/.llm-exploitation-plan-raw-{{TargetSpace}}.txt")'
 
-  - name: save-llm-recommendations
+  - name: save-llm-exploitation-plan
     type: bash
     pre_condition: "{{enableLlmReport}}"
-    log: "Saving LLM recommendations"
+    log: "Saving LLM exploitation plan"
     command: |
       mkdir -p {{reportDir}} 2>/dev/null || true
-      RAW_FILE="{{reportDir}}/.llm-recommendations-raw-{{TargetSpace}}.txt"
+      RAW_FILE="{{reportDir}}/.llm-exploitation-plan-raw-{{TargetSpace}}.txt"
       [ -f "$RAW_FILE" ] || : > "$RAW_FILE"
 
       TRIMMED_CONTENT=$(tr -d '[:space:]' < "$RAW_FILE" 2>/dev/null || true)
       if [ ! -s "$RAW_FILE" ] || [ -z "$TRIMMED_CONTENT" ] || [ "$TRIMMED_CONTENT" = "undefined" ]; then
-        rm -f {{llmRecommendations}} 2>/dev/null || true
-        echo "No LLM remediation recommendations available; skipping report write."
+        rm -f {{llmExploitationPlan}} 2>/dev/null || true
+        echo "No LLM exploitation plan available; skipping report write."
         exit 0
       fi
-      echo "# Remediation Recommendations - {{Target}}" > {{llmRecommendations}}
-      echo "" >> {{llmRecommendations}}
-      cat "$RAW_FILE" >> {{llmRecommendations}}
+      echo "# Exploitation Plan - {{Target}}" > {{llmExploitationPlan}}
+      echo "" >> {{llmExploitationPlan}}
+      cat "$RAW_FILE" >> {{llmExploitationPlan}}
     on_error:
       - action: continue
 
@@ -1204,38 +1206,39 @@ steps:
         content: |
           Role: Senior penetration tester conducting authorized security assessments. You are methodical, evidence-driven, and never speculate beyond what you can verify.
           
-          Create a comprehensive security surface analysis:
+          Create a comprehensive attack surface expansion analysis:
           
           1. **Asset Correlation**: Map relationships between discovered assets
              - Subdomains to IP addresses
              - Services to technologies
              - Credentials to systems
-             - Vulnerabilities to risk areas
+             - Vulnerabilities to exploitable entry points
           
-          2. **Risk Path Analysis**: Identify potential security risk areas
+          2. **Expansion Path Analysis**: Identify next targets and discovery pivots
              - External exposure points
-             - Privilege escalation risks
-             - Lateral movement risks
-             - Data exposure routes
+             - API, GraphQL, JS, and parameter expansion
+             - Authentication and session attack paths
+             - Cloud bucket, third-party SaaS, and admin panel pivots
           
-          3. **Critical Asset Identification**: High-value security targets
+          3. **Critical Asset Identification**: High-value targets for follow-up testing
              - Authentication systems
              - Database servers
              - Administrative interfaces
              - Internal tool exposure
           
-          4. **Risk Scoring**: Calculate overall risk score
+          4. **Operator Prioritization**: Rank follow-up actions
              - Exposure level (Public/Internal)
-             - Vulnerability severity
-             - Business impact
-             - Likelihood
+             - Exploitability and confidence
+             - Data sensitivity and business impact
+             - Required prerequisites
           
-          5. **Security Graph**: Visual representation of security surface
+          5. **Attack Surface Graph**: Visual representation of expansion paths
              - Entry points
-             - Choke points
-             - Target assets
+             - Choke points and pivot candidates
+             - Next targets
           
-          Provide actionable recommendations for security improvement.
+          Provide concrete next-step testing queues and attack surface expansion ideas.
+          Keep the output focused on exploitation opportunities, pivots, and testing queues rather than defensive guidance.
           Format in Markdown with structured sections.
       - role: user
         content: |
@@ -1263,7 +1266,7 @@ steps:
           {{readFile("{{assetsSummaryFile}}")}}
           {{readFile("{{attackChainFile}}")}}
           
-          Provide a comprehensive security surface analysis with risk areas.
+          Provide a comprehensive attack surface expansion analysis with next targets and follow-up testing queues.
     exports:
       attack_surface: "{{llm_attack_surface_analysis_content}}"
 

@@ -20,7 +20,8 @@ params:
     default: true
   - name: enableGrpcReflection
     type: bool
-    default: true
+    default: false
+    description: "Enable gRPC reflection probing (bounded and skipped when grpcurl is unavailable)"
   - name: enableIisShortname
     type: bool
     default: true
@@ -36,6 +37,15 @@ params:
   # 工具参数
   - name: grpcPorts
     default: "50051,50052,8080,9090,443,8443"
+  - name: grpcTargetLimit
+    default: 200
+    description: "Max IPs to probe for gRPC reflection"
+  - name: grpcThreads
+    default: 10
+    description: "Concurrency for gRPC reflection probes"
+  - name: grpcProbeTimeout
+    default: 5
+    description: "Per grpcurl probe timeout in seconds"
 
   # 输出目录
   - name: outputDir
@@ -113,21 +123,36 @@ steps:
   # ===========================================================================
   - name: grpc-port-scan
     type: foreach
-    pre_condition: '{{enableGrpcReflection}} && file_exists("{{ipFile}}")'
+    pre_condition: '{{enableGrpcReflection}} && file_exists("{{ipFile}}") && file_length("{{ipFile}}") > 0 && command_exists("grpcurl")'
     log: "Scanning for gRPC services"
     input: "{{ipFile}}"
     variable: ip
-    threads: 20
+    threads: "{{grpcThreads}}"
     step:
       name: grpcurl-probe
       type: bash
-      command: 'for port in $(echo {{grpcPorts}} | tr "," " "); do grpcurl -plaintext -max-msg-sz 10485760 -d {} [[ip]]:$port list 2>/dev/null >> {{outputDir}}/grpc-[[ip]]-$port.txt || true; done'
+      command: |
+        rank=$(grep -n -m1 -F "[[ip]]" "{{ipFile}}" 2>/dev/null | cut -d: -f1 | head -1)
+        rank=${rank:-0}
+        if [ "$rank" -eq 0 ] || [ "$rank" -gt {{grpcTargetLimit}} ]; then
+          exit 0
+        fi
+        safe_ip=$(printf '%s' '[[ip]]' | tr ':/' '__')
+        for port in $(echo {{grpcPorts}} | tr "," " "); do
+          [ -z "$port" ] && continue
+          out="{{outputDir}}/grpc-${safe_ip}-${port}.txt"
+          if timeout {{grpcProbeTimeout}} grpcurl -plaintext -max-msg-sz 10485760 -d {} [[ip]]:$port list > "$out" 2>/dev/null && [ -s "$out" ]; then
+            sed -i "s|^|[[ip]]:$port |" "$out" 2>/dev/null || true
+          else
+            rm -f "$out" 2>/dev/null || true
+          fi
+        done
     on_error:
       - action: continue
 
   - name: grpc-merge-results
     type: function
-    pre_condition: '{{enableGrpcReflection}}'
+    pre_condition: '{{enableGrpcReflection}} && command_exists("grpcurl")'
     log: "Merging gRPC results"
     functions:
       - 'exec_cmd("cat {{outputDir}}/grpc-*.txt 2>/dev/null > {{grpcOutputFile}} || echo \"No gRPC services found\" > {{grpcOutputFile}}")'

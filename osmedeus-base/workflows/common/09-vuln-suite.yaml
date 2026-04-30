@@ -26,6 +26,7 @@ params:
   - name: enableSsrfScan
     type: bool
     default: true
+    description: "启用 ffuf + interactsh 主动 SSRF 回连 fuzz（默认开启；可按需传 enableSsrfScan=false 关闭）"
   - name: enableSstiScan
     type: bool
     default: true
@@ -256,6 +257,8 @@ params:
     default: false
   - name: ssrfUrlLimit
     default: 5000
+  - name: sstiUrlLimit
+    default: 500
   - name: smugglingUrlLimit
     default: 5000
   - name: webcacheUrlLimit
@@ -304,6 +307,9 @@ params:
   - name: ssrfCallbackWait
     default: "30"
     description: "Time to wait for SSRF callbacks (seconds)"
+  - name: ssrfScanTimeout
+    default: "10m"
+    description: "主动 SSRF ffuf 请求的最大执行时间"
   - name: sstiOutputFile
     default: "{{vulnSuiteDir}}/ssti-{{TargetSpace}}.txt"
   - name: crlfOutputFile
@@ -579,28 +585,28 @@ steps:
       SELECTED_TEMPLATES=""
       
       if echo "$tech_stack" | grep -qi "php"; then
-        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/configs/php"
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,http/misconfiguration/php"
       fi
       if echo "$tech_stack" | grep -qi "java\|spring"; then
-        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,cves/java,springboot"
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,http/vulnerabilities/springboot,http/misconfiguration/springboot"
       fi
       if echo "$tech_stack" | grep -qi "node\|express"; then
-        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/apis/nodejs"
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,file/nodejs,http/exposures/apis"
       fi
       if echo "$tech_stack" | grep -qi "wordpress\|wp"; then
-        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,technologies/wordpress,cms/wordpress"
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,http/technologies/wordpress,http/vulnerabilities/wordpress,http/misconfiguration/wordpress"
       fi
       if echo "$tech_stack" | grep -qi "api\|rest"; then
-        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,exposures/apis"
+        SELECTED_TEMPLATES="$SELECTED_TEMPLATES,http/exposures/apis"
       fi
       
       # 默认模板
       if [ -z "$SELECTED_TEMPLATES" ]; then
-        SELECTED_TEMPLATES="cves,vulnerabilities,exposures"
+        SELECTED_TEMPLATES="http/cves,http/vulnerabilities,http/exposures"
       fi
       
       SELECTED_TEMPLATES=$(echo "$SELECTED_TEMPLATES" | sed 's/^,//')
-      echo "SELECTED_TEMPLATES=$SELECTED_TEMPLATES" > {{vulnSuiteDir}}/smart-templates.txt
+      printf 'SELECTED_TEMPLATES=%s\n' "$SELECTED_TEMPLATES" > {{vulnSuiteDir}}/smart-templates.txt
       echo "[SMART-TEMPLATES] Selected: $SELECTED_TEMPLATES"
     on_error:
       - action: continue
@@ -651,6 +657,35 @@ steps:
       AI_WAF_BYPASS="false"
       AI_REASONING=""
 
+      is_positive_int() {
+        case "$1" in
+          ''|*[!0-9]*|0)
+            return 1
+            ;;
+          *)
+            return 0
+            ;;
+        esac
+      }
+
+      is_timeout_duration() {
+        printf '%s' "$1" | grep -Eq '^[0-9]+[smhd]$'
+      }
+
+      is_severity_list() {
+        printf '%s' "$1" | grep -Eq '^(critical|high|medium|low|info|unknown)(,(critical|high|medium|low|info|unknown))*$'
+      }
+
+      is_template_list() {
+        printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_./,~-]+$'
+      }
+
+      read_config_value() {
+        config_file="$1"
+        config_key="$2"
+        grep -E "^${config_key}=" "$config_file" 2>/dev/null | tail -n 1 | sed -E 's/^[^=]*=//; s/[[:space:]]*$//'
+      }
+
       if [ -f "$APPLIED_AI_DECISION_FILE" ] && jq empty "$APPLIED_AI_DECISION_FILE" 2>/dev/null; then
         ACTIVE_AI_DECISION_FILE="$APPLIED_AI_DECISION_FILE"
       elif [ -f "$AI_DECISION_FILE" ] && jq empty "$AI_DECISION_FILE" 2>/dev/null; then
@@ -661,12 +696,36 @@ steps:
 
       if [ -n "$ACTIVE_AI_DECISION_FILE" ]; then
         echo "[NUCLEI] Loading AI decision config from $ACTIVE_AI_DECISION_FILE"
-        AI_SEVERITY=$(jq -r '.scan.severity // .nuclei_severity // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_THREADS=$(jq -r '.scan.threads // .suggested_threads // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_RATE_LIMIT=$(jq -r '.scan.rate_limit // .suggested_rate_limit // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
-        AI_TIMEOUT=$(jq -r '.scan.timeout // .recommended_timeout // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+        AI_SEVERITY=$(jq -r '(.scan.severity // .nuclei_severity // empty) | if type == "array" then join(",") else tostring end' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null | tr -d '[:space:]')
+        AI_THREADS=$(jq -r '.scan.threads // .suggested_threads // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null | tr -d '[:space:]')
+        AI_RATE_LIMIT=$(jq -r '.scan.rate_limit // .suggested_rate_limit // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null | tr -d '[:space:]')
+        AI_TIMEOUT=$(jq -r '.scan.timeout // .recommended_timeout // empty' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null | tr -d '[:space:]')
         AI_WAF_BYPASS=$(jq -r '.waf.bypass_needed // .waf_bypass_needed // false' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
         AI_REASONING=$(jq -r '.reasoning // "none"' "$ACTIVE_AI_DECISION_FILE" 2>/dev/null)
+
+        if [ -n "$AI_SEVERITY" ] && ! is_severity_list "$AI_SEVERITY"; then
+          echo "[NUCLEI] Ignoring invalid AI severity: $AI_SEVERITY" >&2
+          AI_SEVERITY=""
+        fi
+        if [ -n "$AI_THREADS" ] && ! is_positive_int "$AI_THREADS"; then
+          echo "[NUCLEI] Ignoring invalid AI threads: $AI_THREADS" >&2
+          AI_THREADS=""
+        fi
+        if [ -n "$AI_RATE_LIMIT" ] && ! is_positive_int "$AI_RATE_LIMIT"; then
+          echo "[NUCLEI] Ignoring invalid AI rate_limit: $AI_RATE_LIMIT" >&2
+          AI_RATE_LIMIT=""
+        fi
+        if [ -n "$AI_TIMEOUT" ] && ! is_timeout_duration "$AI_TIMEOUT"; then
+          echo "[NUCLEI] Ignoring invalid AI timeout: $AI_TIMEOUT" >&2
+          AI_TIMEOUT=""
+        fi
+        case "$AI_WAF_BYPASS" in
+          true|false)
+            ;;
+          *)
+            AI_WAF_BYPASS="false"
+            ;;
+        esac
 
         [ -n "$AI_SEVERITY" ] && echo "[NUCLEI] AI Decision: severity=$AI_SEVERITY"
         [ -n "$AI_THREADS" ] && echo "[NUCLEI] AI Decision: threads=$AI_THREADS"
@@ -688,32 +747,49 @@ steps:
       fi
       
       # WAF 感知配置加载
+      THREADS={{nucleiThreads}}
+      RATELIMIT={{nucleiRateLimit}}
       if [ "{{enableWafAwareScan}}" = "true" ] && [ -f "{{vulnSuiteDir}}/waf-adjusted-config.txt" ]; then
-        source {{vulnSuiteDir}}/waf-adjusted-config.txt
-        THREADS=${THREADS:-{{nucleiThreads}}}
-        RATELIMIT=${RATELIMIT:-{{nucleiRateLimit}}}
-        # AI 决策覆盖
-        [ -n "$AI_THREADS" ] && THREADS=$AI_THREADS
-        [ -n "$AI_RATE_LIMIT" ] && RATELIMIT=$AI_RATE_LIMIT
-        echo "[NUCLEI] Using WAF-adjusted+AI config: threads=$THREADS, rate=$RATELIMIT"
-      else
-        THREADS={{nucleiThreads}}
-        RATELIMIT={{nucleiRateLimit}}
-        # AI 决策覆盖
-        [ -n "$AI_THREADS" ] && THREADS=$AI_THREADS
-        [ -n "$AI_RATE_LIMIT" ] && RATELIMIT=$AI_RATE_LIMIT
-        if [ -n "$AI_THREADS" ] || [ -n "$AI_RATE_LIMIT" ]; then
-          echo "[NUCLEI] Using AI config: threads=$THREADS, rate=$RATELIMIT"
+        WAF_THREADS=$(read_config_value "{{vulnSuiteDir}}/waf-adjusted-config.txt" "THREADS" | tr -d '[:space:]')
+        WAF_RATELIMIT=$(read_config_value "{{vulnSuiteDir}}/waf-adjusted-config.txt" "RATELIMIT" | tr -d '[:space:]')
+
+        if [ -n "$WAF_THREADS" ]; then
+          if is_positive_int "$WAF_THREADS"; then
+            THREADS="$WAF_THREADS"
+          else
+            echo "[NUCLEI] Ignoring invalid WAF threads: $WAF_THREADS" >&2
+          fi
         fi
+        if [ -n "$WAF_RATELIMIT" ]; then
+          if is_positive_int "$WAF_RATELIMIT"; then
+            RATELIMIT="$WAF_RATELIMIT"
+          else
+            echo "[NUCLEI] Ignoring invalid WAF rate_limit: $WAF_RATELIMIT" >&2
+          fi
+        fi
+      fi
+
+      # AI 决策覆盖 WAF/默认值，但只接受已校验的正整数。
+      [ -n "$AI_THREADS" ] && THREADS="$AI_THREADS"
+      [ -n "$AI_RATE_LIMIT" ] && RATELIMIT="$AI_RATE_LIMIT"
+      if [ -n "$AI_THREADS" ] || [ -n "$AI_RATE_LIMIT" ]; then
+        echo "[NUCLEI] Using AI config: threads=$THREADS, rate=$RATELIMIT"
+      elif [ "{{enableWafAwareScan}}" = "true" ] && [ -f "{{vulnSuiteDir}}/waf-adjusted-config.txt" ]; then
+        echo "[NUCLEI] Using WAF-adjusted config: threads=$THREADS, rate=$RATELIMIT"
       fi
       
       # 智能模板选择
+      TEMPLATES="{{nucleiTemplateConfig}}"
       if [ "{{enableSmartTemplateSelection}}" = "true" ] && [ -f "{{vulnSuiteDir}}/smart-templates.txt" ]; then
-        source {{vulnSuiteDir}}/smart-templates.txt
-        TEMPLATES="${SELECTED_TEMPLATES:-{{nucleiTemplateConfig}}}"
-        echo "[NUCLEI] Using smart templates: $TEMPLATES"
-      else
-        TEMPLATES="{{nucleiTemplateConfig}}"
+        SELECTED_TEMPLATES=$(read_config_value "{{vulnSuiteDir}}/smart-templates.txt" "SELECTED_TEMPLATES" | tr -d '[:space:]')
+        if [ -n "$SELECTED_TEMPLATES" ]; then
+          if is_template_list "$SELECTED_TEMPLATES"; then
+            TEMPLATES="$SELECTED_TEMPLATES"
+            echo "[NUCLEI] Using smart templates: $TEMPLATES"
+          else
+            echo "[NUCLEI] Ignoring invalid smart templates: $SELECTED_TEMPLATES" >&2
+          fi
+        fi
       fi
 
       EFFECTIVE_TIMEOUT="{{nucleiTimeout}}"
@@ -764,7 +840,7 @@ steps:
       # Jitter 配置
       JITTER_OPTS=""
       if [ "{{enableJitter}}" = "true" ]; then
-        JITTER_OPTS="-sjc -sjt $(shuf -i 1-5 -n 1)d -rsh"
+        echo "[NUCLEI] Jitter requested, but current nuclei does not expose compatible jitter flags; skipping jitter opts"
       fi
       
       # 执行扫描
@@ -838,18 +914,68 @@ steps:
   # Phase 1: SSRF Scanning (ffuf + interactsh)
   # ===========================================================================
   - name: ssrf-scan
-    type: function
+    type: bash
     pre_condition: '{{enableSsrfScan}} && file_exists("{{gfSsrfFile}}") && ({{ssrfDeepScan}} || file_length("{{gfSsrfFile}}") <= {{ssrfUrlLimit}})'
     log: "Running SSRF scan with ffuf + interactsh"
-    functions:
-      - 'exec_cmd(": > {{ssrfOutputFile}} && : > {{ssrfCallbackFile}}")'
-      - 'exec_cmd("interactsh-client > {{vulnSuiteDir}}/interactsh-raw.txt 2>&1 &")'
-      - 'exec_cmd("sleep 8")'
-      - 'exec_cmd("COLLAB_SERVER_FIX=\"FFUFHASH.$(tail -n1 {{vulnSuiteDir}}/interactsh-raw.txt | cut -c 16-)\" && echo \"[SSRF] Callback: $COLLAB_SERVER_FIX\" >> {{ssrfOutputFile}} && qsreplace \"$COLLAB_SERVER_FIX\" < \"{{gfSsrfFile}}\" | anew -q {{vulnSuiteDir}}/tmp_ssrf.txt 2>/dev/null || true")'
-      - 'exec_cmd("ffuf -v -H \"{{defaultUA}}\" -t {{ffufThreads}} -rate {{ffufRatelimit}} -w \"{{vulnSuiteDir}}/tmp_ssrf.txt\" -u \"FUZZ\" 2>/dev/null | anew -q {{vulnSuiteDir}}/ssrf-requested-{{TargetSpace}}.txt || true")'
-      - 'exec_cmd("sleep {{ssrfCallbackWait}}")'
-      - 'exec_cmd("tail -n +11 {{vulnSuiteDir}}/interactsh-raw.txt | anew -q {{ssrfCallbackFile}} 2>/dev/null || true")'
-      - 'exec_cmd("pkill -f interactsh-client 2>/dev/null || true")'
+    command: |
+      mkdir -p "{{vulnSuiteDir}}" 2>/dev/null || true
+      : > "{{ssrfOutputFile}}"
+      : > "{{ssrfCallbackFile}}"
+      : > "{{vulnSuiteDir}}/tmp_ssrf.txt"
+      : > "{{vulnSuiteDir}}/interactsh-raw.txt"
+
+      INTERACTSH_PID_FILE="{{vulnSuiteDir}}/interactsh.pid"
+      rm -f "$INTERACTSH_PID_FILE" 2>/dev/null || true
+
+      cleanup_interactsh() {
+        if [ -s "$INTERACTSH_PID_FILE" ]; then
+          INTERACTSH_PID=$(cat "$INTERACTSH_PID_FILE" 2>/dev/null || true)
+          case "$INTERACTSH_PID" in
+            ''|*[!0-9]*)
+              ;;
+            *)
+              kill "$INTERACTSH_PID" 2>/dev/null || true
+              ;;
+          esac
+        fi
+        rm -f "$INTERACTSH_PID_FILE" 2>/dev/null || true
+      }
+      trap cleanup_interactsh EXIT INT TERM
+
+      if ! command -v interactsh-client >/dev/null 2>&1; then
+        echo "[SSRF] interactsh-client not found; skipping SSRF callback scan" >> "{{ssrfOutputFile}}"
+        exit 0
+      fi
+
+      interactsh-client > "{{vulnSuiteDir}}/interactsh-raw.txt" 2>&1 &
+      echo "$!" > "$INTERACTSH_PID_FILE"
+
+      # interactsh-client 生成 payload 需要一点时间；最多等 8 秒，拿到可用域名就继续。
+      CALLBACK_SUFFIX=""
+      for _ in 1 2 3 4 5 6 7 8; do
+        CALLBACK_SUFFIX=$(tail -n1 "{{vulnSuiteDir}}/interactsh-raw.txt" 2>/dev/null | cut -c 16- | tr -d '\r' | awk '{print $1}' || true)
+        if [ -n "$CALLBACK_SUFFIX" ] && printf '%s' "$CALLBACK_SUFFIX" | grep -q '\.'; then
+          break
+        fi
+        sleep 1
+      done
+
+      if [ -z "$CALLBACK_SUFFIX" ] || ! printf '%s' "$CALLBACK_SUFFIX" | grep -q '\.'; then
+        echo "[SSRF] interactsh callback payload was not ready; skipping SSRF request fuzzing" >> "{{ssrfOutputFile}}"
+        exit 0
+      fi
+
+      COLLAB_SERVER_FIX="FFUFHASH.$CALLBACK_SUFFIX"
+      echo "[SSRF] Callback: $COLLAB_SERVER_FIX" >> "{{ssrfOutputFile}}"
+      qsreplace "$COLLAB_SERVER_FIX" < "{{gfSsrfFile}}" | anew -q "{{vulnSuiteDir}}/tmp_ssrf.txt" 2>/dev/null || true
+
+      if [ -s "{{vulnSuiteDir}}/tmp_ssrf.txt" ]; then
+        timeout -k 30s {{ssrfScanTimeout}} ffuf -v -H "{{defaultUA}}" -t {{ffufThreads}} -rate {{ffufRatelimit}} -w "{{vulnSuiteDir}}/tmp_ssrf.txt" -u "FUZZ" 2>/dev/null \
+          | anew -q "{{vulnSuiteDir}}/ssrf-requested-{{TargetSpace}}.txt" || true
+      fi
+
+      sleep {{ssrfCallbackWait}}
+      tail -n +11 "{{vulnSuiteDir}}/interactsh-raw.txt" | anew -q "{{ssrfCallbackFile}}" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -859,12 +985,12 @@ steps:
   - name: ssti-scan
     type: function
     log: "Running SSTI scan with TInjA"
-    pre_condition: '{{enableSstiScan}} && file_exists("{{gfSstiFile}}")'
+    pre_condition: '{{enableSstiScan}} && file_exists("{{gfSstiFile}}") && file_length("{{gfSstiFile}}") > 0 && file_length("{{gfSstiFile}}") <= {{sstiUrlLimit}} && command_exists("TInjA") && command_exists("qsreplace")'
     functions:
       - 'exec_cmd("mkdir -p {{vulnSuiteDir}}/TInjA 2>/dev/null || true")'
       - 'exec_cmd(": > {{sstiOutputFile}}")'
-      - 'exec_cmd("qsreplace FUZZ < \"{{gfSstiFile}}\" 2>/dev/null | sed \"/FUZZ/!d\" > {{vulnSuiteDir}}/tmp_ssti.txt || true")'
-      - 'exec_cmd("CMD=\"TInjA url --reportpath {{vulnSuiteDir}}/TInjA/ --ratelimit 0 --timeout 15 --verbosity 0\"; while IFS= read -r u; do [ -n \"$u\" ] && CMD=\"$CMD --url \\\"$u\\\"\"; done < \"{{vulnSuiteDir}}/tmp_ssti.txt\"; $CMD 2>/dev/null || true")'
+      - 'exec_cmd("qsreplace FUZZ < \"{{gfSstiFile}}\" 2>/dev/null | sed \"/FUZZ/!d\" | head -n {{sstiUrlLimit}} > {{vulnSuiteDir}}/tmp_ssti.txt || true")'
+      - 'exec_cmd("CMD=\"TInjA url --reportpath {{vulnSuiteDir}}/TInjA/ --ratelimit 0 --timeout 15 --verbosity 0\"; if [ -s \"{{vulnSuiteDir}}/tmp_ssti.txt\" ]; then while IFS= read -r u; do [ -n \"$u\" ] && CMD=\"$CMD --url \\\"$u\\\"\"; done < \"{{vulnSuiteDir}}/tmp_ssti.txt\"; $CMD 2>/dev/null || true; fi")'
       - 'exec_cmd("report_file=$(ls -1t {{vulnSuiteDir}}/TInjA/*.jsonl 2>/dev/null | head -n 1); if [ -n \"$report_file\" ] && [ -s \"$report_file\" ]; then jq -r \"select((.isWebpageVulnerable == true) or any(.parameters[]?; .isParameterVulnerable == true)) | (.url // empty) + \\\" [certainty:\\\" + (.certainty // \\\"unknown\\\") + \\\"]\\\"\" \"$report_file\" 2>/dev/null | sed \"/^\\s*$/d\" > {{sstiOutputFile}}; fi")'
     on_error:
       - action: continue

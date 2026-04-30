@@ -140,6 +140,15 @@ params:
   - name: ptrSweepMaxIPs
     default: 50000
     description: "Max IPs for PTR sweep (safety limit)"
+  - name: nsDelegationLimit
+    default: 1000
+    description: "Max subdomains to check for delegated NS records"
+  - name: srvQueryTimeout
+    default: 5
+    description: "Per SRV lookup timeout in seconds"
+  - name: ptrLookupTimeout
+    default: 3
+    description: "Per PTR lookup timeout in seconds"
 
   # 超时
   - name: ipTimeout
@@ -318,20 +327,34 @@ steps:
     log: "Checking DNS Zone Transfer (AXFR)"
     command: |
       : > {{axfrOutputFile}}
-      for ns in $(dig +short NS {{Target}} 2>/dev/null | head -10); do
-        result=$(dig AXFR {{Target}} @$ns 2>/dev/null)
+      axfrSubsTmp="{{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt"
+      : > "$axfrSubsTmp"
+      for ns in $(dig +short NS {{Target}} 2>/dev/null | sed 's/\.$//' | head -10); do
+        [ -z "$ns" ] && continue
+        result=$(timeout 10 dig @"$ns" {{Target}} AXFR +time=5 +tries=1 2>/dev/null || true)
         if echo "$result" | grep -qE "XFR|transfer|IN.*A|IN.*CNAME"; then
           echo "=== Zone Transfer SUCCESS on $ns ===" >> {{axfrOutputFile}}
           echo "$result" | grep -E "IN\s+(A|CNAME|MX|TXT|NS)" >> {{axfrOutputFile}}
           # Extract subdomains from AXFR results
-          echo "$result" | grep -oE "^[_a-zA-Z0-9-]+\." | sed "s/\.$//" >> {{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt
+          echo "$result" \
+            | awk -v target="{{Target}}" '
+                {
+                  host=$1
+                  sub(/\.$/, "", host)
+                  lhost=tolower(host)
+                  ltarget=tolower(target)
+                  if (lhost == ltarget || (length(lhost) > length(ltarget) && substr(lhost, length(lhost) - length(ltarget), length(ltarget) + 1) == "." ltarget)) {
+                    print host
+                  }
+                }
+              ' >> "$axfrSubsTmp"
         fi
       done
       # Merge AXFR subdomains into main subdomain file
-      if [ -f "{{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt" ] && [ -s "{{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt" ]; then
-        cat {{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt | sort -u >> {{subdomainFile}} 2>/dev/null || true
-        rm -f {{Output}}/subdomain/axfr-subs-{{TargetSpace}}.txt 2>/dev/null || true
+      if [ -s "$axfrSubsTmp" ]; then
+        sort -u "$axfrSubsTmp" | anew -q {{subdomainFile}} 2>/dev/null || sort -u "$axfrSubsTmp" >> {{subdomainFile}} 2>/dev/null || true
       fi
+      rm -f "$axfrSubsTmp" 2>/dev/null || true
     on_error:
       - action: continue
 
@@ -352,7 +375,8 @@ steps:
       
       # Check NS records for each known subdomain using dnsx with JSON output
       if [ -s "{{subdomainFile}}" ]; then
-        timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -ns -resp -silent -retry 2 -r {{trustedResolvers}} -json < {{subdomainFile}} 2>/dev/null > {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl || true
+        head -n {{nsDelegationLimit}} {{subdomainFile}} \
+          | timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -ns -resp -silent -retry 2 -r {{trustedResolvers}} -json 2>/dev/null > {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl || true
         
         if [ -s "{{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl" ]; then
           while IFS= read -r line; do
@@ -378,7 +402,7 @@ steps:
                 [ "$ns" = "null" ] && continue
                 # Remove trailing dot from NS if present
                 ns="${ns%.}"
-                timeout 5 dig axfr "$sub" @"$ns" +short 2>/dev/null | awk '{print $1}' | sed 's/\.$//' | sed '/^$/d' >> {{nsAxfrSubsFile}} || true
+                timeout 5 dig @"$ns" "$sub" AXFR +short +time=3 +tries=1 2>/dev/null | awk '{print $1}' | sed 's/\.$//' | sed '/^$/d' >> {{nsAxfrSubsFile}} || true
               done
             fi
           done < {{Output}}/subdomain/ns-delegation-raw-{{TargetSpace}}.jsonl
@@ -390,7 +414,20 @@ steps:
       
       # Filter and merge AXFR results - match target domain
       if [ -s "{{nsAxfrSubsFile}}" ]; then
-        grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' {{nsAxfrSubsFile}} 2>/dev/null | grep -E "\.{{Target}}$" | sort -u >> {{subdomainFile}} || true
+        awk -v target="{{Target}}" '
+          {
+            host=$0
+            lhost=tolower(host)
+            ltarget=tolower(target)
+            if (lhost == ltarget || (length(lhost) > length(ltarget) && substr(lhost, length(lhost) - length(ltarget), length(ltarget) + 1) == "." ltarget)) {
+              print host
+            }
+          }
+        ' {{nsAxfrSubsFile}} 2>/dev/null | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u > {{nsAxfrSubsFile}}.filtered || true
+        if [ -s "{{nsAxfrSubsFile}}.filtered" ]; then
+          cat {{nsAxfrSubsFile}}.filtered | anew -q {{subdomainFile}} 2>/dev/null || cat {{nsAxfrSubsFile}}.filtered >> {{subdomainFile}} 2>/dev/null || true
+        fi
+        rm -f {{nsAxfrSubsFile}}.filtered 2>/dev/null || true
       fi
       
       # Sort delegated zones
@@ -594,17 +631,27 @@ steps:
       services="_ldap._tcp _kerberos._tcp _kerberos._udp _xmpp-server._tcp _xmpp-client._tcp _imap._tcp _imaps._tcp _pop3._tcp _pop3s._tcp _smtp._tcp _sip._tcp _sip._udp _stun._tcp _stun._udp _h323cs._tcp _h323cs._udp _ftp._tcp _ssh._tcp _sips._tcp _sipfederationtls._tcp _gc._tcp _gc._udp _kerberos._tcp._dc _ldap._tcp._dc _kerberos._tcp.dc._msdcs _ldap._tcp.dc._msdcs _autodiscover._tcp"
       
       for svc in $services; do
-        result=$(dig +short ${svc}.{{Target}} SRV 2>/dev/null)
+        result=$(timeout {{srvQueryTimeout}} dig +time=3 +tries=1 +short ${svc}.{{Target}} SRV 2>/dev/null || true)
         if [ -n "$result" ]; then
           echo "${svc}.{{Target}} => $result" >> {{srvFile}}
           # Extract hostnames from SRV records
-          echo "$result" | awk '{print $4}' | sed 's/\.$//' | grep -E "{{Target}}$" >> {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt
+          echo "$result" | awk -v target="{{Target}}" '
+            {
+              host=$4
+              sub(/\.$/, "", host)
+              lhost=tolower(host)
+              ltarget=tolower(target)
+              if (lhost == ltarget || (length(lhost) > length(ltarget) && substr(lhost, length(lhost) - length(ltarget), length(ltarget) + 1) == "." ltarget)) {
+                print host
+              }
+            }
+          ' >> {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt
         fi
       done
       
       # Merge SRV subdomains into main file
       if [ -f "{{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt" ] && [ -s "{{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt" ]; then
-        sort -u {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt >> {{subdomainFile}} 2>/dev/null || true
+        sort -u {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt | anew -q {{subdomainFile}} 2>/dev/null || sort -u {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt >> {{subdomainFile}} 2>/dev/null || true
         rm -f {{Output}}/subdomain/srv-subs-{{TargetSpace}}.txt
       fi
     on_error:
@@ -634,18 +681,34 @@ steps:
         
         # Reverse DNS lookup for each IP
         prips "$cidr" 2>/dev/null | while read ip; do
-          ptr=$(dig +short -x "$ip" 2>/dev/null | head -1)
-          if [ -n "$ptr" ] && echo "$ptr" | grep -qE "{{Target}}$"; then
-            echo "$ptr" | sed 's/\.$//' >> {{ptrSweepFile}}
+          ptr=$(timeout {{ptrLookupTimeout}} dig +time=2 +tries=1 +short -x "$ip" 2>/dev/null | head -1 | sed 's/\.$//' || true)
+          if [ -n "$ptr" ]; then
+            printf '%s\n' "$ptr" | awk -v target="{{Target}}" '
+              {
+                lhost=tolower($0)
+                ltarget=tolower(target)
+                if (lhost == ltarget || (length(lhost) > length(ltarget) && substr(lhost, length(lhost) - length(ltarget), length(ltarget) + 1) == "." ltarget)) {
+                  print $0
+                }
+              }
+            ' >> {{ptrSweepFile}}
           fi
         done
       done < {{Output}}/ipspace/{{TargetSpace}}-range.txt
       
       # Filter and merge PTR subdomains
       if [ -s "{{ptrSweepFile}}" ]; then
-        grep -E "{{Target}}$" {{ptrSweepFile}} | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u > {{ptrSweepFile}}.filtered || true
+        awk -v target="{{Target}}" '
+          {
+            lhost=tolower($0)
+            ltarget=tolower(target)
+            if (lhost == ltarget || (length(lhost) > length(ltarget) && substr(lhost, length(lhost) - length(ltarget), length(ltarget) + 1) == "." ltarget)) {
+              print $0
+            }
+          }
+        ' {{ptrSweepFile}} 2>/dev/null | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u > {{ptrSweepFile}}.filtered || true
         mv {{ptrSweepFile}}.filtered {{ptrSweepFile}} 2>/dev/null || true
-        cat {{ptrSweepFile}} >> {{subdomainFile}} 2>/dev/null || true
+        cat {{ptrSweepFile}} | anew -q {{subdomainFile}} 2>/dev/null || cat {{ptrSweepFile}} >> {{subdomainFile}} 2>/dev/null || true
       fi
     on_error:
       - action: continue

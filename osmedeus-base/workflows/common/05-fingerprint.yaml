@@ -171,7 +171,7 @@ steps:
 
   - name: cmseek-scan
     type: foreach
-    pre_condition: '{{enableCmsScanner}} && file_exists("{{outputDir}}/cms/cms-targets.txt") && file_exists("{{cmseekPath}}")'
+    pre_condition: '{{enableCmsScanner}} && file_exists("{{outputDir}}/cms/cms-targets.txt") && (file_exists("{{cmseekPath}}") || file_exists(os_getenv("HOME") + "/Tools/CMSeeK/cmseek.py"))'
     log: "Running CMSeeK CMS detection"
     input: "{{outputDir}}/cms/cms-targets.txt"
     variable: url
@@ -179,7 +179,13 @@ steps:
     step:
       name: cmseek-single
       type: bash
-      command: 'cd {{toolsDir}}/CMSeeK && python3 cmseek.py -u [[url]] --batch -r 2>/dev/null || true'
+      command: |
+        CMSEEK_PATH="{{cmseekPath}}"
+        if [ ! -f "$CMSEEK_PATH" ] && [ -f "${HOME}/Tools/CMSeeK/cmseek.py" ]; then
+          CMSEEK_PATH="${HOME}/Tools/CMSeeK/cmseek.py"
+        fi
+        CMSEEK_DIR=$(dirname "$CMSEEK_PATH")
+        cd "$CMSEEK_DIR" && python3 "$CMSEEK_PATH" -u [[url]] --batch -r 2>/dev/null || true
     on_error:
       - action: continue
 

@@ -246,13 +246,13 @@ steps:
     command: |
       : > {{noerrorFile}}
       random_subdomain="${RANDOM}thistotallynotexist${RANDOM}.{{Target}}"
-      dns_response=$(echo "$random_subdomain" | timeout --foreground -k 1m dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
+      dns_response=$(echo "$random_subdomain" | timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -r {{ExternalData}}/mics/resolvers.txt -rcode noerror,nxdomain -retry 3 -silent 2>/dev/null | cut -d' ' -f2)
       if [ "$dns_response" = "[NXDOMAIN]" ]; then
         if [ -s "{{noerrorWordlist}}" ]; then
-         timeout --foreground -k 1m dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+         timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{noerrorWordlist}} -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
         else
           echo -e "www\nmail\nftp\ntest\nadmin\ndev\nstaging\napi\napp\nportal\nvpn\nremote\nblog\nshop\nstore\nsecure\nlogin\ndashboard\ncdn\nstatic\nassets" > {{Output}}/subdomain/noerror_wordlist.txt
-         timeout --foreground -k 1m dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{Output}}/subdomain/noerror_wordlist.txt -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
+         timeout --foreground -k 15s {{dnsExternalTimeout}} dnsx -d {{Target}} -r {{ExternalData}}/mics/resolvers.txt -silent -rcode noerror -w {{Output}}/subdomain/noerror_wordlist.txt -t {{noerrorThreads}} 2>/dev/null | cut -d' ' -f1 | anew -q {{noerrorFile}} || true
           rm -f {{Output}}/subdomain/noerror_wordlist.txt 2>/dev/null || true
         fi
         if [ -s "{{noerrorFile}}" ]; then
